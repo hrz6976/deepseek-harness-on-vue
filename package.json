@@ -1,0 +1,27 @@
+{
+  "name": "agentkit",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter @agentkit/web-demo dev",
+    "build": "bun run --filter @agentkit/web-demo build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter @agentkit/runtime test"
+  },
+  "dependencies": {
+    "@vue/reactivity": "3.5.41",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.0.4"
+  }
+}
