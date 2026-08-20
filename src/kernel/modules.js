@@ -16,6 +16,7 @@ import * as collector from './collector.js';
 import * as host from './host.js';
 import * as contrib from './contrib.js';
 import * as compile from './compile.js';
+import * as boot from './boot.js';
 
 export const modules = Object.freeze({
   'vue': Vue,
@@ -28,4 +29,5 @@ export const modules = Object.freeze({
   'kernel/host': host,
   'kernel/contrib': contrib,
   'kernel/compile': compile,
+  'kernel/boot': boot,
 });

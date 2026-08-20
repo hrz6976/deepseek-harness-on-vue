@@ -1,16 +1,15 @@
-// settings UI plugin: LLM connection config. Connect = mount the llm plugin
-// with a frozen cfg; disconnect = unmount it (service revoked, chat disables).
+// settings UI plugin: LLM connection config. Connect = ask the manager to
+// mount the llm plugin from .plugins/llm.js with the cfg as component props;
+// disconnect = unmount it, file kept (service revoked, chat disables).
 // Key lives in localStorage only — never OPFS (files are agent-readable).
 import { reactive, computed, onMounted, nextTick } from 'vue';
 import { useService } from '../../kernel/services.js';
-import { mountPlugin, unmountPlugin } from '../../kernel/host.js';
-import { makeLlmPlugin } from '../llm.js';
 import { useLayoutTarget } from '../../kernel/contrib.js';
 
 const LS = { baseURL: 'harness.baseURL', model: 'harness.model', apiKey: 'harness.apiKey', mock: 'harness.mock', auto: 'harness.autoconnect' };
 
 export const settingsPlugin = {
-  name: 'ui:settings',
+  name: 'settings',
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
@@ -33,6 +32,7 @@ export const settingsPlugin = {
     const target = useLayoutTarget('side');
     const llmSvc = useService('llm');
     const loopSvc = useService('loop');
+    const mgrSvc = useService('manager');
     const cfg = reactive({
       baseURL: localStorage.getItem(LS.baseURL) || '/proxy',
       model: localStorage.getItem(LS.model) || 'deepseek-v4-flash',
@@ -51,9 +51,9 @@ export const settingsPlugin = {
       localStorage.setItem(LS.apiKey, cfg.apiKey);
       localStorage.setItem(LS.mock, cfg.mock ? '1' : '0');
       localStorage.setItem(LS.auto, '1');
-      mountPlugin('llm', makeLlmPlugin({ ...cfg }), { builtin: true });
+      mgrSvc.value?.mount('llm', { cfg: { ...cfg } });
     };
-    const disconnect = () => { localStorage.setItem(LS.auto, '0'); unmountPlugin('llm'); };
+    const disconnect = () => { localStorage.setItem(LS.auto, '0'); mgrSvc.value?.unmount('llm'); };
 
     // Auto-reconnect on boot when the user was connected last session — a
     // refresh restores plugins AND the connection. Deferred past the initial
@@ -66,3 +66,5 @@ export const settingsPlugin = {
     return { target, cfg, connected, running, engineName, viaProxy, connect, disconnect };
   },
 };
+
+export default settingsPlugin;

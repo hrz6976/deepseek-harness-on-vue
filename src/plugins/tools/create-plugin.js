@@ -5,7 +5,7 @@
 // removed all disposer discipline from the agent's job.
 import { services } from '../../kernel/services.js';
 
-const RECIPE = `You can build yourself new capabilities with create_plugin (self-modifying). A plugin is a Vue component object; its source is persisted and auto-restored after refresh, and editing .plugins/<name>.js triggers hot reload. Dialect (STRICT): exactly one \`export default {...}\`, NO import statements, NO top-level await.
+const RECIPE = `You can build yourself new capabilities with create_plugin (self-modifying). A plugin is a Vue component object; its source is persisted and auto-restored after refresh, and editing .plugins/<name>.js triggers hot reload. EVERYTHING in .plugins/ is a plugin like this — including the core ones you are running on (loop, chat, the tools themselves). Read them as working examples with file_editor (e.g. view .plugins/run-js.js), and edit them to change your own behavior. Dialect (STRICT): exactly one \`export default {...}\`; NO top-level await; imports are optional (\`__harness.*\` works with zero imports) and limited to single-line static imports of: 'vue', 'kernel/services', 'kernel/bus', 'kernel/log', 'kernel/contrib', 'kernel/host', 'kernel/collector'. NEVER import one plugin from another — share through services.
 
 export default {
   name: 'my-plugin',
@@ -33,7 +33,7 @@ Key points:
 - Remove a plugin with remove_plugin.`;
 
 export const createPluginPlugin = {
-  name: 'tool:create-plugin',
+  name: 'create-plugin',
   template: `
     <AgentTool name="create_plugin" :description="description" :parameters="parameters" :run="run" />
     <PromptSection name="create-plugin" :order="30" :text="recipe" />
@@ -56,3 +56,5 @@ export const createPluginPlugin = {
     return { description, parameters, recipe: RECIPE, run };
   },
 };
+
+export default createPluginPlugin;

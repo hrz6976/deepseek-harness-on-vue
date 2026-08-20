@@ -4,7 +4,7 @@
 import { services } from '../../kernel/services.js';
 
 export const fileEditorPlugin = {
-  name: 'tool:file-editor',
+  name: 'file-editor',
   template: `
     <AgentTool name="file_editor" :description="description" :parameters="parameters" :run="run" />
     <PromptSection name="file-editor" :order="10" :text="guidance" />
@@ -25,6 +25,7 @@ export const fileEditorPlugin = {
       'Manage files with file_editor: list to see what exists, write to create, view to check contents, str_replace for local edits.',
       'View a file before modifying it.',
       'If the user asks for a web page/game/tool, put ALL code in a single index.html (inline <style> and <script>) so it can be previewed directly.',
+      'Files under .plugins/ are the running plugins — core and agent-created alike. Editing one hot-reloads it (a broken edit is rejected and the old version keeps running).',
     ].join('\n');
 
     async function run({ command, path, content, old_str, new_str }) {
@@ -45,3 +46,5 @@ export const fileEditorPlugin = {
     return { description, parameters, guidance, run };
   },
 };
+
+export default fileEditorPlugin;

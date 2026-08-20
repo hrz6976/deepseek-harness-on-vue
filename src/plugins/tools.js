@@ -38,3 +38,5 @@ export const toolsPlugin = {
     return () => null;
   },
 };
+
+export default toolsPlugin;

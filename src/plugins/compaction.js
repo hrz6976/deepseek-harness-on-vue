@@ -216,3 +216,5 @@ export const compactionPlugin = {
     return () => null;
   },
 };
+
+export default compactionPlugin;

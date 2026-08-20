@@ -7,7 +7,7 @@ import { useLayoutTarget } from '../../kernel/contrib.js';
 function tryParse(s) { try { return JSON.parse(s); } catch { return {}; } }
 
 export const chatPlugin = {
-  name: 'ui:chat',
+  name: 'chat',
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
@@ -105,3 +105,5 @@ export const chatPlugin = {
              compaction, compacting, ctxInfo, compactNow };
   },
 };
+
+export default chatPlugin;

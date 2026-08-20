@@ -5,7 +5,7 @@ import { entries } from '../../kernel/log.js';
 import { useLayoutTarget } from '../../kernel/contrib.js';
 
 export const syslogPlugin = {
-  name: 'ui:syslog',
+  name: 'syslog',
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
@@ -20,3 +20,5 @@ export const syslogPlugin = {
     return { target, entries, el };
   },
 };
+
+export default syslogPlugin;

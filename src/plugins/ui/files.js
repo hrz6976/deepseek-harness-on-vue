@@ -4,7 +4,7 @@ import { useService } from '../../kernel/services.js';
 import { useLayoutTarget } from '../../kernel/contrib.js';
 
 export const filesPlugin = {
-  name: 'ui:files',
+  name: 'files',
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
@@ -23,3 +23,5 @@ export const filesPlugin = {
     return { target, fsSvc, selected, fileList, content };
   },
 };
+
+export default filesPlugin;

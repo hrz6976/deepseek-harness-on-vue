@@ -6,7 +6,7 @@
 import { services } from '../../kernel/services.js';
 
 export const readStatePlugin = {
-  name: 'tool:read-state',
+  name: 'read-state',
   template: `
     <AgentTool name="read_state" :description="description" :parameters="parameters" :run="run" />
     <PromptSection name="read-state" :order="35" :text="index" />
@@ -35,3 +35,5 @@ export const readStatePlugin = {
     return { description, parameters, run, index };
   },
 };
+
+export default readStatePlugin;

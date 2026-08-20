@@ -31,3 +31,5 @@ export const promptPlugin = {
     return () => null;
   },
 };
+
+export default promptPlugin;

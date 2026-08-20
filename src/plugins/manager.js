@@ -1,32 +1,31 @@
-// manager plugin: dynamic (agent-created) plugin lifecycle — create/remove,
-// OPFS persistence, boot restore, and HMR. Editing .plugins/<name>.js through
-// the fs service triggers a reload; the reactive fs cache is itself the
-// change signal (no watcher machinery beyond a Vue watch on the cache entry).
+// manager plugin: plugin lifecycle POLICY — create/remove/mount/unmount and
+// HMR. The boot-time loading itself lives in kernel/boot.js (the kernel seeds
+// and mounts; this plugin governs changes afterwards). Editing any
+// .plugins/<name>.js through the fs service triggers a hot reload; the
+// reactive fs cache is itself the change signal. Since the manager is loaded
+// from .plugins/ too, it can hot-reload ITSELF: the old instance's watchers
+// stop on unmount and the new instance re-attaches from fs.list().
 import { watch, onUnmounted } from 'vue';
 import { services, provideService } from '../kernel/services.js';
 import { bus } from '../kernel/bus.js';
 import { log } from '../kernel/log.js';
 import { compilePlugin } from '../kernel/compile.js';
 import { plugins, mountPlugin, unmountPlugin } from '../kernel/host.js';
-
-export const PLUGIN_DIR = '.plugins/';
-const FORMAT_FILE = PLUGIN_DIR + '.format';
-// Bump when the pinned plugin dialect changes (see kernel/compile.js), so a
-// pre-change OPFS survivor can't brick the boot restore.
-export const PLUGIN_FORMAT_VERSION = '1';
+import { PLUGIN_DIR } from '../kernel/boot.js';
 
 export const managerPlugin = {
   name: 'manager',
   setup() {
-    const loaded = new Map();   // name -> { source } currently mounted (HMR diff baseline)
+    const loaded = new Map();   // name -> { source } baseline (HMR diff + own-write dedupe)
     const watchers = new Map(); // name -> watch stop handle
     const debounceTimers = new Map();
+    const fsSvc = () => services.get('fs')?.value;
 
-    function loadAndMount(name, source, def) {
+    function loadAndMount(name, source, def, config) {
       clearTimeout(debounceTimers.get(name)); // cancel any HMR timer our own write scheduled — avoids a double mount
       const entry = plugins.find(p => p.name === name);
-      if (entry) { entry.def = def; entry.version++; entry.status = 'active'; entry.error = ''; entry.hmrError = ''; }
-      else mountPlugin(name, def, { builtin: false });
+      if (entry) { entry.def = def; entry.version++; entry.status = 'active'; entry.error = ''; entry.hmrError = ''; if (config !== undefined) entry.config = config; }
+      else mountPlugin(name, def, { config: config ?? null });
       loaded.set(name, { source });
       attachWatcher(name);
     }
@@ -35,21 +34,44 @@ export const managerPlugin = {
       if (watchers.has(name)) return;
       const path = PLUGIN_DIR + name + '.js';
       const stop = watch(
-        () => services.get('fs')?.value?.read(path),
+        () => fsSvc()?.read(path),
         content => {
           if (content == null) return; // deletion is handled by remove()
           if (loaded.get(name)?.source === content) return; // unchanged (our own write) — skip
           clearTimeout(debounceTimers.get(name));
-          debounceTimers.set(name, setTimeout(() => reload(name, content), 300));
+          debounceTimers.set(name, setTimeout(() => scheduleReload(name, content), 300));
         },
       );
       watchers.set(name, stop);
     }
 
+    // A reload mid-run would remount live machinery under the agent's feet
+    // (the loop itself, chat, a tool the model already selected) — defer ALL
+    // reloads until the run ends, then flush.
+    const pendingReloads = new Map(); // name -> content
+    let stopFlush = null;
+    function scheduleReload(name, content) {
+      if (services.get('loop')?.value?.running?.value) {
+        pendingReloads.set(name, content);
+        stopFlush ??= watch(() => services.get('loop')?.value?.running?.value, running => {
+          if (running) return;
+          stopFlush?.(); stopFlush = null;
+          const batch = [...pendingReloads]; pendingReloads.clear();
+          for (const [n, c] of batch) reload(n, c);
+        });
+        log(`HMR: [${name}] changed during a run — reload deferred until the run ends`, 'warn');
+        return;
+      }
+      reload(name, content);
+    }
+
     // HMR rollback semantics: compile-probe first (module top-level errors are
     // caught there); only then swap def + version++ (key change = clean whole
     // remount). Compile failure -> the OLD version keeps running, hmrError set.
+    // A plugin that is present on disk but NOT mounted (llm while disconnected)
+    // only gets its baseline refreshed — no surprise configless mount.
     async function reload(name, content) {
+      if (!plugins.find(p => p.name === name)) { loaded.set(name, { source: content }); return; }
       try {
         const def = await compilePlugin(name, content);
         loadAndMount(name, content, def);
@@ -63,64 +85,78 @@ export const managerPlugin = {
     }
 
     provideService('manager', {
-      list: () => [...loaded.keys()],
+      list: () => [...loaded.keys()], // every managed FILE (mounted or not); the plugins array is the mounted truth
       async create(name, source) {
         if (!/^[a-z][a-z0-9_-]*$/i.test(name || '')) return 'Error: name must start with a letter, only letters/digits/-/_';
         let def;
         try { def = await compilePlugin(name, source); } // probe first: a broken source is never mounted or persisted
         catch (e) { return `Error: plugin ${name} failed to compile: ${e.message}`; }
-        const fs = services.get('fs')?.value;
-        if (fs) {
-          if (fs.read(FORMAT_FILE) == null) await fs.write(FORMAT_FILE, PLUGIN_FORMAT_VERSION);
-          await fs.write(PLUGIN_DIR + name + '.js', source); // the self-modification, persisted
-        }
+        const fs = fsSvc();
+        if (fs) await fs.write(PLUGIN_DIR + name + '.js', source); // the self-modification, persisted
         loadAndMount(name, source, def);
         return `plugin ${name} compiled and mounted; its tools/UI/prompt sections are live now`;
       },
+      // mount/unmount without touching the file — the connect/disconnect
+      // lifecycle (settings uses this for llm, passing the connection config
+      // through as component props via PluginHost).
+      async mount(name, config) {
+        const source = fsSvc()?.read(PLUGIN_DIR + name + '.js');
+        if (source == null) return `Error: no source at ${PLUGIN_DIR + name + '.js'}`;
+        try {
+          const def = await compilePlugin(name, source);
+          loadAndMount(name, source, def, config ?? null);
+          return `plugin ${name} mounted`;
+        } catch (e) { return `Error: plugin ${name} failed to compile: ${e.message}`; }
+      },
+      unmount(name) {
+        if (!unmountPlugin(name)) return `Error: plugin ${name} is not mounted`;
+        return `plugin ${name} unmounted (file kept)`;
+      },
       async remove(name) {
-        if (!loaded.has(name)) {
-          // Not running (e.g. corrupt source failed boot restore) but the file
-          // lingers -> allow cleanup, or it haunts every boot forever.
-          const fs0 = services.get('fs')?.value;
+        if (!plugins.find(p => p.name === name)) {
+          // Not running (corrupt source failed boot, or unmounted llm) but the
+          // file lingers -> allow cleanup, or it haunts every boot forever.
+          const fs0 = fsSvc();
           if (fs0?.read(PLUGIN_DIR + name + '.js') != null) {
             await fs0.remove(PLUGIN_DIR + name + '.js');
-            return `plugin ${name} was not running (corrupt source); its leftover file was deleted`;
+            loaded.delete(name);
+            watchers.get(name)?.(); watchers.delete(name);
+            return `plugin ${name} was not running; its file was deleted`;
           }
-          return `Error: dynamic plugin ${name} does not exist (current: ${[...loaded.keys()].join(', ') || 'none'})`;
+          return `Error: plugin ${name} does not exist (mounted: ${plugins.map(p => p.name).join(', ') || 'none'})`;
         }
         loaded.delete(name);
         watchers.get(name)?.(); watchers.delete(name);
         clearTimeout(debounceTimers.get(name));
+        pendingReloads.delete(name);
         unmountPlugin(name);
-        const fs = services.get('fs')?.value;
+        const fs = fsSvc();
         if (fs) await fs.remove(PLUGIN_DIR + name + '.js');
+        // A shipped (core) plugin's file will be RESEEDED from the bundled
+        // default on next boot — remove = "gone now, factory copy on refresh".
         return `plugin ${name} unmounted; its tools/UI/listeners are gone`;
       },
     });
 
-    // Boot restore: bring back what the agent built last session.
+    // Adopt what boot (or a previous manager instance, on self-HMR) loaded:
+    // baseline every existing .plugins/ file and watch it. Unmounted files
+    // (llm while disconnected, boot-skipped corrupt sources) get baselines
+    // too, so a later edit is detected without being surprise-mounted.
     (async () => {
-      const fs = services.get('fs')?.value;
+      const fs = fsSvc();
       if (!fs) return;
       await fs.ready;
-      const format = fs.read(FORMAT_FILE);
-      if (format != null && format.trim() !== PLUGIN_FORMAT_VERSION) {
-        log(`stored plugins use format ${format.trim()}, this build wants ${PLUGIN_FORMAT_VERSION} — skipping restore (files kept)`, 'err');
-        return;
-      }
       for (const p of fs.list().filter(p => p.startsWith(PLUGIN_DIR) && p.endsWith('.js'))) {
         const name = p.slice(PLUGIN_DIR.length, -3);
-        try {
-          const def = await compilePlugin(name, fs.read(p));
-          loadAndMount(name, fs.read(p), def);
-          log(`restored dynamic plugin ${name} from OPFS`, 'ok');
-        } catch (e) { log(`failed to restore plugin ${name}: ${e.message} (remove_plugin can clean it up)`, 'err'); }
+        if (!loaded.has(name)) loaded.set(name, { source: fs.read(p) });
+        attachWatcher(name);
       }
     })();
 
     onUnmounted(() => {
       for (const stop of watchers.values()) stop();
       watchers.clear();
+      stopFlush?.(); stopFlush = null;
       for (const t of debounceTimers.values()) clearTimeout(t);
       debounceTimers.clear();
       log('manager plugin unmounted', 'warn');
@@ -128,3 +164,5 @@ export const managerPlugin = {
     return () => null;
   },
 };
+
+export default managerPlugin;

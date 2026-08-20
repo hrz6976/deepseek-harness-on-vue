@@ -121,3 +121,5 @@ export const loopPlugin = {
     return () => null;
   },
 };
+
+export default loopPlugin;

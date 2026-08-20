@@ -149,20 +149,29 @@ function makeMockEngine() {
 }
 
 // ---- the plugin -------------------------------------------------------------
-export function makeLlmPlugin(cfg) {
-  return {
-    name: 'llm',
-    setup() {
-      const mock = !!cfg.mock;
-      const engineName = ref(mock ? 'mock engine (offline)' : `pi-ai · ${cfg.model}`);
-      const engine = mock ? makeMockEngine() : makePiEngine(cfg);
-      provideService('llm', {
-        engineName,
-        contextWindow: cfg.contextWindow || CONTEXT_WINDOW,
-        stream: req => engine(req),
-      });
-      onUnmounted(() => log('llm plugin unmounted', 'warn'));
-      return () => null;
-    },
-  };
+function setupLlm(cfg) {
+  const mock = !!cfg.mock;
+  const engineName = ref(mock ? 'mock engine (offline)' : `pi-ai · ${cfg.model}`);
+  const engine = mock ? makeMockEngine() : makePiEngine(cfg);
+  provideService('llm', {
+    engineName,
+    contextWindow: cfg.contextWindow || CONTEXT_WINDOW,
+    stream: req => engine(req),
+  });
+  onUnmounted(() => log('llm plugin unmounted', 'warn'));
+  return () => null;
 }
+
+// Mounted ON DEMAND (autoMount:false in the defaults manifest): settings
+// calls manager.mount('llm', { cfg }) on connect, and PluginHost hands the
+// config through as props — that is how a from-OPFS plugin receives runtime
+// configuration. cfg stays closure/props-captured; the service exposes no
+// getter to it.
+export default {
+  name: 'llm',
+  props: { cfg: Object },
+  setup: props => setupLlm(props.cfg ?? {}),
+};
+
+// Test/embedding face: same plugin with the config frozen in.
+export const makeLlmPlugin = cfg => ({ name: 'llm', setup: () => setupLlm(cfg) });

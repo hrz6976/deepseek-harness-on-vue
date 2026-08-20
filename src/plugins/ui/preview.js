@@ -4,7 +4,7 @@ import { useService } from '../../kernel/services.js';
 import { useLayoutTarget } from '../../kernel/contrib.js';
 
 export const previewPlugin = {
-  name: 'ui:preview',
+  name: 'preview',
   template: `
   <Teleport v-if="target && html" :to="target">
     <div class="panel">
@@ -21,3 +21,5 @@ export const previewPlugin = {
     return { target, show, html };
   },
 };
+
+export default previewPlugin;

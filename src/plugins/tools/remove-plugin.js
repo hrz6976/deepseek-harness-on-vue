@@ -2,10 +2,10 @@
 import { services } from '../../kernel/services.js';
 
 export const removePluginPlugin = {
-  name: 'tool:remove-plugin',
+  name: 'remove-plugin',
   template: `<AgentTool name="remove_plugin" :description="description" :parameters="parameters" :run="run" />`,
   setup() {
-    const description = 'Unmount a dynamic plugin the agent previously created, reclaiming ALL its effects (tools, UI, prompt sections, event listeners, timers)';
+    const description = 'Unmount a plugin and delete its .plugins/ file, reclaiming ALL its effects (tools, UI, prompt sections, event listeners, timers). Works on agent-created and core plugins alike; a removed CORE plugin comes back at factory state on the next page refresh (reseeded). Careful: removing infrastructure you are using (loop, chat, this tool) breaks it immediately.';
     const parameters = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
     async function run({ name }) {
       const mgr = services.get('manager')?.value;
@@ -15,3 +15,5 @@ export const removePluginPlugin = {
     return { description, parameters, run };
   },
 };
+
+export default removePluginPlugin;

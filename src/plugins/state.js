@@ -40,3 +40,5 @@ export const statePlugin = {
     return () => null;
   },
 };
+
+export default statePlugin;

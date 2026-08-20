@@ -1,7 +1,7 @@
 // run_js tool plugin: executes JavaScript in a throwaway Web Worker,
 // returning console output. 5s timeout.
 export const runJsPlugin = {
-  name: 'tool:run-js',
+  name: 'run-js',
   template: `
     <AgentTool name="run_js" :description="description" :parameters="parameters" :run="run" />
     <PromptSection name="run-js" :order="20" text="Use run_js to execute JavaScript when you need to verify logic, compute something, or debug." />
@@ -32,3 +32,5 @@ export const runJsPlugin = {
     return { description, parameters, run };
   },
 };
+
+export default runJsPlugin;
