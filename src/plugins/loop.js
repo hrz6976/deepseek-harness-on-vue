@@ -7,7 +7,7 @@ import { reactive, ref, onUnmounted } from 'vue';
 import { services, provideService } from '../kernel/services.js';
 import { bus } from '../kernel/bus.js';
 import { log } from '../kernel/log.js';
-import { usePromptSection } from './prompt.js';
+import { usePromptSection } from '../kernel/contrib.js';
 
 // Failsafe kill switch ONLY, not a control mechanism: Stop aborts for real,
 // and the compaction plugin keeps context bounded. This exists so a wedged

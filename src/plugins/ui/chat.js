@@ -2,7 +2,7 @@
 // thinking, tool cards forming during the stream, stop button.
 import { ref, computed, watch, nextTick } from 'vue';
 import { useService } from '../../kernel/services.js';
-import { useLayoutTarget } from './layout.js';
+import { useLayoutTarget } from '../../kernel/contrib.js';
 
 function tryParse(s) { try { return JSON.parse(s); } catch { return {}; } }
 

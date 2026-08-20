@@ -2,7 +2,7 @@
 // every self-modification the agent performs — the human-visible audit trail).
 import { ref, watch, nextTick } from 'vue';
 import { entries } from '../../kernel/log.js';
-import { useLayoutTarget } from './layout.js';
+import { useLayoutTarget } from '../../kernel/contrib.js';
 
 export const syslogPlugin = {
   name: 'ui:syslog',

@@ -5,7 +5,7 @@ import { reactive, computed, onMounted, nextTick } from 'vue';
 import { useService } from '../../kernel/services.js';
 import { mountPlugin, unmountPlugin } from '../../kernel/host.js';
 import { makeLlmPlugin } from '../llm.js';
-import { useLayoutTarget } from './layout.js';
+import { useLayoutTarget } from '../../kernel/contrib.js';
 
 const LS = { baseURL: 'harness.baseURL', model: 'harness.model', apiKey: 'harness.apiKey', mock: 'harness.mock', auto: 'harness.autoconnect' };
 

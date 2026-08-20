@@ -1,31 +1,15 @@
-// prompt: system-prompt fragments as contributions. Mirrors the harness's
-// PromptSection { text: string | ((ctx) => string) }. The loop assembles the
-// prompt from collected sections at request time (the PoC hardcoded the
-// prompt inside the loop; this is the fix).
+// prompt: system-prompt assembly SERVICE. Sections register through the
+// kernel contribution ABI (<PromptSection> / usePromptSection in
+// kernel/contrib.js) into the kernel's 'prompt section' collector; this
+// plugin owns only the assembly policy, so reloading it never drops the
+// registered sections. The loop assembles the prompt at request time (the
+// PoC hardcoded the prompt inside the loop; this is the fix).
 import { onUnmounted } from 'vue';
-import { createCollector } from '../kernel/collector.js';
+import { getCollector } from '../kernel/collector.js';
 import { provideService } from '../kernel/services.js';
 import { log } from '../kernel/log.js';
 
-const sections = createCollector('prompt section');
-
-export function usePromptSection(def) {
-  const { name, order = 50, text } = def;
-  return sections.add(name, { order, text });
-}
-
-export const PromptSection = {
-  name: 'PromptSection',
-  props: {
-    name: { type: String, required: true },
-    order: { type: Number, default: 50 },
-    text: { type: [String, Function], required: true }, // prose in props, never slot text
-  },
-  setup(props) {
-    usePromptSection(props);
-    return () => null;
-  },
-};
+const sections = getCollector('prompt section');
 
 export const promptPlugin = {
   name: 'prompt',

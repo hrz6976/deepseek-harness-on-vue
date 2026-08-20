@@ -1,7 +1,7 @@
 // files UI plugin: virtual filesystem browser (OPFS-persisted).
 import { ref, computed } from 'vue';
 import { useService } from '../../kernel/services.js';
-import { useLayoutTarget } from './layout.js';
+import { useLayoutTarget } from '../../kernel/contrib.js';
 
 export const filesPlugin = {
   name: 'ui:files',

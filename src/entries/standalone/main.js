@@ -7,9 +7,10 @@ import { services, provideService, useService } from '../../kernel/services.js';
 import { bus, useBusOn, useToolGuard, useRequestTransform } from '../../kernel/bus.js';
 import { log } from '../../kernel/log.js';
 import { plugins, mountPlugin, unmountPlugin, PluginHost } from '../../kernel/host.js';
+import { AgentTool, PromptSection, useTool, usePromptSection, useLayoutTarget } from '../../kernel/contrib.js';
 import { fsPlugin } from '../../plugins/fs.js';
-import { toolsPlugin, AgentTool, useTool } from '../../plugins/tools.js';
-import { promptPlugin, PromptSection, usePromptSection } from '../../plugins/prompt.js';
+import { toolsPlugin } from '../../plugins/tools.js';
+import { promptPlugin } from '../../plugins/prompt.js';
 import { managerPlugin } from '../../plugins/manager.js';
 import { statePlugin } from '../../plugins/state.js';
 import { loopPlugin } from '../../plugins/loop.js';
@@ -74,7 +75,7 @@ app.provide('log', log);
 // across the shipped/self-modified boundary or reactivity silently breaks.
 globalThis.__harness = Object.freeze({
   Vue, services, bus, log,
-  useService, useBusOn, useToolGuard, useRequestTransform, useTool, usePromptSection,
+  useService, useBusOn, useToolGuard, useRequestTransform, useTool, usePromptSection, useLayoutTarget,
   mountPlugin, unmountPlugin,
 });
 

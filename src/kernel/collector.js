@@ -36,3 +36,15 @@ export function createCollector(kind) {
     snapshot: () => new Map([...entries].map(([name, t]) => [name, t.def])),
   };
 }
+
+// Kind-keyed singletons: a collector must outlive the plugin modules that use
+// it. Plugins load (and RELOAD) from OPFS source — a collector held at plugin-
+// module scope would be re-created on reload as an empty map, orphaning every
+// other plugin's registrations. createCollector stays exported for tests that
+// want a private instance.
+const registry = new Map();
+export function getCollector(kind) {
+  let c = registry.get(kind);
+  if (!c) { c = createCollector(kind); registry.set(kind, c); }
+  return c;
+}
