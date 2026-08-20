@@ -1,2 +1,5 @@
 # Reference repositories (cloned for local inspection only)
 ref_repos/
+
+node_modules/
+dist/

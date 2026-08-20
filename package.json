@@ -1,0 +1,21 @@
+{
+  "name": "deepseek-harness-on-vue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Modular self-modifying agent harness: cordis/deepseek-harness concepts translated to Vue primitives",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "serve": "node serve.mjs",
+    "dev": "node build.mjs --watch --serve",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
