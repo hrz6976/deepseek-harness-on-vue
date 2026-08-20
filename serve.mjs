@@ -18,7 +18,11 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
 const ROOT = fileURLToPath(new URL('./dist/', import.meta.url));
-const PORT = Number(process.argv[2] || process.env.PORT || 7100);
+// `serve.mjs` can be imported by build.mjs, so process.argv also contains
+// build flags such as `--watch` and `--serve`. Only treat a numeric argument
+// as a positional port; otherwise fall back to PORT and the default.
+const portArg = process.argv.slice(2).find(arg => /^\d+$/.test(arg));
+const PORT = Number(portArg || process.env.PORT || 7100);
 
 const PI_TARGETS = { deepseek: 'https://api.deepseek.com', 'opencode-go': 'https://opencode.ai/zen/go/v1' };
 async function loadPiCredential() {
