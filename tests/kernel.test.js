@@ -5,9 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bus } from '../src/kernel/bus.js';
-import { createCollector } from '../src/kernel/collector.js';
+import { createCollector, getCollector } from '../src/kernel/collector.js';
 import { services, provideService } from '../src/kernel/services.js';
-import { translateESM, normalizePluginDef } from '../src/kernel/compile.js';
+import { translateESM, normalizePluginDef, rewriteImports } from '../src/kernel/compile.js';
 import { makeExposeCapture, exposedStates } from '../src/kernel/host.js';
 import { serializeState } from '../src/plugins/state.js';
 import { ref, proxyRefs } from 'vue';
@@ -66,6 +66,16 @@ test('collector: snapshot is frozen against later changes', () => {
   assert.deepEqual(c.names(), ['b']);
 });
 
+test('getCollector: kind-keyed singleton — contributions survive a module reload', () => {
+  // Simulates what happens when a plugin file reloads from OPFS: the new
+  // module instance calls getCollector again and MUST see the same map.
+  const first = getCollector('test-kind');
+  first.add('survivor', { v: 1 }, 'other-plugin');
+  const second = getCollector('test-kind'); // "reloaded module" asks again
+  assert.equal(second, first);
+  assert.equal(second.get('survivor').v, 1);
+});
+
 test('services: cleanup is token-guarded too', () => {
   const disposeOld = provideService('svc-x', { who: 'old' });
   provideService('svc-x', { who: 'new' }); // replacement provided before old disposes
@@ -84,6 +94,40 @@ test('translateESM: the pinned dialect survives the new Function fallback', () =
   new Function('module', 'exports', translateESM(src))(mod, mod.exports);
   const def = normalizePluginDef({ default: mod.exports }, 'p');
   assert.equal(def.setup().n, 42);
+});
+
+test('rewriteImports: named/aliased, namespace, and default forms hit the registry', () => {
+  const out = rewriteImports([
+    `// leading comment`,
+    ``,
+    `import { ref, watch as w } from 'vue';`,
+    `import * as pi from '@earendil-works/pi-ai';`,
+    `import services from '../kernel/services.js';`,
+    `export default { setup() {} };`,
+  ].join('\n'));
+  const M = `globalThis.__harness.modules`;
+  assert.ok(out.includes(`const { ref, watch: w } = ${M}["vue"];`));
+  assert.ok(out.includes(`const pi = ${M}["@earendil-works/pi-ai"];`));
+  assert.ok(out.includes(`= ${M}["kernel/services"].default ?? ${M}["kernel/services"];`));
+  assert.ok(out.includes(`export default { setup() {} };`)); // body untouched
+});
+
+test('rewriteImports: kernel paths normalize from any depth', () => {
+  const a = rewriteImports(`import { log } from '../kernel/log.js';\n`);
+  const b = rewriteImports(`import { log } from '../../kernel/log.js';\n`);
+  assert.equal(a, b);
+  assert.ok(a.includes(`["kernel/log"]`));
+});
+
+test('rewriteImports: unknown and cross-plugin specifiers fail loud, listing the registry', () => {
+  assert.throws(() => rewriteImports(`import { x } from './other-plugin.js';\n`), /unknown import.*plugins may import only.*kernel\/services/s);
+  assert.throws(() => rewriteImports(`import 'side-effect';\n`), /unsupported import/);
+  assert.throws(() => rewriteImports(`import { a,\n b } from 'vue';\n`), /unsupported import/); // multi-line pinned out
+});
+
+test('rewriteImports: only the leading block is touched — template-literal import text survives', () => {
+  const src = `const recipe = \`\nimport { evil } from 'nowhere';\n\`;\nexport default { setup() {} };`;
+  assert.equal(rewriteImports(src), src); // byte-identical: no leading imports at all
 });
 
 test('expose capture: only explicit expose() opts in; unmount cleans up', () => {
