@@ -1,0 +1,41 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; }
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: #292a2d;
+  background: #fafaf9;
+  font: 14px/1.5 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button { font: inherit; }
+iframe { width: 100%; min-height: 0; flex: 1; border: 0; }
+#site-access { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #eadfc8; background: #fffaf0; }
+#site-access[hidden] { display: none; }
+#site-access span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#site-access button, dialog button { border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+#site-access button { flex: none; border: 1px solid #202124; color: white; background: #202124; font-weight: 600; }
+#site-access button:hover:not(:disabled), dialog .primary:hover { background: #38393c; }
+button:focus-visible { outline: 2px solid rgb(47 94 229 / 30%); outline-offset: 2px; }
+button:disabled { cursor: wait; opacity: .65; }
+
+dialog {
+  width: min(360px, calc(100% - 32px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid #deddd9;
+  border-radius: 16px;
+  color: #292a2d;
+  background: #fff;
+  box-shadow: 0 24px 64px rgb(20 20 18 / 22%);
+}
+dialog::backdrop { background: rgb(24 24 22 / 28%); backdrop-filter: blur(2px); }
+dialog form { padding: 20px; }
+dialog h2 { margin: 0; font-size: 18px; font-weight: 670; letter-spacing: -.02em; }
+dialog p { margin: 10px 0 22px; color: #626469; white-space: pre-wrap; overflow-wrap: anywhere; }
+dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
+dialog button { border: 1px solid #d8d7d3; color: #414348; background: #fff; }
+dialog .primary { border-color: #202124; color: #fff; background: #202124; font-weight: 600; }
+dialog.danger .primary { border-color: #a93e3e; background: #a93e3e; }
+dialog.danger .primary:hover { background: #913434; }

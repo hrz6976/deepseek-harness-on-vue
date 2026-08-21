@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Legacy Fleet Console</title>
+    <style>
+      body { margin: 0; color: #000080; background: #d4d0c8; font: 12px Arial, sans-serif; }
+      table { border-collapse: collapse; width: 100%; }
+      td, th { border: 2px inset #eee; padding: 3px; }
+      .toolbar { padding: 4px; border-bottom: 2px groove #fff; }
+      marquee { color: red; background: yellow; }
+    </style>
+  </head>
+  <body>
+    <marquee>班车调度系统 — 请使用 Internet Explorer 6.0，分辨率 1024×768</marquee>
+    <div class="toolbar"><button>刷新</button><button>导出 Excel</button><select><option>全部线路</option></select></div>
+    <table id="schedule">
+      <thead><tr><th>编号</th><th>线路</th><th>时间</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>
+        <tr><td>001</td><td>马池口 → 西二旗</td><td>07:30</td><td><font color="green">正常</font></td><td><a href="#detail-001">详细</a></td></tr>
+        <tr><td>002</td><td>马池口 → 望京</td><td>08:00</td><td><font color="red">晚点</font></td><td><a href="#detail-002">详细</a></td></tr>
+      </tbody>
+    </table>
+  </body>
+</html>

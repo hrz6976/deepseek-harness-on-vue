@@ -1,22 +1,53 @@
-# deepseek-harness-on-vue
+# Harness Page Agent
 
-A modular, self-modifying agent harness whose kernel demonstrates how cordis / deepseek-harness core concepts translate to Vue primitives. The agent (DeepSeek via pi-ai) can build itself new plugins at runtime — tools, UI panels, prompt sections — which persist to OPFS, hot-reload on edit, and roll back on broken source.
+一个 TypeScript + Vue 的自修改 agent runtime，同时提供 standalone 演示和 Chrome Manifest V3 扩展。扩展允许用户通过 LLM 对话读取网页、选取并批注元素、预览/应用/验证/撤销 DOM 补丁，以及把确认后的补丁保存为站点 recipe。
+
+## 工程命令
 
 ```bash
 npm install
-npm run build        # esbuild → dist/
-node serve.mjs 7100  # static dist/ + /proxy → api.deepseek.com (CORS)
-npm test             # kernel logic tests (node:test, no browser)
-npm run dev          # watch + serve in one process
+npm run check              # strict typecheck + tests + 扩展、standalone、宿主页构建
+npm run build              # Chrome 扩展 → dist/extension
+npm run build:standalone   # standalone → dist/standalone
+npm run build:fixtures     # legacy + React 19 宿主页 → dist/fixtures
+npm run dev                # CRXJS + Vite 扩展开发模式
+npm run dev:fixtures       # 本地宿主页：/legacy-host/ 与 /react-host/
+npm test                   # node:test；包含内容脚本 DOM 集成测试
 ```
 
-Open http://localhost:7100 — connect with an API key (Base URL `/proxy`), or tick **mock engine** for a keyless offline demo. If `pi` is installed locally, serve.mjs picks up `~/.pi/agent/auth.json` automatically: leave the key field empty and the proxy injects the credential server-side (it never enters the page).
+构建由 Vite/CRXJS 管理 manifest、service worker、HTML 页面和 content-script IIFE，不使用手写构建脚本。源码 import 使用 extensionless specifier。
 
-- Concept map: [docs/cordis-to-vue.md](docs/cordis-to-vue.md)
-- Manual test document: [docs/TESTING.md](docs/TESTING.md)
-- Everything is a plugin except `src/kernel/`. UI panels included. A contribution is not something you register in `setup()` — it's something you render: `<AgentTool>` / `<PromptSection>`; mount = register, unmount = dispose.
-- **Every plugin lives in OPFS `.plugins/` — including the core ones.** The bundle ships the kernel + Vue + pi-ai + the `fs` plugin + all other plugin *sources*; first boot seeds them into `.plugins/` (write-if-missing) and every boot compiles them from there, through the same pipeline as agent-created plugins. So the agent can open `.plugins/loop.js` or `.plugins/chat.js` with file_editor and change its own core behavior — hot-reloaded, rolled back if broken, deferred while a run is in flight. `?reset` in the URL = factory reset (wipes `.plugins/`, keeps localStorage). Dev note: because seeding never overwrites, repo-side plugin edits reach a browser with existing OPFS state only after `?reset`.
-- Plugin dialect v2: one `export default {…}` component object; optional single-line imports from `vue`, `@earendil-works/pi-ai`, and `kernel/*` (rewritten at compile time to the shared `__harness.modules` registry — one Vue instance, always); cross-plugin imports are rejected — plugins share through services.
-- Component state is agent-readable, on Vue's own primitive: a plugin calls `ctx.expose({ board, score })` in setup and the model reads it live with the `read_state` tool — build a snake game, play it, then ask the agent for your score. Opt-in, pull-based, keyed by the exposed proxy PluginHost captures ([state.js](src/plugins/state.js)).
-- Long sessions self-compact (pi/opencode style): when context nears the window (reserve 16k), the compaction plugin summarizes older messages into a checkpoint via one tool-less LLM call, keeping the recent ~20k tokens; provider "context too long" errors trigger compact-and-retry. The loop has no turn cap beyond a 500-turn runaway failsafe — Stop is the control.
-- `app/` is the frozen single-file PoC this rewrite grew out of; `conversations/` holds the research and decision trail.
+## 加载 Chrome 扩展
+
+1. 运行 `npm run build`。
+2. 打开 `chrome://extensions`，启用开发者模式，选择“加载已解压的扩展程序”。
+3. 选择 `dist/extension`。
+4. 点击扩展图标打开 side panel；在“LLM 设置”中配置 DeepSeek 或其他 OpenAI-compatible endpoint。
+5. 首次进入某个 origin 时，点击 trusted shell 顶部的“授权并读取”。扩展只申请当前 origin，授权成功后自动读取；此后该站点可直接读取并在刷新后运行已启用的 recipe。
+
+Chrome 135+ 才支持当前使用的 `chrome.userScripts.execute`。`page/eval` 还要求在扩展详情页允许 user scripts；普通 DOM 工具不依赖该开关。
+
+## 架构
+
+- **Trusted extension shell**：service worker、按 tab 独立挂载的 side panel 和 options page。持有 `chrome.*`、LLM key、MCP 连接和扩展 OPFS。
+- **Sandboxed agent runtime**：运行原有 kernel、loop、compaction 和可自修改 builtin/user plugins；没有 `chrome.*`，只能发送经过 Zod 校验的 capability request。
+- **Host-page content runtime**：框架无关的 DOM ABI，提供 snapshot/query/observe/picker 与事务补丁；补丁有 preview/apply/verify/revert 生命周期。
+- **MAIN / USER_SCRIPT execution**：仅由 trusted broker 通过 Chrome User Scripts API 执行，不把任意 `eval` 权限交给 content script。
+
+动态插件源码仍以 JavaScript 存放在 OPFS 的 `.plugins/` 下，但 builtin 的仓库源码统一用 TypeScript 编写，构建时由 Vite/Oxc 去除类型后作为 factory source 嵌入。首次启动 write-if-missing，用户修改不会被新版 bundle 静默覆盖。
+
+MCP 使用官方 `@modelcontextprotocol/sdk` 的 Streamable HTTP transport；浏览器扩展不伪装支持本地 stdio，后者需要 Native Messaging 或本地 bridge。
+
+详细设计、信任边界和 React/Vue 支持范围见 [扩展架构](docs/extension-architecture.md)。原 harness 的 Cordis→Vue 映射见 [docs/cordis-to-vue.md](docs/cordis-to-vue.md)，验证清单见 [docs/TESTING.md](docs/TESTING.md)。
+
+## 框架支持边界
+
+DOM 是稳定主路径，因此古老服务端页面、Vue、React 和其他前端框架都能被修改。对 React/Vue 页面直接改 DOM 不会更新其业务 state，后续重渲染也可能覆盖补丁；recipe 会在路由/刷新后重新应用，但涉及业务逻辑或持久状态时应生成站点 adapter，而不是冒充修改了组件源码。
+
+每个 `http(s)` 标签页使用 Chrome tab-specific side panel：对话、批注、页面引用和 MCP 会话不会串到其他 tab；OPFS 插件、LLM 设置和 recipe 仍是扩展级共享状态。`chrome://`、扩展页等受限页面会直接禁用该面板。
+
+Vue 的组件树可作为可选诊断 adapter；React production build 没有稳定公共组件树 API，因此只承诺 DOM 级修改。需要真正修改 React 源码时，应把批注和 DOM 定位信息交给外部 coding agent/compiler 工作流。
+
+仓库提供两个可重复验证的宿主页：[`examples/legacy-host`](examples/legacy-host) 模拟古老班车查询页，[`examples/react-host`](examples/react-host) 使用真实 React 19 `createRoot` 和状态更新，用来观察 reconciliation 覆盖外部 DOM 补丁的边界。
+
+`app/` 是项目早期的冻结 PoC；`conversations/` 保存原始调研与决策记录。

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Harness Page Agent</title>
+  </head>
+  <body>
+    <section id="site-access" hidden>
+      <span id="site-access-label"></span>
+      <button id="site-access-button" type="button">授权并读取</button>
+    </section>
+    <iframe id="harness-sandbox" src="./sandbox.html" sandbox="allow-scripts" title="Harness agent runtime"></iframe>
+    <dialog id="approval-dialog">
+      <form method="dialog">
+        <h2 id="approval-title"></h2>
+        <p id="approval-body"></p>
+        <footer>
+          <button class="secondary" type="submit" value="cancel">取消</button>
+          <button id="approval-confirm" class="primary" type="submit" value="confirm">允许</button>
+        </footer>
+      </form>
+    </dialog>
+    <script type="module" src="./sidepanel.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+:root { font: 14px/1.45 Inter, system-ui, sans-serif; color: #172033; background: #eef2f7; }
+body { margin: 0; }
+main { width: min(960px, calc(100% - 40px)); margin: 48px auto; }
+header { display: flex; align-items: center; justify-content: space-between; }
+h1 { margin: 2px 0 24px; }
+small, article span { color: #68758a; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+article { display: grid; gap: 8px; padding: 20px; border: 1px solid #d6deea; border-radius: 12px; background: white; box-shadow: 0 8px 24px #1f35500d; }
+article strong { font-size: 28px; }
+button { width: fit-content; border: 1px solid #aebbd0; border-radius: 7px; padding: 7px 10px; background: white; }
+label { display: grid; gap: 8px; margin-top: 24px; }
+textarea { min-height: 100px; border: 1px solid #aebbd0; border-radius: 9px; padding: 10px; }
+.compact article { padding: 10px; }

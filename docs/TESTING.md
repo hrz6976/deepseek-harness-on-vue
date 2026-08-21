@@ -1,6 +1,23 @@
 # TESTING — manual test document
 
-Phase-1 verification: per-feature manual steps and expected observations.
+Standalone and Chrome-extension verification: per-feature manual steps and expected observations.
+
+## Chrome extension smoke test
+
+```bash
+npm run check
+# Chrome → chrome://extensions → Developer mode → Load unpacked
+# choose dist/extension
+```
+
+1. Open a normal HTTP(S) page and click the extension action. The side panel should boot the sandboxed harness and seed builtin sources into extension OPFS.
+2. On a new origin, click the trusted **授权并读取** banner. Expect one origin-scoped permission prompt followed by an automatic compressed snapshot. Reopening that origin should not prompt again.
+3. Click **批注**, then click a page element and save a note. Expect the closed-Shadow-DOM composer, a visible annotation count above the Harness input, and the next vague user message to resolve against the annotation's selector/fingerprint without another broad snapshot.
+4. Configure an OpenAI-compatible endpoint in **设置**, then ask the agent to inspect the page. Expect assistant text to update incrementally; user messages, page events, annotations, patch results, and final replies must stay in actual occurrence order. The key must not appear in sandbox storage or page messages.
+5. Ask for a patch. Expect preview before apply, per-operation verification, and a transaction id that can be reverted.
+6. Save the approved operations as a recipe, click **授权本站**, refresh or navigate through an SPA route, and expect the recipe to reapply.
+7. Automated Happy DOM coverage exercises snapshot/query, apply/verify/revert, node-identity-preserving undo, sanitization, rollback, and real React reconciliation (`tests/extension-content.test.ts`).
+8. Keep the panel open, switch between two HTTP tabs, and expect distinct fresh conversations. Switching back restores that tab's panel instance. On `chrome://newtab`, the Harness panel should be unavailable rather than retaining another tab's errors.
 
 ## Setup
 

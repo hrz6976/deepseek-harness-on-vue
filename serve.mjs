@@ -1,4 +1,4 @@
-// Dev server: static files from dist/ + LLM proxy (browsers block direct
+// Standalone server: static files from dist/standalone + LLM proxy (browsers block direct
 // third-party API calls via CORS; DeepSeek's API does not send CORS headers).
 // Usage: node serve.mjs [port]   (default 7100)
 // Proxy: /proxy/<path> -> ${LLM_PROXY_TARGET}/<path>
@@ -17,10 +17,9 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
-const ROOT = fileURLToPath(new URL('./dist/', import.meta.url));
-// `serve.mjs` can be imported by build.mjs, so process.argv also contains
-// build flags such as `--watch` and `--serve`. Only treat a numeric argument
-// as a positional port; otherwise fall back to PORT and the default.
+const ROOT = fileURLToPath(new URL('./dist/standalone/', import.meta.url));
+// Only treat a numeric argument as a positional port; otherwise fall back to
+// PORT and the default.
 const portArg = process.argv.slice(2).find(arg => /^\d+$/.test(arg));
 const PORT = Number(portArg || process.env.PORT || 7100);
 
