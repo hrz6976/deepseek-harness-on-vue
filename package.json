@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Sandboxed self-modifying page agent runtime and Chrome MV3 extension",
   "scripts": {
-    "build": "vite build --mode extension",
+    "build": "vite build --mode extension && node scripts/verify-extension-build.mjs",
     "build:standalone": "vite build --mode standalone",
     "build:fixtures": "vite build --config examples/vite.config.ts",
     "dev:fixtures": "vite --config examples/vite.config.ts",

@@ -10,7 +10,11 @@
       <span id="site-access-label"></span>
       <button id="site-access-button" type="button">授权并读取</button>
     </section>
-    <iframe id="harness-sandbox" src="./sandbox.html" sandbox="allow-scripts" title="Harness agent runtime"></iframe>
+    <section id="sandbox-status" role="status">
+      <strong>Harness 正在启动</strong>
+      <span>正在加载隔离运行时…</span>
+    </section>
+    <iframe id="harness-sandbox" src="./sandbox.html" sandbox="allow-scripts" title="Harness agent runtime" hidden></iframe>
     <dialog id="approval-dialog">
       <form method="dialog">
         <h2 id="approval-title"></h2>

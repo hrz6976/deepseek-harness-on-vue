@@ -15,13 +15,14 @@ npm run dev:fixtures       # 本地宿主页：/legacy-host/ 与 /react-host/
 npm test                   # node:test；包含内容脚本 DOM 集成测试
 ```
 
-构建由 Vite/CRXJS 管理 manifest、service worker、HTML 页面和 content-script IIFE，不使用手写构建脚本。源码 import 使用 extensionless specifier。
+构建由 Vite/CRXJS 管理 manifest、service worker、HTML 页面、sandbox ESM runtime 和 content-script IIFE。sandbox 页面会在 ESM 图执行前加载一个极小的经典脚本，把启动异常转发给 trusted shell；构建末尾会校验入口和浏览器环境约束。源码 import 使用 extensionless specifier。
 
 ## 加载 Chrome 扩展
 
 1. 运行 `npm run build`。
 2. 打开 `chrome://extensions`，启用开发者模式，选择“加载已解压的扩展程序”。
 3. 选择 `dist/extension`。
+   如果之前已经加载过，构建后请在扩展卡片上点击“重新加载”，再关闭并重新打开 side panel。
 4. 点击扩展图标打开 side panel；在“LLM 设置”中配置 DeepSeek 或其他 OpenAI-compatible endpoint。
 5. 首次进入某个 origin 时，点击 trusted shell 顶部的“授权并读取”。扩展只申请当前 origin，授权成功后自动读取；此后该站点可直接读取并在刷新后运行已启用的 recipe。
 

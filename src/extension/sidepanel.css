@@ -11,6 +11,22 @@ body {
 }
 button { font: inherit; }
 iframe { width: 100%; min-height: 0; flex: 1; border: 0; }
+iframe[hidden] { display: none; }
+#sandbox-status {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 6px;
+  padding: 24px;
+  color: #626469;
+  text-align: center;
+}
+#sandbox-status[hidden] { display: none; }
+#sandbox-status strong { color: #292a2d; font-size: 16px; }
+#sandbox-status.failed strong { color: #a93e3e; }
 #site-access { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #eadfc8; background: #fffaf0; }
 #site-access[hidden] { display: none; }
 #site-access span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

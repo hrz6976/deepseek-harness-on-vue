@@ -8,6 +8,7 @@ import './sidepanel.css';
 const frameElement = document.querySelector<HTMLIFrameElement>('#harness-sandbox');
 if (!frameElement) throw new Error('Harness sandbox frame is missing.');
 const frame = frameElement;
+const sandboxStatusElement = document.querySelector<HTMLElement>('#sandbox-status');
 const siteAccessElement = document.querySelector<HTMLElement>('#site-access');
 const siteAccessLabelElement = document.querySelector<HTMLElement>('#site-access-label');
 const siteAccessButtonElement = document.querySelector<HTMLButtonElement>('#site-access-button');
@@ -15,10 +16,11 @@ const approvalDialogElement = document.querySelector<HTMLDialogElement>('#approv
 const approvalTitleElement = document.querySelector<HTMLElement>('#approval-title');
 const approvalBodyElement = document.querySelector<HTMLElement>('#approval-body');
 const approvalConfirmElement = document.querySelector<HTMLButtonElement>('#approval-confirm');
-if (!siteAccessElement || !siteAccessLabelElement || !siteAccessButtonElement
+if (!sandboxStatusElement || !siteAccessElement || !siteAccessLabelElement || !siteAccessButtonElement
   || !approvalDialogElement || !approvalTitleElement || !approvalBodyElement || !approvalConfirmElement) {
   throw new Error('Harness trusted site-access controls are missing.');
 }
+const sandboxStatus = sandboxStatusElement;
 const siteAccess = siteAccessElement;
 const siteAccessLabel = siteAccessLabelElement;
 const siteAccessButton = siteAccessButtonElement;
@@ -53,7 +55,18 @@ window.addEventListener('message', event => {
   const shellMessage = event.data as { channel?: unknown; type?: unknown } | null;
   if (shellMessage?.channel === 'harness-shell-v1' && shellMessage.type === 'ready') {
     sandboxReady = true;
+    sandboxStatus.hidden = true;
+    frame.hidden = false;
     flushAuthorizedRead();
+    return;
+  }
+  if (shellMessage?.channel === 'harness-shell-v1' && shellMessage.type === 'boot-error') {
+    const detail = typeof (event.data as { error?: unknown }).error === 'string'
+      ? (event.data as { error: string }).error
+      : '未知启动错误';
+    sandboxStatus.querySelector('strong')!.textContent = 'Harness 启动失败';
+    sandboxStatus.querySelector('span')!.textContent = detail;
+    sandboxStatus.classList.add('failed');
     return;
   }
   if (shellMessage?.channel === 'harness-shell-v1' && shellMessage.type === 'open-options') {
