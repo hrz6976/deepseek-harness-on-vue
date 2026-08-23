@@ -25,7 +25,7 @@ export const fileEditorPlugin = {
       'Manage files with file_editor: list to see what exists, write to create, view to check contents, str_replace for local edits.',
       'View a file before modifying it.',
       'If the user asks for a web page/game/tool, put ALL code in a single index.html (inline <style> and <script>) so it can be previewed directly.',
-      'Files under .plugins/ are the running plugins — core and agent-created alike. Editing one hot-reloads it (a broken edit is rejected and the old version keeps running).',
+      'Files under .plugins/ are the running plugins — core and agent-created alike. Editing one hot-reloads it (a broken edit is rejected and the old version keeps running). New tool schemas/code are visible on the NEXT turn of the current run; only loop itself waits for the run to end.',
     ].join('\n');
 
     async function run({ command, path = '', content = '', old_str = '', new_str = '' }: {

@@ -129,21 +129,26 @@ test('manager: unmount keeps the file; a later edit does NOT surprise-remount', 
   assert.match(plugins.find(p => p.name === 'llm') ? 'ok' : 'missing', /ok/);
 });
 
-test('manager: reloads are deferred while the loop runs, flushed after', async () => {
+test('manager: only the loop plugin defers mid-run; others hot-reload immediately', async () => {
   const running = ref(false);
-  const { fs } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('v1') });
+  const { fs } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('v1'), [PLUGIN_DIR + 'loop.js']: SRC('v1') });
   provideService('loop', { running });
   const mgr = services.get('manager').value;
   await mgr.mount('alpha');
-  const entry = plugins.find(p => p.name === 'alpha');
-  const v = entry.version;
+  await mgr.mount('loop');
+  const alpha = plugins.find(p => p.name === 'alpha');
+  const loopEntry = plugins.find(p => p.name === 'loop');
+  const v = alpha.version, lv = loopEntry.version;
   running.value = true;
   await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v2'));
   await nextTick(); await sleep(400);
-  assert.equal(entry.version, v);                                     // deferred
+  assert.equal(alpha.version, v + 1);                                 // snapshot-safe: reloaded mid-run
+  await fs.write(PLUGIN_DIR + 'loop.js', SRC('v2'));
+  await nextTick(); await sleep(400);
+  assert.equal(loopEntry.version, lv);                                // deferred: remount would kill the run
   running.value = false;
   await nextTick(); await sleep(50);
-  assert.equal(entry.version, v + 1);                                 // flushed
+  assert.equal(loopEntry.version, lv + 1);                            // flushed after the run
 });
 
 test('manager: broken edit rolls back — old version keeps running, hmrError set', async () => {

@@ -1,6 +1,3 @@
-import { Client } from '@modelcontextprotocol/sdk/client';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp';
-import OpenAI from 'openai';
 import { ZodError } from 'zod';
 import contentScriptFile from './content-script?script&iife';
 import { parseBrokerEnvelope } from '../shared/broker-schema';
@@ -14,7 +11,7 @@ import type {
   SiteRecipe,
 } from '../shared/page-protocol';
 import type { JsonValue, LlmStreamEvent } from '../shared/runtime';
-import { OpenAiStreamAccumulator, type OpenAiStreamChunk } from './openai-stream';
+import { createPiStream } from '../shared/pi-engine';
 import {
   isInspectableUrl,
   pageEventTabId,
@@ -22,12 +19,11 @@ import {
   sidePanelPath,
 } from './tab-scope';
 
-interface StoredLlmConfig { baseURL: string; model: string; apiKey: string }
+interface StoredLlmConfig { baseURL: string; model: string; apiKey?: string; localProxy?: boolean }
 const LLM_CONFIG_KEY = 'secrets.llm';
 const RECIPES_KEY = 'public.recipes';
 
 const ports = new Map<chrome.runtime.Port, number>();
-const mcpClients = new Map<string, Client>();
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
@@ -75,10 +71,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
   if (changeInfo.status !== 'complete' || !isInspectableUrl(tab.url)) return;
   void applyMatchingRecipes(tabId, tab.url);
-});
-
-chrome.tabs.onRemoved.addListener(tabId => {
-  void closeMcpClientsForTab(tabId);
 });
 
 async function configureExistingTabs(): Promise<void> {
@@ -182,17 +174,6 @@ async function handleRequest(request: BrokerRequest, tabId: number): Promise<Jso
     }
     case 'llm/complete':
       throw new Error('LLM completion requests use the streaming broker path.');
-    case 'mcp/connect':
-      return await connectMcp(request, tabId);
-    case 'mcp/disconnect':
-      return await disconnectMcp(request.id, tabId);
-    case 'mcp/list-tools':
-      return json(await requireMcp(request.id, tabId).listTools());
-    case 'mcp/call-tool':
-      return json(await requireMcp(request.id, tabId).callTool({
-        name: request.name,
-        ...(request.arguments ? { arguments: request.arguments } : {}),
-      }));
   }
 }
 
@@ -268,62 +249,18 @@ function emitPageEvent(event: PageEvent): void {
 
 async function* streamLlm(request: Extract<BrokerRequest, { kind: 'llm/complete' }>['request']): AsyncIterable<LlmStreamEvent> {
   const config = await readLlmConfig();
-  if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key。');
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
-    dangerouslyAllowBrowser: true,
-    maxRetries: 2,
-    timeout: 60_000,
-  });
-  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: 'system', content: request.systemPrompt },
-  ];
-  for (const message of request.messages) {
-    if (message.role === 'user') messages.push({ role: 'user', content: message.text });
-    if (message.role === 'summary') messages.push({ role: 'user', content: `[Context checkpoint]\n\n${message.text}` });
-    if (message.role !== 'assistant') continue;
-    messages.push({
-      role: 'assistant',
-      content: message.text || null,
-      ...(message.toolCalls.length ? {
-        tool_calls: message.toolCalls.map(call => ({
-          id: call.id,
-          type: 'function' as const,
-          function: { name: call.name, arguments: call.args || JSON.stringify(call.argsObj ?? {}) },
-        })),
-      } : {}),
-    });
-    for (const call of message.toolCalls) {
-      messages.push({ role: 'tool', tool_call_id: call.id, content: call.result ?? '(not executed)' });
-    }
-  }
-
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = request.tools.map(tool => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }));
-  const completion = await client.chat.completions.create({
-    model: config.model,
-    messages,
-    ...(tools.length ? { tools } : {}),
-    stream: true,
-  });
-  const accumulator = new OpenAiStreamAccumulator();
-  for await (const chunk of completion) {
-    yield accumulator.ingest(chunk as unknown as OpenAiStreamChunk);
-  }
-  yield accumulator.done();
+  if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key，或启用本地 proxy。');
+  // Same engine as the sandbox llm plugin — one implementation, no extra SDK.
+  // The wire format carries no AbortSignal; each stream gets its own.
+  yield* createPiStream(config)({ ...request, signal: new AbortController().signal });
 }
 
 async function readLlmConfig(): Promise<StoredLlmConfig | null> {
   const value = (await chrome.storage.local.get(LLM_CONFIG_KEY))[LLM_CONFIG_KEY] as StoredLlmConfig | undefined;
-  if (!value?.apiKey || !value.baseURL || !value.model) return null;
-  return value;
+  if (!value?.baseURL || !value.model || (!value.apiKey && !value.localProxy)) return null;
+  // A local-proxy config may retain an old direct API key so switching back is
+  // convenient, but it must never win over the proxy's ~/.pi credential.
+  return value.localProxy ? { ...value, apiKey: undefined } : value;
 }
 
 function assertPublicStorageKeys(keys: string[]): void {
@@ -366,48 +303,6 @@ async function evaluateUserScript(tabId: number, code: string, world: 'MAIN' | '
   if (!result) return null;
   if ('error' in result) throw new Error(result.error);
   return result.result;
-}
-
-async function connectMcp(request: Extract<BrokerRequest, { kind: 'mcp/connect' }>, tabId: number): Promise<JsonValue> {
-  await disconnectMcp(request.id, tabId);
-  const url = new URL(request.url);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('The browser MCP transport accepts only HTTP(S) endpoints.');
-  const client = new Client({ name: 'harness-page-agent', version: '0.1.0' });
-  const transport = new StreamableHTTPClientTransport(url, request.headers
-    ? { requestInit: { headers: request.headers } }
-    : undefined);
-  await client.connect(transport);
-  mcpClients.set(mcpKey(tabId, request.id), client);
-  return json({ connected: true, tools: (await client.listTools()).tools });
-}
-
-async function disconnectMcp(id: string, tabId: number): Promise<JsonValue> {
-  const key = mcpKey(tabId, id);
-  const client = mcpClients.get(key);
-  if (!client) return null;
-  mcpClients.delete(key);
-  await client.close();
-  return null;
-}
-
-function requireMcp(id: string, tabId: number): Client {
-  const client = mcpClients.get(mcpKey(tabId, id));
-  if (!client) throw new Error(`MCP connection "${id}" is not open.`);
-  return client;
-}
-
-function mcpKey(tabId: number, id: string): string {
-  return `${tabId}:${id}`;
-}
-
-async function closeMcpClientsForTab(tabId: number): Promise<void> {
-  const prefix = `${tabId}:`;
-  const clients = [...mcpClients.entries()].filter(([key]) => key.startsWith(prefix));
-  for (const [key, client] of clients) {
-    mcpClients.delete(key);
-    try { await client.close(); }
-    catch (error) { console.warn(`[harness] failed to close MCP client ${key}`, error); }
-  }
 }
 
 function originPattern(origin: string): string {

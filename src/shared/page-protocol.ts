@@ -130,11 +130,7 @@ export type BrokerRequest =
   | { kind: 'storage/set'; values: JsonObject }
   | { kind: 'storage/remove'; keys: string[] }
   | { kind: 'llm/status' }
-  | { kind: 'llm/complete'; request: { systemPrompt: string; messages: HarnessMessage[]; tools: ToolSchema[] } }
-  | { kind: 'mcp/connect'; id: string; url: string; headers?: Record<string, string> }
-  | { kind: 'mcp/disconnect'; id: string }
-  | { kind: 'mcp/list-tools'; id: string }
-  | { kind: 'mcp/call-tool'; id: string; name: string; arguments?: JsonObject };
+  | { kind: 'llm/complete'; request: { systemPrompt: string; messages: HarnessMessage[]; tools: ToolSchema[] } };
 
 export interface BrokerEnvelope<T = BrokerRequest> {
   channel: 'harness-broker-v1';

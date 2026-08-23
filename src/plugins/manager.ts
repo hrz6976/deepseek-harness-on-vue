@@ -47,13 +47,17 @@ export const managerPlugin = {
       watchers.set(name, stop);
     }
 
-    // A reload mid-run would remount live machinery under the agent's feet
-    // (the loop itself, chat, a tool the model already selected) — defer ALL
-    // reloads until the run ends, then flush.
+    // A reload mid-run would remount live machinery under the agent's feet —
+    // but ONLY the loop plugin is actually dangerous: remounting it recreates
+    // the messages array and revokes the running service. Everything else
+    // (tools, prompt sections, manager, fs) is snapshot-safe: the loop
+    // dispatches each turn against the frozen per-request snapshot, so a
+    // remount mid-run simply means the NEW schema/code is visible NEXT turn
+    // (same pull-per-step semantics as deepseek-harness's agent loop).
     const pendingReloads = new Map<string, string>(); // name -> content
     let stopFlush: WatchStopHandle | null = null;
     function scheduleReload(name: string, content: string): void {
-      if (getService('loop')?.running.value) {
+      if (name === 'loop' && getService('loop')?.running.value) {
         pendingReloads.set(name, content);
         stopFlush ??= watch(() => getService('loop')?.running.value, running => {
           if (running) return;
@@ -61,7 +65,7 @@ export const managerPlugin = {
           const batch = [...pendingReloads]; pendingReloads.clear();
           for (const [n, c] of batch) void reload(n, c);
         });
-        log(`HMR: [${name}] changed during a run — reload deferred until the run ends`, 'warn');
+        log(`HMR: [${name}] changed during a run — loop reload deferred until the run ends`, 'warn');
         return;
       }
       void reload(name, content);

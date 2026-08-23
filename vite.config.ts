@@ -64,12 +64,75 @@ function pluginDefaults(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => {
-  const extensionBuild = mode === 'extension';
+/**
+ * Vite 8 generates a random HMR websocket token on every server start. Chrome
+ * caches the CRXJS client-worker, so each restart served a token the running
+ * extension didn't know → WS handshake 400 until a manual extension reload.
+ * configResolved runs before the WS server validates tokens and before client
+ * transforms, so pinning here makes the token stable across restarts.
+ */
+function pinWebSocketToken(): Plugin {
   return {
+    name: 'harness-pin-ws-token',
+    apply: 'serve',
+    configResolved(config) {
+      (config as { webSocketToken: string }).webSocketToken = 'harness-dev-ws-token';
+    },
+  };
+}
+
+/**
+ * CRXJS 2.7.1 bug: its worker HMR client contains __LIVE_RELOAD__ twice, but
+ * the token replacement uses String.replace (string pattern → first occurrence
+ * only), so the socket-close handler keeps the literal and throws
+ * ReferenceError whenever the HMR socket closes (server restart, sleep).
+ * Serve-time fixup until upstream fixes it.
+ */
+function crxLiveReloadFixup(): Plugin {
+  return {
+    name: 'harness-crx-live-reload-fixup',
+    apply: 'serve',
+    transform(code, id) {
+      if (id.includes('@crx/client-worker') && code.includes('__LIVE_RELOAD__')) {
+        return code.replaceAll('__LIVE_RELOAD__', 'true');
+      }
+    },
+  };
+}
+
+export default defineConfig(({ mode, command }) => {
+  const extensionBuild = mode === 'extension';
+  // CRXJS never patches manifest CSPs, and our production sandbox CSP
+  // (script-src 'self'; connect-src 'none') forbids everything dev mode
+  // needs: fetching the real page + modules from the dev server and the
+  // HMR websocket. Relax BOTH CSPs to include the dev origin — serve only;
+  // production builds keep the hardened CSP below unchanged.
+  // NOTE: Chrome rejects ws:// sources inside script-src ("insecure CSP value");
+  // websockets are governed by connect-src, which already carries them.
+  const devCspOrigin = 'http://localhost:5173';
+  const devCspConnect = 'http://localhost:5173 ws://localhost:5173';
+  const activeManifest = extensionBuild && command === 'serve'
+    ? {
+        ...manifest,
+        content_security_policy: {
+          extension_pages: manifest.content_security_policy!.extension_pages!.replace(
+            "script-src 'self'", `script-src 'self' ${devCspOrigin}`),
+          sandbox: manifest.content_security_policy!.sandbox!
+            .replace("script-src 'self'", `script-src 'self' ${devCspOrigin}`)
+            .replace("connect-src 'none'", `connect-src ${devCspConnect}`),
+        },
+      }
+    : manifest;
+  return {
+    // Bind ALL interfaces: Vite's default "localhost" can land on ::1 only,
+    // and Chrome resolving localhost via 127.0.0.1 then gets intermittent
+    // connection failures / proxy-style 504s on extension script fetches.
+    server: { host: true },
     plugins: [
       pluginDefaults(),
-      ...(extensionBuild ? [crx({ manifest })] : []),
+      crxLiveReloadFixup(),
+      pinWebSocketToken(),
+      ...(extensionBuild ? [crx({ manifest: activeManifest })] : []),
     ],
     resolve: {
       alias: {

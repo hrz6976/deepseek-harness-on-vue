@@ -18,6 +18,7 @@ import * as contrib from './contrib';
 import * as compile from './compile';
 import * as boot from './boot';
 import * as runtime from '../shared/runtime';
+import * as piEngine from '../shared/pi-engine';
 
 export const modules = Object.freeze({
   'vue': Vue,
@@ -32,4 +33,5 @@ export const modules = Object.freeze({
   'kernel/compile': compile,
   'kernel/boot': boot,
   'shared/runtime': runtime,
+  'shared/pi-engine': piEngine,
 });

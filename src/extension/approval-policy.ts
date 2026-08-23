@@ -26,8 +26,5 @@ export function approvalForRequest(request: BrokerRequest): ApprovalRequest | nu
   if (request.kind === 'recipe/remove') {
     return { title: '移除页面插件？', body: '刷新页面后，插件效果将不再应用。', confirmLabel: '移除', danger: true };
   }
-  if (request.kind === 'mcp/connect') {
-    return { title: '连接 MCP？', body: request.url, confirmLabel: '允许连接', danger: true };
-  }
   return null;
 }

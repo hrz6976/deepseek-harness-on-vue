@@ -6,8 +6,7 @@
 
 ```text
 Tab-specific side panel / options / service worker (trusted)
-  ├─ LLM key + OpenAI-compatible SDK
-  ├─ official MCP HTTP client
+  ├─ LLM key + shared pi-ai engine (shared/pi-engine.ts)
   ├─ OPFS plugin persistence
   └─ validated capability broker
                  │ postMessage / chrome.runtime.Port
@@ -37,10 +36,10 @@ React/Vue adapter 不负责实施修改，只可补充组件名、props、路由
 service worker 为每个 `http(s)` tab 调用 `sidePanel.setOptions({ tabId, path, enabled: true })`，path 携带 tab id；Chrome 因而为相同页面创建彼此隔离的 side panel 实例。切换 tab 会切换 agent runtime，而不是让一个全局 runtime 临时猜测 active tab。
 
 - broker port 在名称中绑定 tab id，sandbox 请求不能覆盖它。
-- page command、页面事件和 MCP client 都按 tab 路由。
+- page command 和页面事件都按 tab 路由。
 - `chrome://`、`chrome-extension://` 等页面通过 tab-specific `enabled: false` 禁用。
 - OPFS、LLM 配置和 recipe 属于扩展级数据；对话、批注、DOM 引用和运行期撤销属于 tab 会话。
-- tab 关闭时清理该 tab 的 MCP client；content-script 事务随页面生命周期自然销毁。
+- tab 关闭时 content-script 事务随页面生命周期自然销毁。
 
 ## 补丁事务
 
@@ -61,9 +60,9 @@ service worker 为每个 `http(s)` tab 调用 `sidePanel.setOptions({ tabId, pat
 - 持久 recipe 需要用户为对应 origin 单独授权。
 - 首次 origin 授权按钮属于 trusted side panel，而不是 sandbox iframe；`chrome.permissions.request` 直接发生在该按钮的用户手势中，成功后才通知 sandbox 自动 snapshot。
 - API key 只保存在 `chrome.storage.local` 的 `secrets.*` namespace；sandbox storage capability 明确拒绝该 namespace。
-- 动态 plugin 在 sandbox 中运行，即使自我修改也拿不到 `chrome.*`、LLM key 或 MCP transport 对象；CSP 还把 `fetch`、WebSocket、beacon 等直接网络出口封死，I/O 必须经过 broker。
+- 动态 plugin 在 sandbox 中运行，即使自我修改也拿不到 `chrome.*` 或 LLM key；CSP 还把 `fetch`、WebSocket、beacon 等直接网络出口封死，I/O 必须经过 broker。
 - `page/eval` 不经过 content script；trusted broker 使用 `chrome.userScripts.execute`，且 prompt/tool policy 要求用户显式批准。
-- MCP HTTP 使用官方 SDK。stdio/本地进程不是浏览器能力，需要 Native Messaging host 或用户运行的 localhost bridge。
+- MCP 暂不在 PoC 范围；后续接入外部工具时优先考虑 Streamable HTTP（浏览器可直接 fetch），stdio/本地进程需要 Native Messaging host 或用户运行的 localhost bridge。
 
 ## 两个目标场景
 

@@ -18,7 +18,7 @@ export const settingsPlugin = {
         <div><label>Base URL</label><input type="text" v-model="cfg.baseURL" :disabled="connected"></div>
         <div><label>Model</label><input type="text" v-model="cfg.model" :disabled="connected"></div>
       </div>
-      <label>API key (localStorage only; leave empty on /proxy to use local pi credentials)</label>
+      <label>API key (localStorage only; leave empty on a local proxy to use local pi credentials)</label>
       <input type="password" v-model="cfg.apiKey" :disabled="connected" placeholder="sk-... or empty for pi auth">
       <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
         <input type="checkbox" v-model="cfg.mock" :disabled="connected" style="width:auto;margin:0"> mock engine (offline, no key needed)
@@ -42,8 +42,9 @@ export const settingsPlugin = {
     const connected = computed(() => !!llmSvc.value);
     const running = computed(() => loopSvc.value?.running?.value ?? false);
     const engineName = computed(() => llmSvc.value?.engineName?.value ?? '');
-    // same-origin proxy = serve.mjs can inject the local pi credential
-    const viaProxy = computed(() => cfg.baseURL.startsWith('/'));
+    // Same-origin or localhost proxy = serve.mjs can inject the local pi
+    // credential. Absolute localhost URLs are useful from the extension.
+    const viaProxy = computed(() => isLocalProxy(cfg.baseURL) || cfg.baseURL.startsWith('/'));
 
     const connect = () => {
       localStorage.setItem(LS.baseURL, cfg.baseURL);
@@ -60,11 +61,20 @@ export const settingsPlugin = {
     // render pass: mountPlugin mutates the plugin list the frame is iterating.
     onMounted(() => nextTick(() => {
       if (!connected.value && localStorage.getItem(LS.auto) === '1'
-          && (cfg.apiKey || cfg.mock || cfg.baseURL.startsWith('/'))) connect();
+          && (cfg.apiKey || cfg.mock || viaProxy.value)) connect();
     }));
 
     return { target, cfg, connected, running, engineName, viaProxy, connect, disconnect };
   },
 };
+
+function isLocalProxy(value: string): boolean {
+  try {
+    const url = new URL(value, location.origin);
+    return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
 
 export default settingsPlugin;

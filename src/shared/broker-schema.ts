@@ -117,10 +117,6 @@ const BrokerRequestSchema = z.discriminatedUnion('kind', [
       tools: z.array(ToolSchema).max(1_000),
     }),
   }),
-  z.object({ kind: z.literal('mcp/connect'), id: z.string().min(1), url: z.string().url(), headers: z.record(z.string(), z.string()).optional() }),
-  z.object({ kind: z.literal('mcp/disconnect'), id: z.string().min(1) }),
-  z.object({ kind: z.literal('mcp/list-tools'), id: z.string().min(1) }),
-  z.object({ kind: z.literal('mcp/call-tool'), id: z.string().min(1), name: z.string().min(1), arguments: z.record(z.string(), JsonValueSchema).optional() }),
 ]);
 
 const BrokerEnvelopeSchema = z.object({

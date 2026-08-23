@@ -49,6 +49,10 @@ input {
 input:hover { border-color: #c3c2bd; }
 input:focus { border-color: #9dafe7; background: #fff; box-shadow: 0 0 0 3px rgb(47 94 229 / 8%); }
 input::placeholder { color: #aaa9a5; }
+.check-row { display: flex; align-items: center; gap: 8px; }
+.check-row input { width: auto; margin: 0; }
+.hint { margin: -10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+code { padding: 1px 4px; border-radius: 4px; color: #55565a; background: #f1f1ed; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
 footer { display: flex; align-items: center; gap: 13px; min-height: 36px; padding-top: 2px; }
 button {
   width: fit-content;
