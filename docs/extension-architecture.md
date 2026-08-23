@@ -69,7 +69,7 @@ service worker 为每个 `http(s)` tab 调用 `sidePanel.setOptions({ tabId, pat
 - 多个 side panel 共享 OPFS 时，trusted workspace provider 使用 `navigator.locks` 串行化写入，以内容 revision 做 optimistic conflict detection，并通过 `BroadcastChannel` 通知其他 sandbox 刷新缓存；冲突会显式失败，不再静默覆盖较新的文件。
 - `page/eval` 不经过 content script；trusted broker 使用 `chrome.userScripts.execute`，且 prompt/tool policy 要求用户显式批准。
 - 可选工具组不会全部塞进每轮 prompt。`capability_search` 返回 typed Capability/Tool/Provider/Workflow/EventSource/Panel/SiteSkill/tool-group 记录，`capability_load` 按 task/workspace/site/global scope 让相关 AgentTool 从下一轮开始可见。
-- MCP 远端工具保留原生 JSON Schema 2020-12，通过标准校验器注册；手写 Harness 工具继续使用 Zod，不维护 JSON Schema 到 Zod 的私有转换层。
+- MCP 远端工具保留服务器声明的原生 JSON Schema 方言（Draft-07 或 2020-12），通过官方 SDK 的浏览器安全校验器注册；手写 Harness 工具继续使用 Zod，不维护 JSON Schema 到 Zod 的私有转换层。
 - MCP HTTP 使用官方 SDK。stdio/本地进程不是浏览器能力，需要 Native Messaging host 或用户运行的 localhost bridge。
 
 ## 两个目标场景

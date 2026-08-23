@@ -235,17 +235,22 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     async create(pluginName, source, manifest) {
       if (!/^[a-z][a-z0-9_-]*$/iu.test(pluginName || '')) return 'Error: name must start with a letter, only letters/digits/-/_';
       if (reserved.has(pluginName)) return `Error: ${pluginName} is a reserved system plugin name`;
+      const draftPath = PLUGIN_DIR + pluginName + '.js';
+      if (capabilities.has(pluginName) || fs.read(draftPath) != null) {
+        return `Error: capability ${pluginName} already exists; edit ${draftPath} for HMR or remove it before creating a replacement`;
+      }
       let normalizedManifest: CapabilityManifest | undefined;
       try { normalizedManifest = manifest ? validateCapabilityManifest(manifest, pluginName) : undefined; }
       catch (error: unknown) { return `Error: invalid capability manifest: ${errorMessage(error)}`; }
 
       const result = await tryActivate(pluginName, source, {
-        ...(normalizedManifest ? { manifest: normalizedManifest, manifestSource: 'declared' as const } : {}),
+        manifest: normalizedManifest ?? legacyCapabilityManifest(pluginName, false),
+        manifestSource: normalizedManifest ? 'declared' : 'generated',
       });
       if (!result.entry) return `Error: plugin ${pluginName} failed to activate: ${result.error}`;
       // The editable file is a draft pointer. Publish it only after the
       // candidate Fiber and active capability revision have succeeded.
-      await fs.write(PLUGIN_DIR + pluginName + '.js', source);
+      await fs.write(draftPath, source);
       if (result.entry.manifest.scope === 'task') await task()?.attachCapability(result.entry.manifest.id);
       return `plugin ${pluginName} compiled and mounted; ${result.entry.contributions.panels.length ? `visible UI: ${result.entry.contributions.panels.join(', ')}` : 'no UI panel registered'}`;
     },

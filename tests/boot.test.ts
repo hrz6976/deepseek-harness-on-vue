@@ -243,6 +243,34 @@ test('manager: create publishes a visible task capability instead of only writin
   assert.equal((runtime.reflect.get('ui') as UiService).contributions.has('mcp-panel:mcp-status'), true);
 });
 
+test('manager: create refuses to replace an existing capability', async () => {
+  const original = SRC('original-mcp');
+  const replacement = SRC('replacement-mcp');
+  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'mcp.js']: original });
+  assert.match(await mgr.mount('mcp'), /mounted/);
+  const active = capabilities.get('mcp');
+
+  assert.match(await mgr.create('mcp', replacement), /already exists/);
+  assert.equal(fs.read(PLUGIN_DIR + 'mcp.js'), original);
+  assert.equal(capabilities.get('mcp'), active);
+});
+
+test('manager: recreated capability does not inherit an orphaned package manifest', async () => {
+  const privileged = {
+    id: 'recreated', version: '1.0.0', title: 'Old capability', scope: 'global',
+    contributes: {}, requires: { providers: ['mcp'] }, permissions: [{ id: 'mcp.use' }],
+  };
+  const { mgr } = await mountManager({
+    [capabilityManifestPath('recreated')]: JSON.stringify(privileged),
+  });
+
+  assert.match(await mgr.create('recreated', SRC('fresh')), /mounted/);
+  const manifest = capabilities.get('recreated')?.manifest;
+  assert.equal(manifest?.scope, 'task');
+  assert.deepEqual(manifest?.requires, {});
+  assert.deepEqual(manifest?.permissions, []);
+});
+
 test('manager remounts attached task capabilities under each active task Fiber', async () => {
   const { mgr } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('task') });
   await applyTestPlugin(createTaskRuntimePlugin());

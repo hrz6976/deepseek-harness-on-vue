@@ -99,31 +99,40 @@ test('tool parameters derive JSON Schema and validate before run', async () => {
   assert.equal(calls, 1);
 });
 
-test('remote tools keep native JSON Schema and validate it with Ajv', async () => {
+test('remote tools keep and validate native Draft-07 and 2020-12 schemas', async () => {
   await applyTestPlugin(toolsPlugin);
   let calls = 0;
   await applyTestPlugin({
     name: 'schema-tool', inject: ['tools'],
     apply(ctx) {
-      ctx.tools.registerSchema({
-        name: 'remote_search',
-        description: 'remote schema',
-        parameters: {
-          type: 'object',
-          properties: { query: { type: 'string' }, limit: { type: 'integer' } },
-          required: ['query'],
-          additionalProperties: false,
-        },
-        run: ({ query }) => { calls++; return query; },
-      });
+      for (const [name, $schema] of [
+        ['remote_search_7', 'http://json-schema.org/draft-07/schema#'],
+        ['remote_search_2020', 'https://json-schema.org/draft/2020-12/schema'],
+      ]) {
+        ctx.tools.registerSchema({
+          name,
+          description: 'remote schema',
+          parameters: {
+            $schema,
+            type: 'object',
+            properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+            required: ['query'],
+            additionalProperties: false,
+          },
+          run: ({ query }) => { calls++; return query; },
+        });
+      }
     },
   });
   const tools = runtime.reflect.get('tools') as ToolsRuntime;
-  assert.deepEqual(tools.schemas()[0]?.parameters.required, ['query']);
-  assert.match(String(await tools.call('remote_search', { limit: 1 })), /must have required property 'query'/);
+  assert.equal(tools.schemas()[0]?.parameters.$schema, 'http://json-schema.org/draft-07/schema#');
+  assert.equal(tools.schemas()[1]?.parameters.$schema, 'https://json-schema.org/draft/2020-12/schema');
+  assert.match(String(await tools.call('remote_search_7', { limit: 1 })), /required property.*query/i);
+  assert.match(String(await tools.call('remote_search_2020', { limit: 1 })), /required property.*query/i);
   assert.equal(calls, 0);
-  assert.equal(await tools.call('remote_search', { query: 'yuri', limit: 5 }), 'yuri');
-  assert.equal(calls, 1);
+  assert.equal(await tools.call('remote_search_7', { query: 'yuri', limit: 5 }), 'yuri');
+  assert.equal(await tools.call('remote_search_2020', { query: 'season', limit: 5 }), 'season');
+  assert.equal(calls, 2);
 });
 
 test('loadable tool groups stay out of snapshots until loaded for the active task', async () => {

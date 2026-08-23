@@ -1,7 +1,8 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
+import { CfWorkerJsonSchemaValidator, type CfWorkerSchemaDraft } from '@modelcontextprotocol/sdk/validation/cfworker';
+import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
 import { shallowReactive } from 'vue';
 import { z, type ZodType } from 'zod';
-import Ajv2020 from 'ajv/dist/2020.js';
 import { capabilityForContext, recordCapabilityContribution } from '@/kernel/capabilities';
 import type {
   JsonObject,
@@ -29,10 +30,20 @@ interface ToolEntry {
   token: object;
 }
 
-// MCP defines tool input schemas as JSON Schema 2020-12. Keep that schema
-// native and validate it with a standard implementation; hand-authored
-// Harness tools continue to use Zod through register().
-const ajv = new Ajv2020({ allErrors: true, strict: false });
+// MCP tools keep their native JSON Schema dialect. Reuse the official SDK's
+// browser-safe validator rather than translating remote schemas into Zod.
+const schemaValidators = new Map<CfWorkerSchemaDraft, CfWorkerJsonSchemaValidator>();
+
+function validatorFor(schema: JsonSchema): CfWorkerJsonSchemaValidator {
+  const declared = typeof schema.$schema === 'string' ? schema.$schema : '';
+  const draft: CfWorkerSchemaDraft = /draft-07/iu.test(declared) ? '7' : '2020-12';
+  let validator = schemaValidators.get(draft);
+  if (!validator) {
+    validator = new CfWorkerJsonSchemaValidator({ draft, shortcircuit: false });
+    schemaValidators.set(draft, validator);
+  }
+  return validator;
+}
 
 function callWith(map: ReadonlyMap<string, RuntimeToolDefinition>) {
   return async (name: string, args: JsonObject): Promise<unknown> => {
@@ -83,15 +94,16 @@ export class ToolsRuntime extends Service {
 
   registerSchema(definition: NamedSchemaToolDefinition): () => Promise<void> {
     const { name, description, parameters, availability, run } = definition;
-    const validate = ajv.compile(parameters);
+    const validate = validatorFor(parameters).getValidator<JsonObject>(parameters as JsonSchemaType);
     return this.registerRuntime(name, {
       description,
       schema: parameters,
       ...(availability ? { availability } : {}),
       parse(args) {
-        return validate(args)
-          ? { success: true, data: args }
-          : { success: false, error: ajv.errorsText(validate.errors, { separator: '\n' }) };
+        const result = validate(args);
+        return result.valid
+          ? { success: true, data: result.data }
+          : { success: false, error: result.errorMessage };
       },
       run,
     });

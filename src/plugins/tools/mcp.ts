@@ -129,7 +129,7 @@ export function apply(ctx: Context): void {
 
   ctx.prompt.register({
     name: 'mcp-tools', order: 25,
-    text: 'MCP servers are trusted-broker capabilities, not hidden transports. Load the mcp tool group with capability_load only when needed. Connect only an endpoint the user selected. Discover with mcp_list_tools, then use mcp_load_tool so the exact remote tool becomes model-visible on the next turn; unload or disconnect it when no longer needed.',
+    text: 'This capability is an MCP client, not a server runtime. Connect only an HTTP(S) endpoint the user selected. Discover with mcp_list_tools, load repeated tools with mcp_load_tool, and unload or disconnect them when no longer needed.',
   });
 
   ctx.effect(() => async () => {
