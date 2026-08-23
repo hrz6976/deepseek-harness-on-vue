@@ -135,7 +135,7 @@
         <div v-show="inspector === 'capabilities'" class="capability-view">
           <div class="capability-list">
             <article v-for="card in capabilityCards" :key="card.entry.manifest.id" class="capability-row">
-              <div><strong>{{ card.entry.manifest.title }}</strong><n-tag size="tiny" :bordered="false">{{ card.health.state }}</n-tag></div>
+              <div><strong>{{ card.entry.manifest.title }}</strong><n-tag size="tiny" :bordered="false">{{ card.health.state }}</n-tag><n-tag size="tiny" :bordered="false">{{ card.policy.source }} · {{ card.policy.reload }}</n-tag></div>
               <p>{{ card.entry.manifest.scope }} scope · v{{ card.entry.manifest.version }}</p>
               <small>{{ card.entry.contributions.tools.length }} tools · {{ card.entry.contributions.services.length }} services · {{ card.entry.contributions.events.length }} events</small>
               <div v-if="card.entry.manifest.scope === 'task'" class="capability-controls">

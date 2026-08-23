@@ -86,14 +86,17 @@ Cordis `Service` tracing is important here: inside `ctx.tools.register()`, the s
 
 Dynamic source supports named `name` / `inject` / `Config` / `apply` exports and default Cordis plugins. There is deliberately no persisted format version while the project is pre-release. Static imports are restricted to `vue`, `zod`, Cordis, the model SDK, and `@harness/sdk` (`@/sdk` in repository source). Kernel modules, the root Context, mounting, compilation, and repositories are not present in the blob import registry.
 
-HMR follows this sequence:
+Source policy is trusted runtime metadata, never capability-manifest data. `kernel` names are framework/authority owners, `protected` names are shipped control-plane or privileged capabilities, and every other name is `editable`. Capability callers cannot write or remove `.plugins/<locked>.js`, and all `.harness/...` active packages/task metadata are manager-owned; the workspace provider enforces both rules below individual editor tools. A protected on-demand capability such as standalone `llm` is mounted from its embedded source, not from its OPFS draft. The catalog exposes `source`, `editable`, and `reloadBoundary` so callers do not have to infer policy from names.
+
+Editable-capability HMR follows this sequence:
 
 1. Receive the workspace provider's Cordis `workspace/changed` event.
 2. Compile/import the new source before touching the running Fiber.
 3. If compilation or activation fails, keep the old Fiber active and record `hmrError`; the edited file remains a working draft.
 4. If compilation succeeds, await old-Fiber disposal and mount a new Fiber with the prior config and capability manifest.
-5. Defer the swap while an agent run is active.
-6. Publish `.harness/capabilities/<id>/index.js` only after activation succeeds. On refresh, a rejected working draft falls back to this last active revision without overwriting the draft.
+5. While an agent run is active, keep one generation fixed through the current LLM request, tool dispatch snapshot, and every pre/post-execute hook. Commit pending source at the following `loop/safe-point`; the next internal request sees the new generation without replacing the task, broker, or loop session. `loop/idle` is the fallback for terminal and aborted runs.
+6. At a safe point, consume even a not-yet-mature 300-ms editor debounce so a tool that just edited a capability can use the new version on the next internal turn.
+7. Publish `.harness/capabilities/<id>/index.js` only after activation succeeds. On refresh, a rejected working draft falls back to this last active revision without overwriting the draft.
 
 The project is still pre-release, so there is no persisted plugin-format version gate. Source-dialect changes happen in place; `?reset` remains the explicit way to reseed shipped plugins during development.
 

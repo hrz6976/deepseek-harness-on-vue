@@ -115,6 +115,7 @@ test('capability discovery prioritizes loadable groups and capability loading ac
       providers: [], permissions: [],
       contributes: { tools: ['advanced_tool'], panels: [], prompts: [], services: [], events: [], workflows: [] },
       health: 'healthy', issues: [],
+      source: 'editable', editable: true, reloadBoundary: 'turn',
     }],
     async create() { return ''; }, async mount() { return ''; }, async unmount() { return ''; }, async remove() { return ''; },
   });

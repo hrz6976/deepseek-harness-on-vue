@@ -3,6 +3,7 @@
 // manifest-backed workspace policy.
 import type { Context } from '@deepseek-ai/cordis';
 import { OpfsStore } from '@/kernel/opfs-store';
+import { assertWorkspaceMutationAllowed } from '@/kernel/plugin-policy';
 import { WorkspaceRuntime } from '@/kernel/workspace-runtime';
 import { errorMessage, log } from '@/sdk';
 
@@ -32,14 +33,16 @@ class OpfsRuntime extends WorkspaceRuntime {
   }
 
   async write(path: string, content: string): Promise<void> {
-    this.authorize('write');
+    const principal = this.authorize('write');
+    assertWorkspaceMutationAllowed(principal, path);
     const value = String(content ?? '');
     await this.store?.write(path, value);
     this.setFile(path, { content: value });
   }
 
   async remove(path: string): Promise<void> {
-    this.authorize('write');
+    const principal = this.authorize('write');
+    assertWorkspaceMutationAllowed(principal, path);
     await this.store?.remove(path);
     this.removeFile(path);
   }

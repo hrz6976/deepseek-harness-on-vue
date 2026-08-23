@@ -1,5 +1,6 @@
 import { computed, ref, type ComputedRef } from 'vue';
 import { capabilities, capabilityHealth } from '@/kernel/capabilities';
+import { pluginPolicy } from '@/kernel/plugin-policy';
 import { matchesPagePattern, type PageEvent, type PageSnapshot, type SiteSkill } from '@/shared/page-protocol';
 import type { CapabilityRequest } from '@/shared/capability-protocol';
 import {
@@ -61,7 +62,9 @@ export function useSandboxInspector(
       artifactCount: service!.artifacts.filter(artifact => artifact.taskId === task.id).length,
     }));
   });
-  const capabilityCards = computed(() => [...capabilities.values()].map(entry => ({ entry, health: capabilityHealth(entry) })));
+  const capabilityCards = computed(() => [...capabilities.values()].map(entry => ({
+    entry, health: capabilityHealth(entry), policy: pluginPolicy(entry.manifest.id),
+  })));
   const workspaceFiles = computed(() => (fsService.value?.list() ?? [])
     .filter(path => !path.startsWith('.plugins/') && !path.startsWith('.harness/')));
   const currentPagePlugins = computed(() => pagePlugins.value.filter(plugin =>

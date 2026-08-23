@@ -1,9 +1,10 @@
 // Standalone entry. The root app and framework services are bundled. Shipped
-// UI/task capabilities are source defaults seeded into OPFS and use the same
-// compile/HMR path as agent-created capabilities. ?reset is the capability
-// factory reset (wipes .plugins/ and capability packages, keeps localStorage).
+// UI/task capabilities are source defaults seeded into OPFS. Editable names
+// use the same HMR path as agent-created capabilities; protected names remain
+// readable but workspace-locked. ?reset wipes capability state, not secrets.
 import * as Vue from 'vue';
 import { capabilities } from '@/kernel/capabilities';
+import { pluginPolicy } from '@/kernel/plugin-policy';
 import { modules } from '@/kernel/modules';
 import { startHarnessRuntime } from '@/kernel/runtime-supervisor';
 import { cordisContextKey } from '@/kernel/cordis';
@@ -28,6 +29,7 @@ const App = Vue.defineComponent({
           <div v-for="p in plugins" :key="p.manifest.id + ':' + p.version" class="plugin-box">
             <div class="pname">🔌 {{ p.manifest.id }}
               <span class="badge">{{ isCore(p.manifest.id) ? 'core' : 'user' }}</span>
+              <span class="badge">{{ policy(p.manifest.id).source }} · {{ policy(p.manifest.id).reload }}</span>
               <span v-if="p.hmrError" class="badge hmr">HMR failed, old version running</span>
             </div>
           </div>
@@ -38,7 +40,7 @@ const App = Vue.defineComponent({
     // Shipped capabilities are reseeded by ?reset; kernel services do not
     // appear here because they are system Fibers, not editable source.
     const isCore = (name: string) => name in defaults;
-    return { plugins, isCore };
+    return { plugins, isCore, policy: pluginPolicy };
   },
 });
 

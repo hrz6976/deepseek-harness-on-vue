@@ -200,6 +200,9 @@ export interface CapabilityCatalogEntry {
   contributes: CapabilityContributionInventory;
   health: 'healthy' | 'degraded' | 'failed';
   issues: string[];
+  source: 'kernel' | 'protected' | 'editable';
+  editable: boolean;
+  reloadBoundary: 'turn' | 'idle' | 'restart';
 }
 
 export interface CompactionService {

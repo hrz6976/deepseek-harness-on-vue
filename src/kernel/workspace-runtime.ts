@@ -1,6 +1,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { shallowReactive } from 'vue';
 import { assertPrincipalAuthorized } from '@/shared/capability-policy';
+import type { CapabilityPrincipal } from '@/shared/capability-protocol';
 import type { FsService } from '@/shared/runtime';
 import { principalForContext } from './broker';
 
@@ -12,11 +13,12 @@ export abstract class WorkspaceRuntime extends Service implements FsService {
 
   constructor(ctx: Context) { super(ctx, 'fs'); }
 
-  protected authorize(action: 'read' | 'write'): void {
+  protected authorize(action: 'read' | 'write'): CapabilityPrincipal {
     const principal = principalForContext(this.ctx);
     assertPrincipalAuthorized(principal, action === 'read'
       ? { provider: 'workspace', action: 'list', input: {} }
       : { provider: 'workspace', action: 'write', input: { path: '.policy-probe', content: '' } });
+    return principal;
   }
 
   read(path: string): string | null {

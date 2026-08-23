@@ -19,6 +19,7 @@ const MAX_TRUNCATION_CONTINUATIONS = 3;
 const CONTINUATION_DIRECTIVE = '[Harness continuation] The previous assistant response was truncated by the model output limit. Continue the same work from where it stopped without repeating the partial response. If an action is needed, call the tool now; otherwise provide the actual final answer.';
 type AssistantSnapshot = Extract<LlmStreamEvent, { type: 'update' | 'done' }>;
 type TurnOutcome = 'completed' | 'tool-calls' | 'incomplete' | 'protocol-error' | 'filtered' | 'resource-error' | 'llm-error' | 'aborted';
+type SafePointReason = 'recovery-retry' | 'truncation-continuation' | 'tool-calls-complete';
 const name = 'loop';
 const inject = ['tools', 'prompt', 'fs', 'task'];
 
@@ -54,14 +55,15 @@ function apply(ctx: Context): void {
         usage: message.usage ? JSON.parse(JSON.stringify(message.usage)) as JsonObject : null,
       });
     };
+    const safePoint = (turn: number, reason: SafePointReason) =>
+      ctx.parallel('loop/safe-point', { turn, reason });
 
     ctx.provide('loop', {
       running,
       stop: () => { ctrl?.abort(); },
       async run(goal: string) {
         if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
-        const llm = ctx.reflect.get('llm') as import('../shared/runtime').LlmService | undefined;
-        if (!llm) { note('llm service not ready'); return; }
+        if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
         await task.ready;
         messages.push({ role: 'user', text: goal });
         running.value = true;
@@ -74,6 +76,10 @@ function apply(ctx: Context): void {
           let pendingDirective: string | null = null;
           for (let turn = 0; turn < HARD_TURN_LIMIT; turn++) {
             if (controller.signal.aborted) { note('stopped'); return; }
+            // Providers may be replaced transactionally at the previous safe
+            // point. Never retain a disposed service object across turns.
+            const llm = ctx.reflect.get('llm') as import('../shared/runtime').LlmService | undefined;
+            if (!llm) { note('llm service not ready'); return; }
             // interception point: plugins act on the canonical log between
             // turns — compaction splices old messages into a summary here,
             // BEFORE the streaming placeholder is pushed and the request built.
@@ -120,7 +126,13 @@ function apply(ctx: Context): void {
               // interception point: plugins may recover (compaction handles
               // context-overflow errors) by setting retry — one grant per run.
               const rec = await ctx.waterfall('loop/llm-error', { message: errMsg, messages, signal: controller.signal, retry: false }, (value: { message: string; messages: HarnessMessage[]; signal: AbortSignal; retry: boolean }) => value);
-              if (rec.retry && !recovered && !controller.signal.aborted) { recovered = true; turn--; note('retrying after recovery'); continue; }
+              if (rec.retry && !recovered && !controller.signal.aborted) {
+                recovered = true;
+                note('retrying after recovery');
+                await safePoint(turn + 1, 'recovery-retry');
+                turn--;
+                continue;
+              }
               const hint = /fetch/i.test(errMsg) ? ' (network/CORS? browsers block direct third-party API calls — use the /proxy route, see serve.mjs)' : '';
               note(`LLM call failed: ${errMsg}${hint}`);
               return;
@@ -147,6 +159,7 @@ function apply(ctx: Context): void {
               }
               truncationContinuations++;
               pendingDirective = CONTINUATION_DIRECTIVE;
+              await safePoint(turn + 1, 'truncation-continuation');
               continue;
             }
 
@@ -213,6 +226,11 @@ function apply(ctx: Context): void {
               });
               await ctx.waterfall('tools/post-execute', { name: tc.name, result: tc.result, args: pre.args }, (value: { name: string; result: string; args: JsonObject }) => value); // interception point: observe/transform results
             }
+            // All calls selected from this request's frozen tool table, plus
+            // their pre/post hooks, have settled. Capability HMR may now swap
+            // contributors without changing the task, broker, or loop Fiber;
+            // the next iteration takes a fresh tool and hook generation.
+            await safePoint(turn + 1, 'tool-calls-complete');
           }
           note(`reached the failsafe turn limit (${HARD_TURN_LIMIT}) — stopping what looks like a runaway loop`);
         } catch (error: unknown) {

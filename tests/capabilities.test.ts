@@ -9,6 +9,7 @@ import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runti
 import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
 import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import { principalForContext } from '@/kernel/broker';
+import { fsPlugin } from '@/plugins/fs';
 import { z } from 'zod';
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -100,6 +101,40 @@ test('trusted providers enforce declared provider, permission, and task identity
     tabId: 1,
     principal: { ...base, taskId: 'task-1' },
   }), { ok: true });
+});
+
+test('workspace service blocks protected plugin paths for capability callers but permits kernel maintenance', async () => {
+  await applyTestPlugin(createSystemPlugin('workspace', fsPlugin));
+  let capabilityWrite!: (path: string, content: string) => Promise<void>;
+  let capabilityRead!: (path: string) => string | null;
+  const writer = await mountPlugin('workspace-writer', {
+    inject: ['fs'],
+    apply(ctx) {
+      capabilityWrite = (path, content) => ctx.fs.write(path, content);
+      capabilityRead = path => ctx.fs.read(path);
+    },
+  }, {
+    manifest: {
+      id: 'workspace-writer', version: '1.0.0', title: 'Workspace writer', scope: 'global',
+      contributes: {}, requires: { providers: ['workspace'] }, permissions: [{ id: 'workspace.read' }, { id: 'workspace.write' }],
+    },
+  });
+  await writer.fiber?.await();
+
+  await assert.rejects(() => capabilityWrite('.plugins/page.js', 'tampered'), /source\/package is locked/);
+  await assert.rejects(() => capabilityWrite('/.plugins//page.js/', 'tampered'), /source\/package is locked/);
+  await assert.rejects(() => capabilityWrite('.harness/capabilities/mcp/index.js', 'tampered'), /internal state is manager-owned/);
+  await assert.rejects(() => capabilityWrite('.harness/tasks/index.json', 'tampered'), /internal state is manager-owned/);
+  await capabilityWrite('.plugins/run-js.js', 'editable');
+  assert.equal(capabilityRead('.plugins/run-js.js'), 'editable');
+
+  let kernelWrite!: (path: string, content: string) => Promise<void>;
+  await applyTestPlugin(createSystemPlugin('manager', {
+    inject: ['fs'],
+    apply(ctx) { kernelWrite = (path, content) => ctx.fs.write(path, content); },
+  }));
+  await kernelWrite('.plugins/page.js', 'trusted');
+  assert.equal(capabilityRead('.plugins/page.js'), 'trusted');
 });
 
 test('task-scoped Fiber is owned by the active task scope', async () => {

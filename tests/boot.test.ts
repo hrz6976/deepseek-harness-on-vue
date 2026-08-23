@@ -14,8 +14,12 @@ import { mountPlugin } from '@/kernel/host';
 import { UiService, uiKernelPlugin } from '@/kernel/ui';
 import { createManagerPlugin, managerPlugin } from '@/plugins/manager';
 import { createTaskRuntimePlugin } from '@/plugins/task-runtime';
+import { toolsPlugin } from '@/plugins/tools';
+import { promptPlugin } from '@/plugins/prompt';
+import { loopPlugin } from '@/plugins/loop';
+import { fsPlugin } from '@/plugins/fs';
 import { capabilities, legacyCapabilityManifest } from '@/kernel/capabilities';
-import { runtime } from '@/kernel/cordis';
+import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import type { TaskRuntimeService } from '@/shared/runtime';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
@@ -23,6 +27,21 @@ globalThis.__harness = { modules }; // what compiled plugin code reads its impor
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const SRC = marker => `export default { name: 'fixture', apply() {} }; // ${marker}`;
+const TOOL_HOOK_SRC = marker => `
+  export const inject = ['tools'];
+  export function apply(ctx) {
+    ctx.tools.registerSchema({
+      name: 'versioned_tool',
+      description: 'tool:${marker}',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => 'result:${marker}',
+    });
+    ctx.on('llm/request', (request, next) => {
+      request.systemPrompt += '\\nhook:${marker}';
+      return next(request);
+    });
+  }
+`;
 const plugins = () => [...capabilities.values()];
 
 const boot = (defaults, options = {}) => applyTestPlugin(createManagerPlugin({ defaults, ...options }, false));
@@ -174,10 +193,12 @@ test('boot: ?reset wipes .plugins/ and reseeds shipped state', async () => {
 
 // ----------------------------------------------------------------- manager --
 // Manager is a real Cordis plugin; its HMR effects belong to its test Fiber.
-async function mountManager(files) {
+async function mountManager(files, defaults = null) {
   const fs = fakeFs(files);
   await provideTestService('fs', fs);
-  await applyTestPlugin(managerPlugin);
+  await applyTestPlugin(defaults
+    ? createManagerPlugin({ defaults, search: '' }, false)
+    : managerPlugin);
   await sleep(0); // let the adopt-existing-files pass run (it awaits fs.ready)
   let mgr;
   const caller = await mountPlugin('manager-test-client', {
@@ -194,32 +215,32 @@ async function mountManager(files) {
 }
 
 test('manager: mount passes config through; HMR reload preserves it', async () => {
-  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'llm.js']: SRC('v1') });
-  assert.match(await mgr.mount('llm', { cfg: { model: 'm1' } }), /mounted/);
-  const entry = plugins().find(p => p.manifest.id === 'llm');
+  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('v1') });
+  assert.match(await mgr.mount('alpha', { cfg: { model: 'm1' } }), /mounted/);
+  const entry = plugins().find(p => p.manifest.id === 'alpha');
   assert.deepEqual(entry.config, { cfg: { model: 'm1' } });
   const v = entry.version;
-  await fs.write(PLUGIN_DIR + 'llm.js', SRC('v2'));                   // agent edits the file
+  await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v2'));                 // agent edits the file
   await nextTick(); await sleep(400);                                 // event + 300ms debounce
-  const reloaded = plugins().find(p => p.manifest.id === 'llm');
+  const reloaded = plugins().find(p => p.manifest.id === 'alpha');
   assert.equal(reloaded.version, v + 1);                              // replacement Fiber
   assert.deepEqual(reloaded.config, { cfg: { model: 'm1' } });        // config survived
 });
 
 test('manager: unmount keeps the file; a later edit does NOT surprise-remount', async () => {
-  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'llm.js']: SRC('v1') });
-  await mgr.mount('llm', { cfg: {} });
-  assert.match(await mgr.unmount('llm'), /file kept/);
-  assert.equal(plugins().find(p => p.manifest.id === 'llm'), undefined);
-  assert.equal(mgr.catalog().find(p => p.id === 'llm')?.status, 'disposed');
-  assert.equal(fs.read(PLUGIN_DIR + 'llm.js'), SRC('v1'));
-  await fs.write(PLUGIN_DIR + 'llm.js', SRC('v2'));
+  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('v1') });
+  await mgr.mount('alpha', { cfg: {} });
+  assert.match(await mgr.unmount('alpha'), /file kept/);
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha'), undefined);
+  assert.equal(mgr.catalog().find(p => p.id === 'alpha')?.status, 'disposed');
+  assert.equal(fs.read(PLUGIN_DIR + 'alpha.js'), SRC('v1'));
+  await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v2'));
   await nextTick(); await sleep(400);
-  assert.equal(plugins().find(p => p.manifest.id === 'llm'), undefined); // still unmounted
-  await mgr.mount('llm', { cfg: {} });                                // explicit remount uses the NEW source
-  assert.match(plugins().find(p => p.manifest.id === 'llm') ? 'ok' : 'missing', /ok/);
-  assert.match(await mgr.remove('llm'), /source are gone/);
-  assert.equal(fs.read(PLUGIN_DIR + 'llm.js'), null);
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha'), undefined); // still unmounted
+  await mgr.mount('alpha', { cfg: {} });                              // explicit remount uses the NEW source
+  assert.match(plugins().find(p => p.manifest.id === 'alpha') ? 'ok' : 'missing', /ok/);
+  assert.match(await mgr.remove('alpha'), /source are gone/);
+  assert.equal(fs.read(PLUGIN_DIR + 'alpha.js'), null);
   await fs.write(PLUGIN_DIR + 'beta.js', SRC('idle'));
   assert.match(await mgr.remove('beta'), /not running/);
   assert.equal(fs.read(PLUGIN_DIR + 'beta.js'), null);
@@ -244,15 +265,70 @@ test('manager: create publishes a visible task capability instead of only writin
 });
 
 test('manager: create refuses to replace an existing capability', async () => {
-  const original = SRC('original-mcp');
-  const replacement = SRC('replacement-mcp');
-  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'mcp.js']: original });
-  assert.match(await mgr.mount('mcp'), /mounted/);
-  const active = capabilities.get('mcp');
+  const original = SRC('original-alpha');
+  const replacement = SRC('replacement-alpha');
+  const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: original });
+  assert.match(await mgr.mount('alpha'), /mounted/);
+  const active = capabilities.get('alpha');
 
-  assert.match(await mgr.create('mcp', replacement), /already exists/);
-  assert.equal(fs.read(PLUGIN_DIR + 'mcp.js'), original);
-  assert.equal(capabilities.get('mcp'), active);
+  assert.match(await mgr.create('alpha', replacement), /already exists/);
+  assert.equal(fs.read(PLUGIN_DIR + 'alpha.js'), original);
+  assert.equal(capabilities.get('alpha'), active);
+});
+
+test('manager: protected shipped capability always uses trusted source and cannot self-update', async () => {
+  const trusted = SRC('trusted-llm');
+  const tampered = SRC('agent-llm');
+  const { fs, mgr } = await mountManager(
+    { [PLUGIN_DIR + 'llm.js']: tampered },
+    { llm: { source: trusted, autoMount: false } },
+  );
+
+  assert.equal(fs.read(PLUGIN_DIR + 'llm.js'), trusted);
+  const catalog = mgr.catalog().find(entry => entry.id === 'llm');
+  assert.equal(catalog?.source, 'protected');
+  assert.equal(catalog?.editable, false);
+  assert.equal(catalog?.reloadBoundary, 'turn');
+  assert.match(await mgr.create('llm', tampered), /protected/);
+
+  assert.match(await mgr.mount('llm', { cfg: { model: 'm1' } }), /mounted/);
+  const entry = capabilities.get('llm')!;
+  assert.equal(entry.manifest.scope, 'global');
+  assert.ok(entry.manifest.permissions.some(permission => permission.id === 'llm.use'));
+  const version = entry.version;
+
+  // fakeFs intentionally bypasses the workspace provider so this also proves
+  // manager-side HMR refuses a protected draft that arrived through a stale
+  // or otherwise out-of-band writer.
+  await fs.write(PLUGIN_DIR + 'llm.js', tampered);
+  await runtime.parallel('loop/safe-point', { turn: 1, reason: 'tool-calls-complete' });
+  assert.equal(capabilities.get('llm')?.version, version);
+  assert.match(await mgr.remove('llm'), /protected/);
+});
+
+test('manager: trusted maintenance can persist a protected on-demand mount through the real workspace guard', async () => {
+  const trusted = SRC('trusted-llm');
+  await applyTestPlugin(createSystemPlugin('workspace', fsPlugin));
+  await applyTestPlugin(createSystemPlugin('manager', createManagerPlugin({
+    defaults: { llm: { source: trusted, autoMount: false } }, search: '',
+  }, false)));
+
+  let mgr;
+  let read;
+  const caller = await mountPlugin('settings-test-client', {
+    inject: ['manager', 'fs'], apply(ctx) { mgr = ctx.manager; read = path => ctx.fs.read(path); },
+  }, {
+    manifest: {
+      id: 'settings-test-client', version: '1.0.0', title: 'Settings test client', scope: 'global',
+      contributes: {}, requires: { providers: ['workspace'] },
+      permissions: [{ id: 'capability.manage' }, { id: 'workspace.read' }],
+    },
+  });
+  await caller.fiber?.await();
+
+  assert.match(await mgr.mount('llm', { cfg: { model: 'm1' } }), /mounted/);
+  assert.equal(capabilities.get('llm')?.manifest.scope, 'global');
+  assert.equal(read(capabilityIndexPath('llm')), trusted);
 });
 
 test('manager: recreated capability does not inherit an orphaned package manifest', async () => {
@@ -288,18 +364,99 @@ test('manager remounts attached task capabilities under each active task Fiber',
   assert.notEqual(capabilities.get('alpha')?.fiber, firstFiber);
 });
 
-test('manager: reloads are deferred while the loop runs, flushed after', async () => {
+test('manager: safe points commit the latest debounce candidate; idle remains the terminal fallback', async () => {
   const { fs, mgr } = await mountManager({ [PLUGIN_DIR + 'alpha.js']: SRC('v1') });
   await mgr.mount('alpha');
   const entry = plugins().find(p => p.manifest.id === 'alpha');
   const v = entry.version;
   await runtime.parallel('loop/busy');
   await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v2'));
+  await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v1'));
+  await nextTick();
+  assert.equal(entry.version, v);                                     // current generation is still active
+  await runtime.parallel('loop/safe-point', { turn: 1, reason: 'tool-calls-complete' });
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha')!.version, v); // undo cancelled the stale v2 candidate
+
+  await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v2'));
+  await runtime.parallel('loop/safe-point', { turn: 2, reason: 'tool-calls-complete' });
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha')!.version, v + 1); // 300-ms candidate committed now
+
+  await fs.write(PLUGIN_DIR + 'alpha.js', SRC('v3'));
   await nextTick(); await sleep(400);
-  assert.equal(entry.version, v);                                     // deferred
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha')!.version, v + 1); // queued while still busy
   await runtime.parallel('loop/idle');
-  await nextTick(); await sleep(50);
-  assert.equal(plugins().find(p => p.manifest.id === 'alpha')!.version, v + 1); // replacement Fiber flushed
+  assert.equal(plugins().find(p => p.manifest.id === 'alpha')!.version, v + 2); // terminal fallback flushed
+});
+
+test('manager: tool and hook HMR becomes visible next turn without replacing the task session', async () => {
+  const v1 = TOOL_HOOK_SRC('v1');
+  const v2 = TOOL_HOOK_SRC('v2');
+  const fs = fakeFs({ [PLUGIN_DIR + 'turn-plugin.js']: v1 });
+  const messages = [];
+  const requests = [];
+
+  await provideTestService('fs', fs);
+  await applyTestPlugin(toolsPlugin);
+  await applyTestPlugin(promptPlugin);
+  await provideTestService('task', {
+    ready: Promise.resolve(), messages,
+    activeTask: () => null, scope: () => runtime,
+    async appendEvent() {},
+  });
+  await provideTestService('llm', {
+    stream(request) {
+      requests.push({
+        prompt: request.systemPrompt,
+        tools: request.tools.map(tool => ({ name: tool.name, description: tool.description })),
+      });
+      const turn = requests.length;
+      return (async function* () {
+        if (turn === 1) {
+          yield { type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
+            { id: 'edit', name: 'rewrite_turn_plugin', args: '{}', argsObj: {} },
+          ] };
+        } else if (turn === 2) {
+          yield { type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
+            { id: 'use', name: 'versioned_tool', args: '{}', argsObj: {} },
+          ] };
+        } else {
+          yield { type: 'done', text: 'finished', thinking: '', finishReason: 'stop', toolCalls: [] };
+        }
+      })();
+    },
+  });
+  await applyTestPlugin({
+    name: 'turn-plugin-editor', inject: ['tools'],
+    apply(ctx) {
+      ctx.tools.registerSchema({
+        name: 'rewrite_turn_plugin', description: 'replace the fixture capability',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        run: async () => { await fs.write(PLUGIN_DIR + 'turn-plugin.js', v2); return 'rewritten'; },
+      });
+    },
+  });
+  await boot({ 'turn-plugin': { source: v1 } }, { search: '' });
+  const initialHookProbe = await runtime.waterfall('llm/request', { systemPrompt: 'probe' }, request => request);
+  assert.match(initialHookProbe.systemPrompt, /hook:v1/);
+  await applyTestPlugin(loopPlugin);
+
+  const taskService = runtime.reflect.get('task');
+  const sessionMessages = taskService.messages;
+  await runtime.reflect.get('loop').run('update the tool and continue');
+
+  assert.equal(taskService.messages, sessionMessages);
+  assert.equal(sessionMessages, messages);
+  assert.match(requests[0].prompt, /hook:v1/);
+  assert.equal(requests[0].tools.find(tool => tool.name === 'versioned_tool')?.description, 'tool:v1');
+  assert.match(requests[1].prompt, /hook:v2/);
+  assert.doesNotMatch(requests[1].prompt, /hook:v1/);
+  assert.equal(requests[1].tools.find(tool => tool.name === 'versioned_tool')?.description, 'tool:v2');
+  const versionedCall = messages
+    .filter(message => message.role === 'assistant')
+    .flatMap(message => message.toolCalls)
+    .find(call => call.name === 'versioned_tool');
+  assert.equal(versionedCall?.result, 'result:v2');
+  assert.equal(capabilities.get('turn-plugin')?.version, 1);
 });
 
 test('manager: broken edit rolls back — old version keeps running, hmrError set', async () => {

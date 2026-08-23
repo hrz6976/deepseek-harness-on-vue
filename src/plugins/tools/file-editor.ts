@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { z } from 'zod';
-import { systemPluginNameFromPath } from '@/sdk';
+import { lockedPluginNameFromPath } from '@/sdk';
 
 export const name = 'file-editor';
 export const inject = ['fs', 'tools', 'prompt'];
@@ -18,7 +18,7 @@ export function apply(ctx: Context): void {
     'Manage files with file_editor: list to see what exists, write to create, view to check contents, str_replace for local edits.',
     'View a file before modifying it.',
     'If the user asks for a web page/game/tool, put ALL code in a single index.html (inline <style> and <script>) so it can be previewed directly.',
-    'Non-system files under .plugins/ are editable Cordis capability plugins. Editing one compiles a replacement before its old Fiber is disposed. Framework services are bundled and cannot be overwritten from the workspace.',
+    'Only editable capability files under .plugins/ may be changed. Kernel and protected capability sources/packages are locked by the workspace provider. An accepted edit is committed at the next safe turn boundary.',
   ].join('\n');
 
   ctx.tools.register({
@@ -27,14 +27,14 @@ export function apply(ctx: Context): void {
       if (command === 'list') return ctx.fs.list().join('\n') || '(empty)';
       if (command === 'view') { const value = ctx.fs.read(path); return value === null ? `Error: ${path} does not exist` : value; }
       if (command === 'write') {
-        const systemName = systemPluginNameFromPath(path);
-        if (systemName) return `Error: ${systemName} is a bundled system plugin and cannot be overwritten from the workspace`;
+        const lockedName = lockedPluginNameFromPath(path);
+        if (lockedName) return `Error: plugin ${lockedName} is protected and cannot be overwritten from the workspace`;
         await ctx.fs.write(path, content);
         return `wrote ${path} (${content.length} chars)`;
       }
       if (command === 'str_replace') {
-        const systemName = systemPluginNameFromPath(path);
-        if (systemName) return `Error: ${systemName} is a bundled system plugin and cannot be overwritten from the workspace`;
+        const lockedName = lockedPluginNameFromPath(path);
+        if (lockedName) return `Error: plugin ${lockedName} is protected and cannot be overwritten from the workspace`;
         const value = ctx.fs.read(path);
         if (value === null) return `Error: ${path} does not exist`;
         if (!value.includes(old_str)) return `Error: old_str not found in ${path}`;

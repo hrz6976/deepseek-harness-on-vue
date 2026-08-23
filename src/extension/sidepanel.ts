@@ -4,6 +4,7 @@ import { assertPrincipalAuthorized } from '@/shared/capability-policy';
 import { approvalForRequest, type ApprovalRequest } from './approval-policy';
 import { TrustedCapabilityHost } from './capability-host';
 import { OpfsStore } from '@/kernel/opfs-store';
+import { assertWorkspaceMutationAllowed } from '@/kernel/plugin-policy';
 import { isInspectableUrl, parseSidePanelTabId, sidePanelPortName } from './tab-scope';
 import { requiredElement } from './required-element';
 import './sidepanel.css';
@@ -40,7 +41,12 @@ opfs.onChange(() => {
   frame.contentWindow?.postMessage({ channel: 'harness-shell-v1', type: 'workspace-changed' }, '*');
 });
 const localCapabilityHost = new TrustedCapabilityHost();
-localCapabilityHost.register('workspace', { request: request => opfs.handle(request) });
+localCapabilityHost.register('workspace', {
+  request: (request, context) => {
+    if (request.action !== 'list') assertWorkspaceMutationAllowed(context.principal, request.input.path);
+    return opfs.handle(request);
+  },
+});
 
 function connect(): chrome.runtime.Port {
   if (portConnected && port) return port;

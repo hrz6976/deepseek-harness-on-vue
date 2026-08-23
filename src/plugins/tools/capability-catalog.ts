@@ -40,6 +40,7 @@ export function apply(ctx: Context): void {
           kind: 'capability', id: entry.id, title: entry.title, description: entry.description,
           scope: entry.scope, version: entry.version, status: entry.status, attached: entry.attached,
           providers: entry.providers, permissions: entry.permissions, health: entry.health, issues: entry.issues,
+          source: entry.source, editable: entry.editable, reloadBoundary: entry.reloadBoundary,
         });
       }
 

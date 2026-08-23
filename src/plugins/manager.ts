@@ -11,6 +11,7 @@ import {
 } from '@/kernel/capability-package';
 import type { CapabilityManifest } from '@/shared/capability-protocol';
 import { SYSTEM_PLUGIN_NAMES } from '@/kernel/system-plugin-names';
+import { isPluginSourceLocked, pluginPolicy } from '@/kernel/plugin-policy';
 import type { CapabilityCatalogEntry, ManagerService, PluginDefaults } from '@/shared/runtime';
 import { errorMessage } from '@/shared/runtime';
 import { principalForContext } from '@/kernel/broker';
@@ -33,7 +34,9 @@ class ManagerRuntime extends Service implements ManagerService {
   remove(name: string) { return this.authorized(() => this.implementation.remove(name)); }
 }
 
-interface SourceState { timer?: ReturnType<typeof setTimeout>; pending?: string }
+type ReloadState =
+  | { phase: 'debouncing'; source: string; timer: ReturnType<typeof setTimeout> }
+  | { phase: 'queued'; source: string };
 
 interface ManagerBootstrap { defaults: PluginDefaults; search?: string; reservedNames?: readonly string[] }
 interface ActivateOptions {
@@ -48,31 +51,29 @@ const name = 'manager';
 const inject = ['fs'];
 
 function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void> {
-  const sources = new Map<string, SourceState>();
+  const reloads = new Map<string, ReloadState>();
   const reserved = new Set(bootstrap?.reservedNames ?? SYSTEM_PLUGIN_NAMES);
   let loopBusy = false;
 
   const fs = ctx.fs;
   const task = () => ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
   const parentFor = (scope = 'task') => scope === 'task' ? task()?.scope() ?? ctx : ctx;
-  const sourceState = (pluginName: string) => {
-    const state = sources.get(pluginName) ?? {};
-    sources.set(pluginName, state);
-    return state;
-  };
-  const dropSource = (pluginName: string) => {
-    const state = sources.get(pluginName);
-    if (state?.timer) clearTimeout(state.timer);
-    sources.delete(pluginName);
+  const cancelReload = (pluginName: string, source?: string) => {
+    const state = reloads.get(pluginName);
+    if (source !== undefined && state?.source !== source) return;
+    if (state?.phase === 'debouncing') clearTimeout(state.timer);
+    reloads.delete(pluginName);
   };
 
   async function activate(pluginName: string, source: string, options: ActivateOptions = {}) {
     const plugin = await compilePlugin(pluginName, source);
-    const file = sourceState(pluginName);
-    if (file.timer) clearTimeout(file.timer);
+    // Do not discard an edit that arrived while this source was compiling.
+    cancelReload(pluginName, source);
     const previous = capabilities.get(pluginName);
     const previousVersion = previous?.version ?? -1;
-    const storedManifest = readCapabilityManifest(fs, pluginName, options.builtin ?? false);
+    const storedManifest = options.manifest
+      ? null
+      : readCapabilityManifest(fs, pluginName, options.builtin ?? false);
     const manifest = options.manifest ?? previous?.manifest ?? storedManifest?.manifest;
     const manifestSource = options.manifestSource ?? previous?.manifestSource ?? storedManifest?.source;
 
@@ -116,10 +117,31 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     catch (error) { return { entry: null, error: errorMessage(error) }; }
   }
 
-  function scheduleReload(pluginName: string, content: string): void {
-    if (!loopBusy) return void reload(pluginName, content);
-    sourceState(pluginName).pending = content;
-    log(`HMR: [${pluginName}] changed during a run — reload deferred until the run ends`, 'warn');
+  function armReload(pluginName: string, source: string): void {
+    cancelReload(pluginName);
+    const timer = setTimeout(() => {
+      const state = reloads.get(pluginName);
+      if (state?.phase !== 'debouncing' || state.timer !== timer) return;
+      if (loopBusy) {
+        reloads.set(pluginName, { phase: 'queued', source: state.source });
+        log(`HMR: [${pluginName}] changed during a run — reload queued for the next safe point`, 'warn');
+      } else {
+        reloads.delete(pluginName);
+        void reload(pluginName, state.source);
+      }
+    }, 300);
+    reloads.set(pluginName, { phase: 'debouncing', source, timer });
+  }
+
+  function takeReloadBatch(): Array<[pluginName: string, source: string]> {
+    const states = [...reloads];
+    reloads.clear();
+    for (const [, state] of states) if (state.phase === 'debouncing') clearTimeout(state.timer);
+    return states.map(([pluginName, state]) => [pluginName, state.source]);
+  }
+
+  async function flushReloads(): Promise<void> {
+    for (const [pluginName, source] of takeReloadBatch()) await reload(pluginName, source);
   }
 
   async function reload(pluginName: string, content: string): Promise<void> {
@@ -152,6 +174,13 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
       if (reserved.has(pluginName)) continue;
       const path = `${PLUGIN_DIR}${pluginName}.js`;
       const workingSource = fs.read(path);
+      if (pluginPolicy(pluginName).source === 'protected') {
+        if (workingSource !== definition.source) {
+          await fs.write(path, definition.source);
+          if (workingSource != null) log(`boot: restored locked shipped capability [${pluginName}]`, 'warn');
+        }
+        continue;
+      }
       if (workingSource == null) { await fs.write(path, definition.source); continue; }
       if (workingSource === definition.source) continue;
       let storedManifest: ReturnType<typeof readCapabilityManifest> = null;
@@ -172,24 +201,30 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     for (const pluginName of names) {
       const definition = defaults[pluginName];
       if (definition?.autoMount === false) continue;
-      const source = fs.read(`${PLUGIN_DIR}${pluginName}.js`) ?? definition?.source;
+      const policy = pluginPolicy(pluginName);
+      const protectedSource = policy.source === 'protected';
+      const source = protectedSource ? definition?.source : fs.read(`${PLUGIN_DIR}${pluginName}.js`) ?? definition?.source;
       if (source == null) continue;
       const builtin = pluginName in defaults;
       let storedManifest: ReturnType<typeof readCapabilityManifest> = null;
-      try { storedManifest = readCapabilityManifest(fs, pluginName, builtin); }
+      try { if (!protectedSource) storedManifest = readCapabilityManifest(fs, pluginName, builtin); }
       catch { /* activate reports the stored manifest error */ }
-      const scope = storedManifest?.manifest.scope ?? (builtin ? 'global' : 'task');
+      const trustedManifest = protectedSource ? legacyCapabilityManifest(pluginName, true) : storedManifest?.manifest;
+      const scope = trustedManifest?.scope ?? (builtin ? 'global' : 'task');
       if (task() && scope === 'task' && !task()?.activeTask()?.capabilityIds.includes(pluginName)) continue;
       const activeSource = fs.read(capabilityIndexPath(pluginName));
       const options: ActivateOptions = {
         builtin,
-        ...(storedManifest ? { manifest: storedManifest.manifest, manifestSource: storedManifest.source } : {}),
-        bumpManifest: !refreshed.has(pluginName) && activeSource != null && activeSource !== source
+        ...(trustedManifest ? {
+          manifest: trustedManifest,
+          manifestSource: protectedSource ? 'generated' as const : storedManifest!.source,
+        } : {}),
+        bumpManifest: !protectedSource && !refreshed.has(pluginName) && activeSource != null && activeSource !== source
           && (storedManifest?.source ?? 'generated') === 'generated',
       };
       const result = await tryActivate(pluginName, source, options);
       if (result.entry) continue;
-      const fallbackSource = fs.read(capabilityIndexPath(pluginName));
+      const fallbackSource = protectedSource ? null : fs.read(capabilityIndexPath(pluginName));
       if (!fallbackSource || fallbackSource === source) {
         log(`boot: plugin ${pluginName} failed to activate: ${result.error} — skipped (fix the draft, remove_plugin it, or ?reset)`, 'err');
         continue;
@@ -211,8 +246,13 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
   function catalogEntry(pluginName: string): CapabilityCatalogEntry | null {
     if (reserved.has(pluginName)) return null;
     const entry = capabilities.get(pluginName);
+    const policy = pluginPolicy(pluginName);
     let manifest = entry?.manifest;
-    try { manifest ??= readCapabilityManifest(fs, pluginName, false)?.manifest ?? legacyCapabilityManifest(pluginName, false); }
+    try {
+      manifest ??= policy.source === 'protected' && bootstrap?.defaults[pluginName]
+        ? legacyCapabilityManifest(pluginName, true)
+        : readCapabilityManifest(fs, pluginName, false)?.manifest ?? legacyCapabilityManifest(pluginName, false);
+    }
     catch { return null; }
     const health = entry ? capabilityHealth(entry) : null;
     return {
@@ -224,6 +264,7 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
       permissions: manifest.permissions.map(permission => permission.id),
       contributes: emptyContributionInventory(entry?.contributions ?? manifest.contributes),
       health: health?.state ?? 'healthy', issues: health?.issues ?? [],
+      source: policy.source, editable: policy.source === 'editable', reloadBoundary: policy.reload,
     };
   }
 
@@ -235,6 +276,7 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     async create(pluginName, source, manifest) {
       if (!/^[a-z][a-z0-9_-]*$/iu.test(pluginName || '')) return 'Error: name must start with a letter, only letters/digits/-/_';
       if (reserved.has(pluginName)) return `Error: ${pluginName} is a reserved system plugin name`;
+      if (isPluginSourceLocked(pluginName)) return `Error: plugin ${pluginName} is protected and cannot be replaced by Agent source`;
       const draftPath = PLUGIN_DIR + pluginName + '.js';
       if (capabilities.has(pluginName) || fs.read(draftPath) != null) {
         return `Error: capability ${pluginName} already exists; edit ${draftPath} for HMR or remove it before creating a replacement`;
@@ -256,9 +298,19 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     },
     async mount(pluginName, config) {
       if (reserved.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be mounted from OPFS`;
-      const source = fs.read(PLUGIN_DIR + pluginName + '.js');
+      const definition = bootstrap?.defaults[pluginName];
+      const protectedSource = pluginPolicy(pluginName).source === 'protected';
+      if (protectedSource && !definition) return `Error: plugin ${pluginName} is protected and has no trusted bundled source`;
+      const source = protectedSource ? definition!.source : fs.read(PLUGIN_DIR + pluginName + '.js');
       if (source == null) return `Error: no source at ${PLUGIN_DIR + pluginName + '.js'}`;
-      const result = await tryActivate(pluginName, source, { config: config ?? null });
+      const result = await tryActivate(pluginName, source, {
+        config: config ?? null,
+        ...(protectedSource ? {
+          builtin: true,
+          manifest: legacyCapabilityManifest(pluginName, true),
+          manifestSource: 'generated' as const,
+        } : {}),
+      });
       if (!result.entry) return `Error: plugin ${pluginName} failed to activate: ${result.error}`;
       if (result.entry.manifest.scope === 'task') await task()?.attachCapability(result.entry.manifest.id);
       return `plugin ${pluginName} mounted`;
@@ -270,10 +322,11 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     },
     async remove(pluginName) {
       if (reserved.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be removed`;
+      if (isPluginSourceLocked(pluginName)) return `Error: plugin ${pluginName} is protected and cannot be removed`;
       const mounted = capabilities.has(pluginName);
       const path = PLUGIN_DIR + pluginName + '.js';
       if (!mounted && fs.read(path) == null) return `Error: plugin ${pluginName} does not exist (mounted: ${[...capabilities.keys()].join(', ') || 'none'})`;
-      dropSource(pluginName);
+      cancelReload(pluginName);
       if (mounted) await unmountPlugin(pluginName);
       await fs.remove(path);
       await task()?.detachCapability(pluginName);
@@ -295,26 +348,33 @@ function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void>
     if (entry?.manifest.scope === 'task') await unmountPlugin(id);
   });
   ctx.on('loop/busy', () => { loopBusy = true; });
+  ctx.on('loop/safe-point', async () => {
+    // A tool may have written its own source only milliseconds ago. Treat the
+    // turn boundary as a commit barrier instead of waiting out the editor's
+    // ordinary 300-ms debounce, so the next request sees the new generation.
+    await flushReloads();
+  });
   ctx.on('loop/idle', async () => {
     loopBusy = false;
-    for (const [name, file] of sources) if (file.pending !== undefined) {
-      const source = file.pending; delete file.pending; await reload(name, source);
-    }
+    await flushReloads();
   });
   ctx.on('workspace/changed', (path: string, content: string | null) => {
     if (!path.startsWith(PLUGIN_DIR) || !path.endsWith('.js') || content == null) return;
     const pluginName = path.slice(PLUGIN_DIR.length, -3);
-    if (reserved.has(pluginName) || fs.read(capabilityIndexPath(pluginName)) === content) return;
-    const file = sourceState(pluginName);
-    if (file.timer) clearTimeout(file.timer);
-    file.timer = setTimeout(() => scheduleReload(pluginName, content), 300);
+    if (reserved.has(pluginName) || isPluginSourceLocked(pluginName)) return;
+    if (fs.read(capabilityIndexPath(pluginName)) === content) {
+      // Undoing an edit back to the active revision must also cancel a queued
+      // or debouncing revision; otherwise that stale source could mount at
+      // the next safe point even though the workspace no longer contains it.
+      cancelReload(pluginName);
+      return;
+    }
+    armReload(pluginName, content);
   });
 
   ctx.effect(() => () => {
-    for (const source of sources.values()) {
-      if (source.timer) clearTimeout(source.timer);
-    }
-    sources.clear();
+    for (const state of reloads.values()) if (state.phase === 'debouncing') clearTimeout(state.timer);
+    reloads.clear();
     log('manager plugin unmounted', 'warn');
   }, 'manager.hmr');
   return bootstrap ? initialize(bootstrap) : undefined;

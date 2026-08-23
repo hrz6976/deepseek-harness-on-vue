@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { z } from 'zod';
-import { systemPluginNameFromPath } from '@/sdk';
+import { lockedPluginNameFromPath } from '@/sdk';
 
 export const name = 'workspace-tools';
 export const inject = ['fs', 'tools', 'prompt'];
@@ -97,8 +97,8 @@ export function apply(ctx: Context): void {
     availability: WORKSPACE_GROUP,
     parameters: z.object({ path: z.string().min(1).max(1_000), content: z.string().max(10_000_000) }),
     async run({ path, content }) {
-      const systemName = systemPluginNameFromPath(path);
-      if (systemName) return `Error: ${systemName} is a bundled system plugin and cannot be overwritten from the workspace`;
+      const lockedName = lockedPluginNameFromPath(path);
+      if (lockedName) return `Error: plugin ${lockedName} is protected and cannot be overwritten from the workspace`;
       await ctx.fs.write(path, content);
       return `wrote ${path} (${content.length} chars)`;
     },
@@ -112,8 +112,8 @@ export function apply(ctx: Context): void {
       path: z.string().min(1).max(1_000), oldText: z.string().min(1), newText: z.string(), replaceAll: z.boolean().default(false),
     }),
     async run({ path, oldText, newText, replaceAll }) {
-      const systemName = systemPluginNameFromPath(path);
-      if (systemName) return `Error: ${systemName} is a bundled system plugin and cannot be overwritten from the workspace`;
+      const lockedName = lockedPluginNameFromPath(path);
+      if (lockedName) return `Error: plugin ${lockedName} is protected and cannot be overwritten from the workspace`;
       const source = ctx.fs.read(path);
       if (source == null) return `Error: ${path} does not exist`;
       const occurrences = source.split(oldText).length - 1;
@@ -131,6 +131,8 @@ export function apply(ctx: Context): void {
     availability: WORKSPACE_GROUP,
     parameters: z.object({ path: z.string().min(1).max(1_000) }),
     async run({ path }) {
+      const lockedName = lockedPluginNameFromPath(path);
+      if (lockedName) return `Error: plugin ${lockedName} is protected and cannot be removed from the workspace`;
       if (ctx.fs.read(path) == null) return `Error: ${path} does not exist`;
       await ctx.fs.remove(path);
       return `removed ${path}`;

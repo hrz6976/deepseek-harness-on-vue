@@ -13,7 +13,8 @@ Tab-specific side panel / options / service worker (trusted)
                  │ postMessage / chrome.runtime.Port
 Sandboxed Vue agent runtime (dynamic, no chrome.*)
   ├─ bundled system Fibers: loop / tools / prompt / manager / task
-  ├─ shipped and user capability source from OPFS
+  ├─ protected shipped capability source (readable, workspace-locked)
+  ├─ editable shipped and user capability source from OPFS
   └─ page tools expressed as broker requests
                  │ chrome.tabs.sendMessage
 Host page isolated content runtime
