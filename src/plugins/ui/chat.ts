@@ -2,10 +2,8 @@
 // thinking, tool cards forming during the stream, stop button.
 import type { Context } from '@deepseek-ai/cordis';
 import { defineComponent, ref, computed, watch, nextTick } from 'vue';
-import { useService } from '@/sdk';
+import { parseJsonObject, useService } from '@/sdk';
 import type { JsonObject } from '@/shared/runtime';
-
-function tryParse(source: string): JsonObject { try { return JSON.parse(source) as JsonObject; } catch { return {}; } }
 
 const ChatPanel = defineComponent({
   name: 'ChatPanel',
@@ -41,13 +39,14 @@ const ChatPanel = defineComponent({
   </div>`,
   setup() {
     const loopSvc = useService('loop');
+    const taskSvc = useService('task');
     const llmSvc = useService('llm');
     const fsSvc = useService('fs');
     const compactionSvc = useService('compaction');
     const goal = ref('');
     const chatEl = ref<HTMLElement | null>(null);
 
-    const visible = computed(() => (loopSvc.value?.messages ?? []).filter(message => message.role !== 'summary'));
+    const visible = computed(() => (taskSvc.value?.messages ?? []).filter(message => message.role !== 'summary'));
     const running = computed(() => loopSvc.value?.running?.value ?? false);
     const connected = computed(() => !!llmSvc.value);
     const engineName = computed(() => llmSvc.value?.engineName?.value ?? '');
@@ -69,14 +68,14 @@ const ChatPanel = defineComponent({
     };
     const stop = () => loopSvc.value?.stop();
     const resetSession = () => {
-      loopSvc.value?.reset();
+      taskSvc.value?.messages.splice(0);
       const fs = fsSvc.value;
       // keep .plugins/: dynamic plugin sources stay, mounted plugins keep running, restore still works after refresh
       if (fs) for (const p of fs.list().filter(p => !p.startsWith('.plugins/'))) fs.remove(p);
     };
 
     const summarizeArgs = (s: string | JsonObject): string => {
-      const o = typeof s === 'string' ? tryParse(s) : (s ?? {});
+      const o = typeof s === 'string' ? parseJsonObject(s) : (s ?? {});
       const parts: string[] = [];
       if (o.command) parts.push(String(o.command));
       if (o.path) parts.push(String(o.path));
@@ -101,10 +100,8 @@ const ChatPanel = defineComponent({
   },
 });
 
-export const chatPlugin = {
+export default {
   name: 'chat',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'chat', region: 'main', order: 10, component: ChatPanel }); },
 };
-
-export default chatPlugin;

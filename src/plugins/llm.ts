@@ -14,8 +14,8 @@ import { ref } from 'vue';
 import { createProvider } from '@earendil-works/pi-ai';
 import type { AssistantMessage, Context as PiContext, Message, Model, StopReason, Usage } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { errorMessage, log } from '@/sdk';
-import type { HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent, ToolCall } from '@/shared/runtime';
+import { errorMessage, log, parseJsonObject } from '@/sdk';
+import type { HarnessMessage, LlmRequest, LlmStreamEvent, ToolCall } from '@/shared/runtime';
 
 interface LlmConfig {
   mock?: boolean;
@@ -29,9 +29,6 @@ interface LlmConfig {
 const IDLE_MS = 45000; // pi-ai has no idle-stream watchdog (timeoutMs is the SDK request timeout), so we wrap: a gateway can drop a stream with no chunk and no error, and without this the loop hangs forever
 const CONTEXT_WINDOW = 131072; // DeepSeek-class default; exposed on the service so the compaction plugin knows the budget
 
-function tryParse(source: string): JsonObject {
-  try { return JSON.parse(source) as JsonObject; } catch { return {}; }
-}
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
 export function toHarnessFinishReason(reason: StopReason): Exclude<LlmStreamEvent, { type: 'error' }>['finishReason'] {
@@ -56,7 +53,7 @@ export function toPiMessages(messages: HarnessMessage[], modelId: string): Messa
       const content: AssistantMessage['content'] = [];
       if (m.thinking) content.push({ type: 'thinking', thinking: m.thinking });
       if (m.text) content.push({ type: 'text', text: m.text });
-      for (const tc of m.toolCalls) content.push({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.argsObj ?? tryParse(tc.args) });
+      for (const tc of m.toolCalls) content.push({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.argsObj ?? parseJsonObject(tc.args) });
       out.push({ role: 'assistant', content, api: 'openai-completions', provider: 'deepseek', model: modelId,
                  usage: zeroUsage(), stopReason: m.toolCalls.length ? 'toolUse' : 'stop', timestamp: Date.now() });
       for (const tc of m.toolCalls)
@@ -189,15 +186,9 @@ function setupLlm(ctx: CordisContext, cfg: LlmConfig): void {
   ctx.effect(() => () => log('llm plugin unmounted', 'warn'), 'llm.log-dispose');
 }
 
-// Mounted ON DEMAND (autoMount:false in the defaults manifest): settings
-// calls manager.mount('llm', { cfg }) on connect, and PluginHost hands the
-// config through as props — that is how a from-OPFS plugin receives runtime
-// configuration. cfg stays closure/props-captured; the service exposes no
-// getter to it.
+// Mounted on demand: settings passes cfg through manager.mount() into the
+// Cordis plugin config. The service deliberately exposes no config getter.
 export default {
   name: 'llm',
   apply: (ctx: CordisContext, config: { cfg?: LlmConfig } = {}) => setupLlm(ctx, config.cfg ?? { baseURL: '/proxy', model: 'deepseek-chat' }),
 };
-
-// Test/embedding face: same plugin with the config frozen in.
-export const makeLlmPlugin = (cfg: LlmConfig) => ({ name: 'llm', apply: (ctx: CordisContext) => setupLlm(ctx, cfg) });

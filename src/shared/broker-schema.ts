@@ -100,10 +100,18 @@ const ToolSchema = z.object({
   parameters: z.record(z.string(), JsonValueSchema),
 });
 
-const PageCommandSchema = z.discriminatedUnion('type', [
+export const PageCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('page/snapshot'), options: z.object({ selector: z.string().optional(), maxNodes: z.number().int().positive().max(10_000).optional(), maxDepth: z.number().int().nonnegative().max(100).optional() }).optional() }),
   z.object({ type: z.literal('page/query'), selector: z.string(), limit: z.number().int().positive().max(1_000).optional() }),
   z.object({ type: z.literal('page/query-page'), selector: z.string(), offset: z.number().int().nonnegative().max(1_000_000).optional(), limit: z.number().int().positive().max(500).optional() }),
+  z.object({
+    type: z.literal('page/style-inspect'),
+    target: ElementRefSchema,
+    pseudo: z.enum(['::before', '::after']).optional(),
+    properties: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+    includeMatchedRules: z.boolean().optional(),
+    maxRules: z.number().int().positive().max(200).optional(),
+  }),
   z.object({ type: z.literal('page/click'), target: ElementRefSchema }),
   z.object({ type: z.literal('page/type'), target: ElementRefSchema, value: z.string().max(1_000_000), clear: z.boolean().optional() }),
   z.object({ type: z.literal('page/scroll'), target: ElementRefSchema.optional(), x: z.number().finite().optional(), y: z.number().finite().optional(), behavior: z.enum(['auto', 'smooth']).optional() }),
@@ -158,7 +166,6 @@ const CapabilityRequestSchema = z.union([
   z.object({ provider: z.literal('workspace'), action: z.literal('list'), contextId: ContextIdSchema, input: EmptyInputSchema }),
   z.object({ provider: z.literal('workspace'), action: z.literal('write'), contextId: ContextIdSchema, input: z.object({ path: z.string().min(1).max(1_000), content: z.string().max(10_000_000), expectedRevision: z.string().nullable().optional() }) }),
   z.object({ provider: z.literal('workspace'), action: z.literal('remove'), contextId: ContextIdSchema, input: z.object({ path: z.string().min(1).max(1_000), expectedRevision: z.string().nullable().optional() }) }),
-  z.object({ provider: z.literal('workspace'), action: z.literal('clear'), contextId: ContextIdSchema, input: EmptyInputSchema }),
 
   z.object({ provider: z.literal('site-skill'), action: z.literal('list'), contextId: ContextIdSchema, input: EmptyInputSchema }),
   z.object({ provider: z.literal('site-skill'), action: z.literal('save'), contextId: ContextIdSchema, input: z.object({ skill: SiteSkillSchema }) }),

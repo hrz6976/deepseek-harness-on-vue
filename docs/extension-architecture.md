@@ -18,6 +18,7 @@ Sandboxed Vue agent runtime (dynamic, no chrome.*)
                  │ chrome.tabs.sendMessage
 Host page isolated content runtime
   ├─ compressed DOM snapshot + stable ElementRef
+  ├─ computed/inline/matched CSS inspection, including ::before/::after
   ├─ query / mutation and route observation
   ├─ Shadow DOM picker + annotation composer
   └─ preview/apply/verify/revert transactions
@@ -75,11 +76,11 @@ service worker 为每个 `http(s)` tab 调用 `sidePanel.setOptions({ tabId, pat
 
 ### 古老网页一键重构
 
-先 snapshot/query，生成 CSS/DOM patch，preview 后由用户批准 apply，验证布局与关键交互，再保存按 origin/path 匹配的 recipe。对于 DOM 经常整块刷新的页面，observe/route event 可触发幂等重放。
+先 snapshot/query 定位目标，再用只读 `page_style_inspect` 检查元素和相关伪元素的 computed style、inline declaration 与可读 author rules；生成 CSS/DOM patch 后重新检查最终样式和关键交互，再保存按 origin/path 匹配的 recipe。对于 DOM 经常整块刷新的页面，observe/route event 可触发幂等重放。
 
 ### 前端交互式审阅
 
-picker 运行在 closed Shadow DOM UI island 中，不污染宿主样式。用户点击元素并输入批注，事件把 annotation、selector、fingerprint、rect 和页面 URL 交给 agent。DOM 微调可直接事务修改；需要改 React/Vue 源码的反馈则导出给 coding workflow，并在页面刷新后重新验证。
+picker 运行在 closed Shadow DOM UI island 中，不污染宿主样式。用户点击元素并输入批注，事件把 annotation、selector、fingerprint、rect 和页面 URL 交给 agent。涉及视觉、布局或 CSS 的批注先触发目标元素及伪元素的样式检查，不依赖 class 名猜测级联。DOM 微调可直接事务修改；需要改 React/Vue 源码的反馈则导出给 coding workflow，并在页面刷新后重新验证。
 
 ## 后续扩展点
 

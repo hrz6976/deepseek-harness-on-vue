@@ -46,5 +46,3 @@ export function apply(ctx: Context): void {
   });
   ctx.prompt.register({ name: 'file-editor', order: 10, text: guidance });
 }
-
-export default { name, inject, apply };

@@ -1,24 +1,19 @@
 import type {
-  Annotation,
-  ElementFingerprint,
-  ElementRef,
   LiveRule,
   LiveRuleAction,
   PageCommand,
   PageCommandResult,
   PageEvent,
-  PageScope,
-  PageSnapshot,
   PatchOperation,
   PatchTransaction,
-  SnapshotNode,
 } from '@/shared/page-protocol';
-import type { JsonValue } from '@/shared/runtime';
+import { toJsonValue, type JsonValue } from '@/shared/runtime';
+import { createContentElements } from './content-elements';
+import { createPickerUi } from './content-picker';
 
 interface ContentMessage { channel: 'harness-page-v1'; command: PageCommand }
 interface UndoEntry { undo(): void; verify(): { ok: boolean; message: string } }
 interface LiveTransaction { record: PatchTransaction; undoEntries: UndoEntry[]; lastUsedAt: number }
-interface NodeLease { ref: WeakRef<Element>; lastUsedAt: number }
 
 const runtimeGlobal = globalThis as typeof globalThis & { __harnessContentRuntimeV1?: boolean };
 
@@ -28,12 +23,10 @@ if (!runtimeGlobal.__harnessContentRuntimeV1) {
 }
 
 function installContentRuntime(): void {
-  const nodeIds = new WeakMap<Element, string>();
-  const nodes = new Map<string, NodeLease>();
+  const elements = createContentElements();
+  const { scope, describe, resolveTarget, snapshot, query, queryPage, inspectStyles, click, typeInto,
+    scrollPage, waitFor, settle } = elements;
   const transactions = new Map<string, LiveTransaction>();
-  const documentId = crypto.randomUUID();
-  let generation = 0;
-  let nodeSequence = 0;
   let transactionSequence = 0;
   let observer: MutationObserver | null = null;
   let mutationTimer: number | null = null;
@@ -41,268 +34,11 @@ function installContentRuntime(): void {
   let observationEnabled = false;
   const liveRuleSets = new Map<string, { label: string; rules: LiveRule[] }>();
   let lastUrl = location.href;
-  const NODE_LEASE_TTL = 5 * 60_000;
   const TRANSACTION_TTL = 2 * 60 * 60_000;
-
-  const scope = (): PageScope => ({
-    tabId: -1,
-    frameId: 0,
-    documentId,
-    generation,
-    url: location.href,
-    origin: location.origin,
-  });
 
   const emit = (event: PageEvent): void => {
     void chrome.runtime.sendMessage({ channel: 'harness-page-event-v1', event }).catch(() => undefined);
   };
-
-  function nodeRef(element: Element): string {
-    const existing = nodeIds.get(element);
-    if (existing) {
-      const lease = nodes.get(existing);
-      if (lease) lease.lastUsedAt = Date.now();
-      else nodes.set(existing, { ref: new WeakRef(element), lastUsedAt: Date.now() });
-      return existing;
-    }
-    const id = `n_${++nodeSequence}`;
-    nodeIds.set(element, id);
-    nodes.set(id, { ref: new WeakRef(element), lastUsedAt: Date.now() });
-    if (nodes.size > 5_000) pruneLeases();
-    return id;
-  }
-
-  function cssEscape(value: string): string {
-    return CSS.escape(value);
-  }
-
-  function selectorFor(element: Element): string {
-    if (element.id) return `#${cssEscape(element.id)}`;
-    const parts: string[] = [];
-    let cursor: Element | null = element;
-    while (cursor && cursor !== document.documentElement && parts.length < 6) {
-      let part = cursor.localName;
-      const stableClass = [...cursor.classList].find(value => !/^(active|selected|hover|focus|open|closed)$/i.test(value));
-      if (stableClass) part += `.${cssEscape(stableClass)}`;
-      const parent: Element | null = cursor.parentElement;
-      if (parent) {
-        const sameTag = [...parent.children].filter(child => child.localName === cursor!.localName);
-        if (sameTag.length > 1) part += `:nth-of-type(${sameTag.indexOf(cursor) + 1})`;
-      }
-      parts.unshift(part);
-      cursor = parent;
-    }
-    return parts.join(' > ');
-  }
-
-  function accessibleName(element: Element): string | undefined {
-    return element.getAttribute('aria-label')
-      ?? element.getAttribute('title')
-      ?? (element instanceof HTMLInputElement ? element.labels?.[0]?.textContent?.trim() : undefined)
-      ?? undefined;
-  }
-
-  function fingerprint(element: Element): ElementFingerprint {
-    const attributes: Record<string, string> = {};
-    for (const { name, value } of [...element.attributes]) {
-      if (name === 'id' || name === 'role' || name.startsWith('aria-') || name.startsWith('data-')) {
-        attributes[name] = value.slice(0, 200);
-      }
-      if (Object.keys(attributes).length >= 12) break;
-    }
-    const text = element.textContent?.replace(/\s+/g, ' ').trim().slice(0, 240);
-    return {
-      tag: element.localName,
-      ...(element.id ? { id: element.id } : {}),
-      ...(element.getAttribute('role') ? { role: element.getAttribute('role')! } : {}),
-      ...(accessibleName(element) ? { name: accessibleName(element) } : {}),
-      ...(text ? { text } : {}),
-      classes: [...element.classList].slice(0, 12),
-      attributes,
-    };
-  }
-
-  function describe(element: Element, includeRect = true): ElementRef {
-    const rect = element.getBoundingClientRect();
-    return {
-      nodeRef: nodeRef(element),
-      documentId,
-      generation,
-      selector: selectorFor(element),
-      fingerprint: fingerprint(element),
-      ...(includeRect ? { rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } } : {}),
-    };
-  }
-
-  function resolveTarget(target: ElementRef): Element {
-    if (target.documentId && target.documentId !== documentId) throw new Error('target belongs to a different page document');
-    if (target.generation !== undefined && target.generation !== generation) throw new Error('target lease expired after page navigation');
-    const lease = nodes.get(target.nodeRef);
-    const byRef = lease?.ref.deref();
-    if (byRef?.isConnected) {
-      lease!.lastUsedAt = Date.now();
-      return byRef;
-    }
-    if (lease) nodes.delete(target.nodeRef);
-    let element: Element | null = null;
-    try { element = document.querySelector(target.selector); }
-    catch { throw new Error(`invalid selector: ${target.selector}`); }
-    if (!element) throw new Error(`target not found: ${target.selector}`);
-    if (element.localName !== target.fingerprint.tag) {
-      throw new Error(`target fingerprint mismatch: expected ${target.fingerprint.tag}, got ${element.localName}`);
-    }
-    if (target.fingerprint.id && element.id !== target.fingerprint.id) {
-      throw new Error(`target fingerprint mismatch: expected #${target.fingerprint.id}, got #${element.id || '(none)'}`);
-    }
-    return element;
-  }
-
-  function snapshot(options: Extract<PageCommand, { type: 'page/snapshot' }>['options'] = {}): PageSnapshot {
-    const maxNodes = Math.min(Math.max(options.maxNodes ?? 300, 1), 2_000);
-    const maxDepth = Math.min(Math.max(options.maxDepth ?? 8, 1), 30);
-    let root: Element;
-    try { root = options.selector ? document.querySelector(options.selector) ?? document.body : document.body; }
-    catch { throw new Error(`invalid snapshot selector: ${options.selector}`); }
-    if (!root) throw new Error('document body is not ready');
-
-    let count = 0;
-    let truncated = false;
-    const walk = (element: Element, depth: number): SnapshotNode | null => {
-      if (count >= maxNodes) { truncated = true; return null; }
-      if (['script', 'style', 'noscript', 'template'].includes(element.localName)) return null;
-      count++;
-      const children: SnapshotNode[] = [];
-      if (depth < maxDepth) {
-        for (const child of [...element.children]) {
-          const node = walk(child, depth + 1);
-          if (node) children.push(node);
-          if (count >= maxNodes) break;
-        }
-      } else if (element.children.length) truncated = true;
-      return { ...describe(element, false), ...(children.length ? { children } : {}) };
-    };
-    const rootNode = walk(root, 0);
-    return {
-      scope: scope(),
-      title: document.title,
-      capturedAt: Date.now(),
-      truncated,
-      nodes: rootNode ? [rootNode] : [],
-    };
-  }
-
-  function query(selector: string, limit = 50): ElementRef[] {
-    try {
-      return [...document.querySelectorAll(selector)].slice(0, Math.min(Math.max(limit, 1), 500)).map(element => describe(element));
-    } catch {
-      throw new Error(`invalid selector: ${selector}`);
-    }
-  }
-
-  function queryPage(selector: string, offset = 0, limit = 50) {
-    try {
-      const all = [...document.querySelectorAll(selector)];
-      const safeOffset = Math.min(Math.max(offset, 0), all.length);
-      const safeLimit = Math.min(Math.max(limit, 1), 500);
-      const items = all.slice(safeOffset, safeOffset + safeLimit).map(element => describe(element));
-      const nextOffset = safeOffset + items.length;
-      return { items, offset: safeOffset, ...(nextOffset < all.length ? { nextOffset } : {}), total: all.length };
-    } catch { throw new Error(`invalid selector: ${selector}`); }
-  }
-
-  function click(target: ElementRef): JsonValue {
-    const element = resolveTarget(target);
-    if (!(element instanceof HTMLElement)) throw new Error(`target is not clickable: ${target.selector}`);
-    element.focus({ preventScroll: true });
-    element.click();
-    return asJson({ target: describe(element, false), clickedAt: Date.now() });
-  }
-
-  function typeInto(target: ElementRef, value: string, clear = true): JsonValue {
-    const element = resolveTarget(target);
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-      if (element.disabled || element.readOnly) throw new Error(`target is not editable: ${target.selector}`);
-      element.focus({ preventScroll: true });
-      const next = clear ? value : `${element.value}${value}`;
-      const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-      if (setter) setter.call(element, next);
-      else element.value = next;
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: clear ? 'insertReplacementText' : 'insertText', data: value }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-      return asJson({ target: describe(element, false), valueLength: next.length });
-    }
-    if (element instanceof HTMLElement && element.isContentEditable) {
-      element.focus({ preventScroll: true });
-      element.textContent = clear ? value : `${element.textContent ?? ''}${value}`;
-      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-      return asJson({ target: describe(element, false), valueLength: element.textContent.length });
-    }
-    throw new Error(`target is not an input or editable element: ${target.selector}`);
-  }
-
-  function scrollPage(target: ElementRef | undefined, x = 0, y = 0, behavior: ScrollBehavior = 'auto'): JsonValue {
-    if (target) {
-      const element = resolveTarget(target);
-      element.scrollIntoView({ behavior, block: 'center', inline: 'nearest' });
-      return asJson({ target: describe(element, false), behavior });
-    }
-    window.scrollBy({ left: x, top: y, behavior });
-    return { x: window.scrollX, y: window.scrollY };
-  }
-
-  async function waitFor(selector: string, state: 'attached' | 'visible' | 'hidden' | 'detached' = 'attached', timeoutMs = 5_000): Promise<JsonValue> {
-    const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), 30_000);
-    while (true) {
-      let element: Element | null;
-      try { element = document.querySelector(selector); }
-      catch { throw new Error(`invalid selector: ${selector}`); }
-      const visible = !!element && isVisible(element);
-      const matched = state === 'attached' ? !!element
-        : state === 'detached' ? !element
-        : state === 'visible' ? visible
-        : !visible;
-      if (matched) return asJson({ state, elapsed: Math.max(0, timeoutMs - (deadline - Date.now())), ...(element ? { target: describe(element, false) } : {}) });
-      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${selector} to become ${state}`);
-      await new Promise(resolve => window.setTimeout(resolve, 50));
-    }
-  }
-
-  function settle(quietMs = 250, timeoutMs = 5_000): Promise<JsonValue> {
-    const quiet = Math.min(Math.max(quietMs, 0), 5_000);
-    const timeout = Math.min(Math.max(timeoutMs, 1), 30_000);
-    return new Promise((resolve, reject) => {
-      let changes = 0;
-      let quietTimer = 0;
-      let timeoutTimer = 0;
-      const startedAt = Date.now();
-      const done = () => {
-        observer0.disconnect();
-        window.clearTimeout(quietTimer);
-        window.clearTimeout(timeoutTimer);
-        resolve({ quietMs: quiet, elapsed: Date.now() - startedAt, mutations: changes });
-      };
-      const arm = () => { window.clearTimeout(quietTimer); quietTimer = window.setTimeout(done, quiet); };
-      const observer0 = new MutationObserver(records => { changes += records.length; arm(); });
-      observer0.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-      timeoutTimer = window.setTimeout(() => {
-        observer0.disconnect();
-        window.clearTimeout(quietTimer);
-        reject(new Error(`page did not settle within ${timeout}ms`));
-      }, timeout);
-      arm();
-    });
-  }
-
-  function isVisible(element: Element): boolean {
-    const style = getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0 && (rect.width > 0 || rect.height > 0);
-  }
-
-  function asJson(value: unknown): JsonValue {
-    return JSON.parse(JSON.stringify(value)) as JsonValue;
-  }
 
   function safeAttribute(name: string, value: string): void {
     if (/^on/i.test(name)) throw new Error(`event-handler attribute is not allowed: ${name}`);
@@ -623,14 +359,14 @@ function installContentRuntime(): void {
 
   function previewLiveRules(rules: LiveRule[]): JsonValue {
     const results = rules.map(rule => ({ id: rule.id, matched: validateLiveRule(rule) }));
-    return asJson({ scope: scope(), rules: results, totalMatches: results.reduce((sum, result) => sum + result.matched, 0) });
+    return toJsonValue({ scope: scope(), rules: results, totalMatches: results.reduce((sum, result) => sum + result.matched, 0) });
   }
 
   function installLiveRules(id: string, label: string, rules: LiveRule[]): JsonValue {
     for (const rule of rules) validateLiveRule(rule);
     liveRuleSets.set(id, { label, rules });
     refreshObserver();
-    return asJson({ id, label, ruleCount: rules.length, ...applyLiveRules() });
+    return toJsonValue({ id, label, ruleCount: rules.length, ...applyLiveRules() });
   }
 
   function removeLiveRules(id: string): JsonValue {
@@ -647,6 +383,9 @@ function installContentRuntime(): void {
         case 'page/snapshot': return { ok: true, value: snapshot(command.options) };
         case 'page/query': return { ok: true, value: query(command.selector, command.limit) };
         case 'page/query-page': return { ok: true, value: queryPage(command.selector, command.offset, command.limit) };
+        case 'page/style-inspect': return { ok: true, value: inspectStyles(
+          command.target, command.pseudo, command.properties, command.includeMatchedRules, command.maxRules,
+        ) };
         case 'page/click': return { ok: true, value: click(command.target) };
         case 'page/type': return { ok: true, value: typeInto(command.target, command.value, command.clear) };
         case 'page/scroll': return { ok: true, value: scrollPage(command.target, command.x, command.y, command.behavior) };
@@ -680,8 +419,7 @@ function installContentRuntime(): void {
     if (lastUrl === location.href) return;
     const previousUrl = lastUrl;
     lastUrl = location.href;
-    generation++;
-    nodes.clear();
+    elements.reset();
     transactions.clear();
     liveRuleSets.clear();
     refreshObserver();
@@ -692,9 +430,7 @@ function installContentRuntime(): void {
 
   function pruneLeases(): void {
     const now = Date.now();
-    for (const [id, lease] of nodes) {
-      if (!lease.ref.deref()?.isConnected || now - lease.lastUsedAt > NODE_LEASE_TTL) nodes.delete(id);
-    }
+    elements.prune();
     // Expiry commits the current DOM state and releases retained node/undo
     // closures; persisted Site Skills remain managed by the trusted provider.
     for (const [id, transaction] of transactions) {
@@ -708,113 +444,4 @@ function installContentRuntime(): void {
   } else {
     emit({ type: 'page/ready', scope: scope() });
   }
-}
-
-function createPickerUi(
-  describe: (element: Element) => ElementRef,
-  scope: () => PageScope,
-  emit: (event: PageEvent) => void,
-): { start(): void; stop(): void; contains(node: Node): boolean } {
-  const host = document.createElement('div');
-  host.dataset.harnessPicker = 'v1';
-  host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
-  const shadow = host.attachShadow({ mode: 'closed' });
-  const style = document.createElement('style');
-  style.textContent = `
-    * { box-sizing:border-box; }
-    .highlight { position:fixed; display:none; border:2px solid #2f5ee5; border-radius:3px; background:rgba(47,94,229,.10); box-shadow:0 0 0 1px rgba(255,255,255,.75) inset; pointer-events:none; }
-    .composer { position:fixed; display:none; width:min(320px,calc(100vw - 24px)); padding:14px; border:1px solid #d9d8d3; border-radius:13px; background:#fff; color:#242528; font:12px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; box-shadow:0 18px 50px rgba(28,28,26,.16),0 2px 8px rgba(28,28,26,.08); pointer-events:auto; }
-    strong { display:block; margin:0 0 3px; font-size:13px; font-weight:650; letter-spacing:-.01em; }
-    p { margin:0 0 11px; color:#77787c; font-size:11px; }
-    textarea { display:block; width:100%; min-height:88px; resize:vertical; margin:0; padding:9px 10px; color:#242528; background:#fafaf9; border:1px solid #d9d8d3; border-radius:8px; outline:0; font:inherit; }
-    textarea:focus { border-color:#9dafe7; background:#fff; box-shadow:0 0 0 3px rgba(47,94,229,.08); }
-    textarea::placeholder { color:#9a9b9f; }
-    .buttons { display:flex; justify-content:flex-end; gap:7px; margin-top:10px; }
-    button { padding:6px 10px; border:1px solid #d4d3ce; border-radius:7px; color:#4b4c50; background:#fff; font:inherit; font-weight:600; cursor:pointer; }
-    button:hover { background:#f5f5f2; }
-    button.primary { border-color:#202124; color:#fff; background:#202124; }
-    button.primary:hover { background:#38393c; }
-    button:focus-visible { outline:2px solid rgba(47,94,229,.3); outline-offset:2px; }
-  `;
-  const highlight = document.createElement('div');
-  highlight.className = 'highlight';
-  const composer = document.createElement('div');
-  composer.className = 'composer';
-  const title = document.createElement('strong');
-  title.textContent = '添加页面批注';
-  const hint = document.createElement('p');
-  hint.textContent = '描述这里的问题，或说明你希望如何调整。';
-  const textarea = document.createElement('textarea');
-  textarea.placeholder = '例如：信息层级不清晰，希望突出发车时间…';
-  const save = document.createElement('button');
-  save.className = 'primary';
-  save.textContent = '保存批注';
-  const cancel = document.createElement('button');
-  cancel.textContent = '取消';
-  const buttons = document.createElement('div');
-  buttons.className = 'buttons';
-  buttons.append(cancel, save);
-  composer.append(title, hint, textarea, buttons);
-  shadow.append(style, highlight, composer);
-
-  let active = false;
-  let selected: ElementRef | null = null;
-
-  const positionHighlight = (element: Element): void => {
-    const rect = element.getBoundingClientRect();
-    highlight.style.display = 'block';
-    highlight.style.left = `${rect.left}px`;
-    highlight.style.top = `${rect.top}px`;
-    highlight.style.width = `${rect.width}px`;
-    highlight.style.height = `${rect.height}px`;
-  };
-  const onMove = (event: MouseEvent): void => {
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    if (target && target !== host) positionHighlight(target);
-  };
-  const onClick = (event: MouseEvent): void => {
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    if (!target || target === host) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    selected = describe(target);
-    emit({ type: 'page/element-selected', scope: scope(), target: selected });
-    stop();
-    composer.style.display = 'block';
-    composer.style.left = `${Math.max(12, Math.min(event.clientX + 12, innerWidth - 332))}px`;
-    composer.style.top = `${Math.max(12, Math.min(event.clientY + 12, innerHeight - 210))}px`;
-    textarea.value = '';
-    textarea.focus();
-  };
-  const start = (): void => {
-    if (!host.isConnected) document.documentElement.append(host);
-    if (active) return;
-    active = true;
-    composer.style.display = 'none';
-    document.addEventListener('mousemove', onMove, true);
-    document.addEventListener('click', onClick, true);
-  };
-  const stop = (): void => {
-    active = false;
-    highlight.style.display = 'none';
-    document.removeEventListener('mousemove', onMove, true);
-    document.removeEventListener('click', onClick, true);
-  };
-  cancel.addEventListener('click', () => { composer.style.display = 'none'; selected = null; });
-  save.addEventListener('click', () => {
-    const text = textarea.value.trim();
-    if (!selected || !text) return;
-    const annotation: Annotation = {
-      id: `annotation_${Date.now()}`,
-      scope: scope(),
-      target: selected,
-      text,
-      createdAt: Date.now(),
-    };
-    emit({ type: 'annotation/created', annotation });
-    composer.style.display = 'none';
-    selected = null;
-  });
-
-  return { start, stop, contains: node => node === host || host.contains(node) };
 }

@@ -5,7 +5,7 @@ import type {
   CapabilityRequest,
 } from '@/shared/capability-protocol';
 
-export function requiredPermission(request: CapabilityRequest): string {
+function requiredPermission(request: CapabilityRequest): string {
   if (request.provider === 'workspace') {
     return request.action === 'list' ? 'workspace.read' : 'workspace.write';
   }
@@ -32,13 +32,7 @@ export function assertPrincipalAuthorized(principal: CapabilityPrincipal, reques
   if (!principal.providers.includes(request.provider)) {
     throw new Error(`Capability "${principal.id}" did not declare provider "${request.provider}".`);
   }
-  if (principal.scope === 'task' && !principal.taskId) {
-    throw new Error(`Task-scoped capability "${principal.id}" has no active task identity.`);
-  }
-  const permission = requiredPermission(request);
-  if (!principal.permissions.includes('*') && !principal.permissions.includes(permission)) {
-    throw new Error(`Capability "${principal.id}" lacks permission "${permission}".`);
-  }
+  assertPrincipalPermission(principal, requiredPermission(request));
 }
 
 export function assertPrincipalPermission(principal: CapabilityPrincipal, permission: string): void {

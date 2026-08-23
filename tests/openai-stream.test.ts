@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { OpenAiStreamAccumulator } from '../src/extension/openai-stream';
+import { OpenAiStreamAccumulator } from '@/extension/openai-stream';
 
 test('OpenAI stream accumulator emits cumulative text, reasoning, tools, and final usage', () => {
   const stream = new OpenAiStreamAccumulator();

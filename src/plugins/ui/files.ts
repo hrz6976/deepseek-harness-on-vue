@@ -21,10 +21,8 @@ const FilesPanel = defineComponent({
   },
 });
 
-export const filesPlugin = {
+export default {
   name: 'files',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'files', region: 'side', order: 10, component: FilesPanel }); },
 };
-
-export default filesPlugin;

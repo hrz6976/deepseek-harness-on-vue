@@ -18,10 +18,8 @@ const SyslogPanel = defineComponent({
   },
 });
 
-export const syslogPlugin = {
+export default {
   name: 'syslog',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'syslog', region: 'side', order: 40, component: SyslogPanel }); },
 };
-
-export default syslogPlugin;

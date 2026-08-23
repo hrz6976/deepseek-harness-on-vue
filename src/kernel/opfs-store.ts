@@ -5,12 +5,18 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
   entries(): AsyncIterableIterator<[string, FileSystemDirectoryHandle | FileSystemFileHandle]>;
 };
 
+interface OpfsStoreOptions { directory?: string; channel?: string | null }
+
 export class OpfsStore {
   #rootPromise: Promise<IterableDirectoryHandle> | null = null;
-  #channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('harness-workspace-v1');
+  #channel: BroadcastChannel | null;
   #listeners = new Set<() => void>();
 
-  constructor() {
+  constructor(private readonly options: OpfsStoreOptions = {
+    directory: 'harness-page-agent', channel: 'harness-workspace-v1',
+  }) {
+    this.#channel = options.channel && typeof BroadcastChannel !== 'undefined'
+      ? new BroadcastChannel(options.channel) : null;
     if (this.#channel) this.#channel.onmessage = () => {
       for (const listener of this.#listeners) listener();
     };
@@ -26,7 +32,6 @@ export class OpfsStore {
       case 'list': return await this.list();
       case 'write': await this.write(request.input.path, request.input.content, request.input.expectedRevision); return null;
       case 'remove': await this.remove(request.input.path, request.input.expectedRevision); return null;
-      case 'clear': await this.clear(); return null;
     }
   }
 
@@ -40,11 +45,9 @@ export class OpfsStore {
 
   async write(path: string, content: string, expectedRevision?: string | null): Promise<void> {
     await this.withLock('exclusive', async () => {
-      const current = await this.read(path);
-      this.assertRevision(path, current, expectedRevision);
+      this.assertRevision(path, await this.read(path), expectedRevision);
       const { directory, name } = await this.resolve(path, true);
-      const handle = await directory.getFileHandle(name, { create: true });
-      const writable = await handle.createWritable();
+      const writable = await (await directory.getFileHandle(name, { create: true })).createWritable();
       await writable.write(content);
       await writable.close();
     });
@@ -55,24 +58,19 @@ export class OpfsStore {
     await this.withLock('exclusive', async () => {
       const current = await this.read(path);
       this.assertRevision(path, current, expectedRevision);
+      if (current === null) return;
       const { directory, name } = await this.resolve(path, false);
       await directory.removeEntry(name, { recursive: true });
     });
     this.#channel?.postMessage({ type: 'remove', path });
   }
 
-  async clear(): Promise<void> {
-    await this.withLock('exclusive', async () => {
-      const root = await this.root();
-      for await (const [name] of root.entries()) await root.removeEntry(name, { recursive: true });
-    });
-    this.#channel?.postMessage({ type: 'clear' });
-  }
-
   private async root(): Promise<IterableDirectoryHandle> {
     this.#rootPromise ??= (async () => {
-      const opfsRoot = await navigator.storage.getDirectory();
-      return await opfsRoot.getDirectoryHandle('harness-page-agent', { create: true }) as IterableDirectoryHandle;
+      const root = await navigator.storage.getDirectory();
+      return this.options.directory
+        ? await root.getDirectoryHandle(this.options.directory, { create: true }) as IterableDirectoryHandle
+        : root as IterableDirectoryHandle;
     })();
     return this.#rootPromise;
   }
@@ -88,9 +86,7 @@ export class OpfsStore {
   private async resolve(path: string, create: boolean): Promise<{ directory: FileSystemDirectoryHandle; name: string }> {
     const segments = safeSegments(path);
     let directory: FileSystemDirectoryHandle = await this.root();
-    for (const segment of segments.slice(0, -1)) {
-      directory = await directory.getDirectoryHandle(segment, { create });
-    }
+    for (const segment of segments.slice(0, -1)) directory = await directory.getDirectoryHandle(segment, { create });
     return { directory, name: segments.at(-1)! };
   }
 
@@ -115,7 +111,7 @@ export class OpfsStore {
 
   private async withLock<T>(mode: 'shared' | 'exclusive', operation: () => Promise<T>): Promise<T> {
     if (!navigator.locks) return await operation();
-    return await navigator.locks.request('harness-workspace-opfs', { mode }, operation);
+    return await navigator.locks.request(`harness-workspace-opfs:${this.options.directory ?? 'root'}`, { mode }, operation);
   }
 }
 

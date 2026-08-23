@@ -2,7 +2,7 @@ import { Service, type Context } from '@deepseek-ai/cordis';
 import { shallowReactive } from 'vue';
 import { z, type ZodType } from 'zod';
 import Ajv2020 from 'ajv/dist/2020.js';
-import { capabilityIsActive, recordCapabilityContribution } from '@/kernel/capabilities';
+import { capabilityForContext, recordCapabilityContribution } from '@/kernel/capabilities';
 import type {
   JsonObject,
   JsonSchema,
@@ -101,7 +101,7 @@ export class ToolsRuntime extends Service {
     if (!name?.trim()) throw new Error('a tool contribution needs a string name');
     if (typeof definition.run !== 'function') throw new Error(`tool "${name}" needs a run function`);
 
-    const owner = this.ctx.fiber.name;
+    const owner = capabilityForContext(this.ctx)?.manifest.id ?? this.ctx.fiber.name;
     const previous = this.entries.get(name);
     if (previous && previous.owner !== owner) {
       throw new Error(`duplicate tool "${name}": already contributed by plugin [${previous.owner}]`);
@@ -125,7 +125,7 @@ export class ToolsRuntime extends Service {
 
   private definitions(): Map<string, RuntimeToolDefinition> {
     return new Map([...this.entries]
-      .filter(([, entry]) => capabilityIsActive(entry.owner) && this.isAvailable(entry.definition))
+      .filter(([, entry]) => this.isAvailable(entry.definition))
       .map(([name, entry]) => [name, entry.definition]));
   }
 
@@ -139,7 +139,7 @@ export class ToolsRuntime extends Service {
     if (group.scope === 'task') return `task:${task?.activeTaskId.value ?? 'none'}:${group.id}`;
     if (group.scope === 'site') {
       const active = task?.activeTask();
-      const page = active && task?.contexts.find(context => active.contextIds.includes(context.id) && context.kind === 'page');
+      const page = active && task?.contexts.find(context => context.taskId === active.id && context.kind === 'page');
       let origin = 'none';
       try { if (page?.locator) origin = new URL(page.locator).origin; } catch { /* invalid locators have no site scope */ }
       return `site:${origin}:${group.id}`;
@@ -163,7 +163,7 @@ export class ToolsRuntime extends Service {
   catalog(): ToolCatalogEntry[] {
     const groups = new Map<string, ToolCatalogEntry>();
     for (const [toolName, entry] of this.entries) {
-      if (!capabilityIsActive(entry.owner) || !entry.definition.availability) continue;
+      if (!entry.definition.availability) continue;
       const group = entry.definition.availability;
       const current = groups.get(group.id) ?? { ...group, tags: [...(group.tags ?? [])], tools: [], loaded: this.isAvailable(entry.definition) };
       current.tools.push(toolName);
@@ -198,5 +198,3 @@ export const toolsPlugin = {
     new ToolsRuntime(ctx);
   },
 };
-
-export default toolsPlugin;

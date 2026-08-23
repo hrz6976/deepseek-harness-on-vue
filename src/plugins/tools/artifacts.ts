@@ -72,5 +72,3 @@ export function apply(ctx: Context): void {
     text: 'Tasks, contexts, and artifacts are first-class. Attach relevant workspace files with context_attach_file. Persist valuable outputs with artifact_create; keep large content in workspace files and point to contentPath. A page patch is a change-set, a persisted page procedure is a site-skill, and runtime code with tools or UI is a capability.',
   });
 }
-
-export default { name, inject, apply };

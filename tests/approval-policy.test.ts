@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { approvalForRequest } from '../src/extension/approval-policy';
+import { approvalForRequest } from '@/extension/approval-policy';
 
 test('temporary page patches need no shell prompt while persistent and high-risk actions do', () => {
   const patch = approvalForRequest({ provider: 'page', action: 'command', input: { command: { type: 'page/patch-apply', label: 'Polish table', operations: [] } } });
@@ -28,6 +28,16 @@ test('temporary page patches need no shell prompt while persistent and high-risk
   assert.equal(approvalForRequest({ provider: 'page', action: 'command', input: { command: { type: 'page/snapshot' } } }), null);
 
   const target = { nodeRef: 'n1', selector: '#submit', fingerprint: { tag: 'button', classes: [], attributes: {}, name: 'Submit' } };
+  assert.equal(approvalForRequest({ provider: 'page', action: 'command', input: {
+    command: { type: 'page/style-inspect', target, pseudo: '::after' },
+  } }), null);
   assert.match(approvalForRequest({ provider: 'page', action: 'command', input: { command: { type: 'page/click', target } } })?.title ?? '', /页面交互/);
   assert.equal(approvalForRequest({ provider: 'page', action: 'command', input: { command: { type: 'page/settle' } } }), null);
+  const script = approvalForRequest({ provider: 'page', action: 'command', input: {
+    command: { type: 'page/eval', world: 'USER_SCRIPT', code: 'document.body.dataset.ready = "1"' },
+  } });
+  assert.equal(script?.danger, true, 'arbitrary page code retains one explicit high-risk boundary');
+
+  const mcp = approvalForRequest({ provider: 'mcp', action: 'connect', input: { id: 'local', url: 'http://localhost:3001/mcp' } });
+  assert.deepEqual(mcp?.origins, ['http://localhost/*']);
 });

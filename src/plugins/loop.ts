@@ -5,7 +5,7 @@
 // fires 'loop/turn-start' / 'loop/llm-error' and the compaction plugin acts.
 import type { Context } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
-import { errorMessage, log } from '@/sdk';
+import { errorMessage, log, parseJsonObject } from '@/sdk';
 import type { ToolGuardRequest } from '@/kernel/bus';
 import type { AssistantHarnessMessage, HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent } from '@/shared/runtime';
 
@@ -19,17 +19,10 @@ const MAX_TRUNCATION_CONTINUATIONS = 3;
 const CONTINUATION_DIRECTIVE = '[Harness continuation] The previous assistant response was truncated by the model output limit. Continue the same work from where it stopped without repeating the partial response. If an action is needed, call the tool now; otherwise provide the actual final answer.';
 type AssistantSnapshot = Extract<LlmStreamEvent, { type: 'update' | 'done' }>;
 type TurnOutcome = 'completed' | 'tool-calls' | 'incomplete' | 'protocol-error' | 'filtered' | 'resource-error' | 'llm-error' | 'aborted';
-function tryParse(source: string): JsonObject {
-  try {
-    const value = JSON.parse(source) as unknown;
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
-  } catch { return {}; }
-}
+const name = 'loop';
+const inject = ['tools', 'prompt', 'fs', 'task'];
 
-export const name = 'loop';
-export const inject = ['tools', 'prompt', 'fs'];
-
-export function apply(ctx: Context): void {
+function apply(ctx: Context): void {
     // Logic contribution: the prompt registration belongs to this Fiber and
     // vanishes automatically when the loop plugin unloads.
     ctx.prompt.register({
@@ -37,15 +30,15 @@ export function apply(ctx: Context): void {
       text: 'You are a coding agent running inside a browser page, operating a persistent virtual filesystem (OPFS) through tools. Use only the tools you have; do not ask for capabilities you lack. If inspection, change, construction, verification, or continuation is needed, call the tool in the same response instead of narrating a future action. When the work is complete or user input is required, return the actual answer or exact question directly. Do not claim work completed unless tool results prove it.',
     });
 
-    const messages = reactive<HarnessMessage[]>([]);
+    const task = ctx.task;
+    const messages = task.messages;
     const running = ref(false);
     let ctrl: AbortController | null = null;
 
     const note = (text: string): void => { messages.push({ role: 'note', text }); };
     const recordTaskEvent = async (type: string, data: JsonObject): Promise<void> => {
       try {
-        const task = ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
-        if (task?.activeTask()) await task.appendEvent(type, data);
+        if (task.activeTask()) await task.appendEvent(type, data);
       } catch (error) {
         // Audit persistence must never prevent the actual tool call.
         log(`task event ${type} was not persisted: ${errorMessage(error)}`, 'warn');
@@ -63,19 +56,19 @@ export function apply(ctx: Context): void {
     };
 
     ctx.provide('loop', {
-      messages, running,
+      running,
       stop: () => { ctrl?.abort(); },
-      reset() { messages.splice(0); },
       async run(goal: string) {
         if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
         const llm = ctx.reflect.get('llm') as import('../shared/runtime').LlmService | undefined;
         if (!llm) { note('llm service not ready'); return; }
-        await ctx.fs.ready;
+        await task.ready;
         messages.push({ role: 'user', text: goal });
         running.value = true;
         const controller = new AbortController();
         ctrl = controller;
         try {
+          await ctx.parallel('loop/busy');
           let recovered = false; // one recovery retry per run, granted via loop/llm-error
           let truncationContinuations = 0;
           let pendingDirective: string | null = null;
@@ -201,7 +194,7 @@ export function apply(ctx: Context): void {
             for (const tc of msg.toolCalls) {
               if (controller.signal.aborted) { note('stopped'); return; }
               tc.status = 'running';
-              const pre = await ctx.waterfall('tools/pre-execute', { name: tc.name, args: tc.argsObj ?? tryParse(tc.args) } as ToolGuardRequest, (value: ToolGuardRequest) => value); // interception point: veto seam
+              const pre = await ctx.waterfall('tools/pre-execute', { name: tc.name, args: tc.argsObj ?? parseJsonObject(tc.args) } as ToolGuardRequest, (value: ToolGuardRequest) => value); // interception point: veto seam
               await recordTaskEvent('tool/call-started', {
                 callId: tc.id,
                 name: pre.name,
@@ -226,7 +219,7 @@ export function apply(ctx: Context): void {
           const last = messages.at(-1);
           if (last?.role === 'assistant' && last.status === 'streaming') last.status = 'error'; // close the cursor, never leave it blinking
           note(controller.signal.aborted ? 'stopped' : `loop error: ${errorMessage(error)}`);
-        } finally { running.value = false; ctrl = null; }
+        } finally { running.value = false; ctrl = null; await ctx.parallel('loop/idle'); }
       },
     });
     ctx.effect(() => () => { ctrl?.abort(); log('loop plugin unmounted', 'warn'); }, 'loop.dispose');
@@ -247,8 +240,6 @@ function isValidToolCall(call: AssistantHarnessMessage['toolCalls'][number]): bo
 }
 
 export const loopPlugin = { name, inject, apply };
-
-export default loopPlugin;
 
 function applySnapshot(message: AssistantHarnessMessage, snapshot: AssistantSnapshot): void {
   if (snapshot.responseId) message.responseId = snapshot.responseId;

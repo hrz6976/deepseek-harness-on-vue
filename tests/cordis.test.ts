@@ -1,39 +1,43 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Fiber } from '@deepseek-ai/cordis';
+import { Context, type Fiber } from '@deepseek-ai/cordis';
 import { ref } from 'vue';
 import { z } from 'zod';
-import { cordis, createHarnessRuntime, harnessRuntime } from '../src/kernel/cordis';
-import { principalForContext } from '../src/kernel/broker';
-import { mountPlugin, plugins, unmountPlugin } from '../src/kernel/host';
-import { uiContributions } from '../src/kernel/ui';
-import { promptPlugin } from '../src/plugins/prompt';
-import { toolsPlugin, type ToolsRuntime } from '../src/plugins/tools';
-import pagePlugin from '../src/plugins/tools/page';
-import capabilityCatalogPlugin from '../src/plugins/tools/capability-catalog';
-import { filesPlugin } from '../src/plugins/ui/files';
-import type { PromptRuntime } from '../src/plugins/prompt';
+import { createSystemPlugin, runtime } from '@/kernel/cordis';
+import { principalForContext } from '@/kernel/broker';
+import { mountPlugin, unmountPlugin } from '@/kernel/host';
+import { capabilities } from '@/kernel/capabilities';
+import { UiService, uiKernelPlugin } from '@/kernel/ui';
+import { promptPlugin } from '@/plugins/prompt';
+import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
+import * as pagePlugin from '@/plugins/tools/page';
+import * as capabilityCatalogPlugin from '@/plugins/tools/capability-catalog';
+import filesPlugin from '@/plugins/ui/files';
+import type { PromptRuntime } from '@/plugins/prompt';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 afterEach(async () => { await cleanupTestRuntime(); });
 
 test('system Context is available after its Cordis mount handle settles', async () => {
-  const runtime = createHarnessRuntime();
-  const handle = runtime.mountSystem('shell-test', {
+  const isolated = new Context();
+  let context: Context | null = null;
+  const handle = isolated.plugin(createSystemPlugin('shell-test', {
     name: 'shell-test',
     apply() {},
-  });
+  }, value => { context = value; }));
 
   await handle;
-  assert.ok(runtime.systemContext('shell-test'));
-  await runtime.dispose();
+  assert.ok(context);
+  await handle.dispose();
 });
 
 test('the system loop principal may call the trusted LLM provider', async () => {
-  const handle = harnessRuntime.mountSystem('loop', { name: 'loop-principal-test', apply() {} });
+  let context: Context | null = null;
+  const handle = runtime.plugin(createSystemPlugin('loop', {
+    name: 'loop-principal-test', apply() {},
+  }, value => { context = value; }));
   try {
     await handle;
-    const context = harnessRuntime.systemContext('loop');
     assert.ok(context);
     assert.deepEqual(principalForContext(context), {
       kind: 'system',
@@ -59,20 +63,22 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
 
   const entry = await mountPlugin('page', pagePlugin, { builtin: true });
   await entry.fiber?.await();
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
-  const prompt = cordis.reflect.get('prompt') as PromptRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
+  const prompt = runtime.reflect.get('prompt') as PromptRuntime;
   const names = tools.schemas().map(tool => tool.name);
 
   assert.equal(entry.status, 'active');
-  assert.equal(names.length, 15, 'advanced groups stay out of the prompt until loaded');
+  assert.equal(names.length, 17, 'only dynamic observation and live-rule tools stay out of the prompt until loaded');
   assert.ok(names.includes('page_snapshot'));
+  assert.ok(names.includes('page_style_inspect'));
+  assert.ok(names.includes('page_script_run'));
   assert.ok(names.includes('page_recipe_save'));
   assert.equal(names.includes('page_live_rules_apply'), false);
   const dynamic = tools.catalog().find(group => group.id === 'page.dynamic');
   assert.ok(dynamic?.tools.includes('page_observe_start'));
   assert.ok(dynamic?.tools.includes('page_live_rules_apply'));
-  assert.ok(dynamic?.tools.includes('page_script_run'));
-  assert.match(prompt.assemble(), /framework-neutral page_\* tools/);
+  assert.equal(dynamic?.tools.includes('page_script_run'), false);
+  assert.match(prompt.assemble(), /page_style_inspect/);
   await tools.call('page_query', { selector: 'main' });
   assert.equal((requests[0] as { provider: string }).provider, 'page');
   await tools.call('page_recipe_save', {
@@ -87,7 +93,7 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   assert.equal(await unmountPlugin('page'), true);
   assert.deepEqual(tools.schemas(), []);
   assert.equal(prompt.assemble(), '');
-  assert.equal(plugins.some(plugin => plugin.name === 'page'), false);
+  assert.equal(capabilities.has('page'), false);
 });
 
 test('capability discovery prioritizes loadable groups and capability loading activates them', async () => {
@@ -97,14 +103,14 @@ test('capability discovery prioritizes loadable groups and capability loading ac
   await provideTestService('task', {
     activeTaskId,
     contexts: [],
-    activeTask: () => ({ id: 'task-1', contextIds: [], capabilityIds: [] }),
+    activeTask: () => ({ id: 'task-1', capabilityIds: [] }),
     async attachCapability() {},
     async detachCapability() {},
   });
   await provideTestService('manager', {
     list: () => ['advanced-capability'],
     catalog: () => [{
-      kind: 'capability', id: 'advanced-capability', name: 'advanced-capability', title: 'Advanced Capability',
+      id: 'advanced-capability', title: 'Advanced Capability',
       description: 'Test loadable tools.', scope: 'global', version: '0.1.0', status: 'active', attached: true,
       providers: [], permissions: [],
       contributes: { tools: ['advanced_tool'], panels: [], prompts: [], services: [], events: [], workflows: [] },
@@ -124,7 +130,7 @@ test('capability discovery prioritizes loadable groups and capability loading ac
   });
   await applyTestPlugin(capabilityCatalogPlugin);
 
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   const summary = JSON.parse(String(await tools.call('capability_search', {
     query: '', limit: 30,
   }))) as Array<{ kind: string }>;
@@ -147,7 +153,7 @@ test('capability discovery prioritizes loadable groups and capability loading ac
 test('Cordis injection suspends, activates, unloads, and reactivates one Fiber', async () => {
   let activations = 0;
   let cleanups = 0;
-  const fiber = cordis.plugin({
+  const fiber = runtime.plugin({
     name: 'late-consumer',
     inject: ['late-service'],
     apply(ctx) {
@@ -177,9 +183,11 @@ test('Cordis injection suspends, activates, unloads, and reactivates one Fiber',
 });
 
 test('Vue panels are explicit UI contributions, not executable plugin templates', async () => {
+  await applyTestPlugin(uiKernelPlugin);
+  const ui = runtime.reflect.get('ui') as UiService;
   const fiber = await applyTestPlugin(filesPlugin);
-  assert.equal(uiContributions.has('files:files'), true);
-  assert.equal(uiContributions.get('files:files')?.component.name, 'FilesPanel');
+  assert.equal(ui.contributions.has('files:files'), true);
+  assert.equal(ui.contributions.get('files:files')?.component.name, 'FilesPanel');
   await fiber.dispose();
-  assert.equal(uiContributions.has('files:files'), false);
+  assert.equal(ui.contributions.has('files:files'), false);
 });

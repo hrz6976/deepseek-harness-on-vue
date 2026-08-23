@@ -1,6 +1,8 @@
-/** Framework services are bundled code, never OPFS-editable capabilities. */
+/** Bundled and retired framework names are never OPFS-editable capabilities. */
 export const SYSTEM_PLUGIN_NAMES = [
+  'shell',
   'fs',
+  'ui',
   'tools',
   'prompt',
   'manager',

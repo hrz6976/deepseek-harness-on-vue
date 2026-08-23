@@ -9,14 +9,14 @@
     "build:standalone": "vite build --mode standalone",
     "build:fixtures": "vite build --config examples/vite.config.ts",
     "dev:fixtures": "vite --config examples/vite.config.ts",
-    "watch": "vite build --mode extension --watch",
     "serve": "node serve.mjs",
-    "dev": "vite --mode extension",
+    "dev": "vite build --mode extension --watch",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run build:standalone && npm run build:fixtures"
   },
   "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
     "@deepseek-ai/cordis": "4.0.1",
     "@earendil-works/pi-ai": "0.84.2",
     "@modelcontextprotocol/sdk": "^1.30.0",

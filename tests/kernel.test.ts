@@ -4,12 +4,15 @@
 // Run: npm test
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bus } from '../src/kernel/bus';
-import { translateESM, normalizePluginDef, rewriteImports } from '../src/kernel/compile';
-import { makeExposeCapture, exposedStates } from '../src/kernel/ui';
-import { serializeState } from '../src/plugins/state';
-import { toolsPlugin, type ToolsRuntime } from '../src/plugins/tools';
-import { cordis } from '../src/kernel/cordis';
+import { useBusOn } from '@/kernel/bus';
+import { translateESM, rewriteImports } from '@/kernel/compile';
+import { normalizePlugin } from '@/kernel/plugin-runtime';
+import { modules, preparePluginModules } from '@/kernel/modules';
+import { UiService, uiKernelPlugin } from '@/kernel/ui';
+import { serializeState } from '@/plugins/tools/read-state';
+import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
+import { runtime } from '@/kernel/cordis';
+import { useService } from '@/kernel/services';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 import { ref, proxyRefs } from 'vue';
 import { z } from 'zod';
@@ -18,18 +21,18 @@ afterEach(async () => { await cleanupTestRuntime(); });
 
 test('waterfall: runs in order, value threads through', async () => {
   const seen = [];
-  const off1 = bus.on('wf/order', (v, next) => { seen.push('a'); return next({ value: v.value + 1 }); });
-  const off2 = bus.on('wf/order', (v, next) => { seen.push('b'); return next({ value: v.value * 10 }); });
-  assert.deepEqual(await bus.waterfall('wf/order', { value: 1 }), { value: 20 });
+  const off1 = useBusOn('wf/order', (v, next) => { seen.push('a'); return next({ value: v.value + 1 }); });
+  const off2 = useBusOn('wf/order', (v, next) => { seen.push('b'); return next({ value: v.value * 10 }); });
+  assert.deepEqual(await runtime.waterfall('wf/order', { value: 1 }, value => value), { value: 20 });
   assert.deepEqual(seen, ['a', 'b']);
   off1(); off2();
 });
 
 test('waterfall: not calling next() vetoes (short-circuits) the chain', async () => {
   let reached = false;
-  const off1 = bus.on('wf/veto', req => ({ ...req, veto: 'blocked' })); // no next()
-  const off2 = bus.on('wf/veto', req => { reached = true; return req; });
-  const out = await bus.waterfall('wf/veto', { name: 'x' });
+  const off1 = useBusOn('wf/veto', req => ({ ...req, veto: 'blocked' })); // no next()
+  const off2 = useBusOn('wf/veto', req => { reached = true; return req; });
+  const out = await runtime.waterfall('wf/veto', { name: 'x' }, value => value);
   assert.equal(out.veto, 'blocked');
   assert.equal(reached, false);
   off1(); off2();
@@ -37,9 +40,9 @@ test('waterfall: not calling next() vetoes (short-circuits) the chain', async ()
 
 test('waterfall: double next() is detected and the second call is inert', async () => {
   let downstream = 0;
-  const off1 = bus.on('wf/dbl', (v, next) => { next(v); return next(v); });
-  const off2 = bus.on('wf/dbl', v => { downstream++; return v; });
-  await bus.waterfall('wf/dbl', 0);
+  const off1 = useBusOn('wf/dbl', (v, next) => { next(v); return next(v); });
+  const off2 = useBusOn('wf/dbl', v => { downstream++; return v; });
+  await runtime.waterfall('wf/dbl', 0, value => value);
   assert.equal(downstream, 1); // chain ran once, not twice
   off1(); off2();
 });
@@ -53,11 +56,11 @@ test('Cordis tool contributions are Fiber-owned, duplicate-safe, and snapshot-st
       ctx.tools.register({ name: 'dice', description: 'new', parameters: z.object({}), run: () => 3 });
     },
   });
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   const snapshot = tools.snapshot();
   assert.equal(await snapshot.call('dice', {}), 3);
 
-  const duplicate = cordis.plugin({
+  const duplicate = runtime.plugin({
     name: 'plugin-b', inject: ['tools'],
     apply(ctx) { ctx.tools.register({ name: 'dice', description: '', parameters: z.object({}), run: () => 2 }); },
   });
@@ -83,7 +86,7 @@ test('tool parameters derive JSON Schema and validate before run', async () => {
       });
     },
   });
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   assert.deepEqual(tools.schemas()[0]?.parameters, {
     type: 'object',
     properties: { name: { type: 'string', minLength: 1, description: 'Person to greet.' } },
@@ -115,7 +118,7 @@ test('remote tools keep native JSON Schema and validate it with Ajv', async () =
       });
     },
   });
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   assert.deepEqual(tools.schemas()[0]?.parameters.required, ['query']);
   assert.match(String(await tools.call('remote_search', { limit: 1 })), /must have required property 'query'/);
   assert.equal(calls, 0);
@@ -136,7 +139,7 @@ test('loadable tool groups stay out of snapshots until loaded for the active tas
       });
     },
   });
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   assert.equal(tools.schemas().some(tool => tool.name === 'deep_search'), false);
   assert.deepEqual(tools.catalog()[0]?.tools, ['deep_search']);
   assert.equal(tools.load('search.deep'), true);
@@ -149,20 +152,29 @@ test('Cordis services reject simultaneous providers and disappear with their Fib
   const old = await provideTestService('svc-x', { who: 'old' });
   await assert.rejects(() => provideTestService('svc-x', { who: 'new' }), /has been registered/);
   await old.dispose();
-  assert.equal(cordis.reflect.get('svc-x'), undefined);
+  assert.equal(runtime.reflect.get('svc-x'), undefined);
+});
+
+test('useService reactively projects Cordis without storing a second service value', async () => {
+  const service = useService<{ who: string }>('svc-reactive');
+  assert.equal(service.value, null);
+  const owner = await provideTestService('svc-reactive', { who: 'cordis' });
+  assert.equal(service.value?.who, 'cordis');
+  await owner.dispose();
+  assert.equal(service.value, null);
 });
 
 test('translateESM: the pinned dialect survives the new Function fallback', () => {
   const src = `
     const n = 2;
     export function helper(x) { return x * n; }
-    export default { name: 'p', setup() { return { n: helper(21) }; } };
+    export default { name: 'p', apply() { return helper(21); } };
   `;
   const mod = { exports: {} };
   new Function('module', 'exports', translateESM(src))(mod, mod.exports);
-  const module = mod.exports as { default: { setup(): { n: number } } };
-  assert.equal(module.default.setup().n, 42);
-  const plugin = normalizePluginDef(module, 'p');
+  const module = mod.exports as { default: { apply(): number } };
+  assert.equal(module.default.apply(), 42);
+  const plugin = normalizePlugin(module, 'p');
   assert.equal(typeof (plugin as { apply?: unknown }).apply, 'function');
 });
 
@@ -204,26 +216,30 @@ test('rewriteImports: only the leading block is touched — template-literal imp
   assert.equal(rewriteImports(src), src); // byte-identical: no leading imports at all
 });
 
-test('expose capture: only explicit expose() opts in; unmount cleans up', () => {
-  const cap = makeExposeCapture('cap-a');
+test('expose capture: only explicit expose() opts in; unmount cleans up', async () => {
+  await applyTestPlugin(uiKernelPlugin);
+  const ui = runtime.reflect.get('ui') as UiService;
+  const cap = ui.capture('cap-a');
   cap({ $: { exposed: null } });                 // default public instance: expose() never called
-  assert.equal(exposedStates.has('cap-a'), false);
+  assert.equal(ui.readState('cap-a'), null);
   const val = { $: { exposed: {} }, score: 1 };  // shape of an exposed proxy
   cap(val);
-  assert.equal(exposedStates.get('cap-a'), val);
+  assert.equal(ui.readState('cap-a'), val);
   cap(null);                                     // ref(null) on unmount
-  assert.equal(exposedStates.has('cap-a'), false);
+  assert.equal(ui.readState('cap-a'), null);
 });
 
-test('expose capture: cleanup is token-guarded across HMR remount order', () => {
-  const capOld = makeExposeCapture('cap-b');
-  const capNew = makeExposeCapture('cap-b');
+test('expose capture: cleanup is token-guarded across HMR remount order', async () => {
+  await applyTestPlugin(uiKernelPlugin);
+  const ui = runtime.reflect.get('ui') as UiService;
+  const capOld = ui.capture('cap-b');
+  const capNew = ui.capture('cap-b');
   capOld({ $: { exposed: {} }, v: 'old' });
   capNew({ $: { exposed: {} }, v: 'new' });      // replacement mounts BEFORE the old ref(null)
   capOld(null);                                  // late unmount of the old instance
-  assert.equal(exposedStates.get('cap-b').v, 'new');
+  assert.equal((ui.readState('cap-b') as { v: string }).v, 'new');
   capNew(null);
-  assert.equal(exposedStates.has('cap-b'), false);
+  assert.equal(ui.readState('cap-b'), null);
 });
 
 test('serializeState: unwraps refs like the expose proxy, drops functions', () => {
@@ -238,11 +254,14 @@ test('serializeState: circular state degrades to an error string, oversized stat
   assert.ok(out.length < 80 && /truncated, 108 chars/.test(out)); // {"s":"…"} = 108 chars
 });
 
-test('normalizePluginDef: accepts Cordis plugins and wraps Vue objects as UI only', () => {
-  assert.throws(() => normalizePluginDef({ default: { foo: 1 } }, 'x'), /Cordis/);
-  const fn = normalizePluginDef({ default: () => undefined }, 'logic');
+test('normalizePlugin: accepts only explicit Cordis plugins', () => {
+  assert.throws(() => normalizePlugin({ default: { foo: 1 } }, 'x'), /Cordis/);
+  assert.throws(() => normalizePlugin({ default: { setup: () => () => null } }, 'panel'), /Cordis/);
+  const fn = normalizePlugin({ default: () => undefined }, 'logic');
   assert.equal(typeof fn, 'function');
-  const ui = normalizePluginDef({ default: { setup: () => () => null } }, 'panel') as { apply?: unknown; inject?: string[] };
-  assert.equal(typeof ui.apply, 'function');
-  assert.deepEqual(ui.inject, ['ui']);
+});
+
+test('public AI modules load only when plugin source imports them', async () => {
+  await preparePluginModules(`import * as pi   from   '@earendil-works/pi-ai';\n`);
+  assert.equal(typeof modules['@earendil-works/pi-ai'].createProvider, 'function');
 });

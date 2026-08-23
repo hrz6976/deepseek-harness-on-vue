@@ -33,5 +33,3 @@ export function apply(ctx: Context): void {
   });
   ctx.prompt.register({ name: 'run-js', order: 20, text: 'Use run_js to execute JavaScript when you need to verify logic, compute something, or debug.' });
 }
-
-export default { name, inject, apply };

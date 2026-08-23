@@ -1,22 +1,11 @@
 import type { FsService, HarnessMessage, JsonValue } from '@/shared/runtime';
-import type {
-  HarnessArtifact,
-  TaskCheckpoint,
-  TaskContext,
-  TaskEvent,
-  TaskSession,
-  TaskStatus,
-  TaskStoreSnapshot,
-} from '@/shared/task-model';
+import type { HarnessArtifact, TaskCheckpoint, TaskContext, TaskEvent, TaskSession, TaskStatus, TaskStoreSnapshot } from '@/shared/task-model';
 
-export const HARNESS_ROOT = '.harness/';
-export const SESSION_ROOT = `${HARNESS_ROOT}sessions/`;
-export const ARTIFACT_ROOT = `${HARNESS_ROOT}artifacts/`;
-export const TASK_TOMBSTONE_ROOT = `${HARNESS_ROOT}tombstones/tasks/`;
+const HARNESS_ROOT = '.harness/';
 interface SessionIndex { activeTaskId: string | null; taskIds: string[] }
 
 export class HarnessTaskStore {
-  readonly checkpoints = new Map<string, TaskCheckpoint>();
+  private readonly eventSequences = new Map<string, number>();
   private readonly sessionRoot: string;
   private readonly artifactRoot: string;
   private readonly tombstoneRoot: string;
@@ -37,7 +26,7 @@ export class HarnessTaskStore {
 
   async load(): Promise<TaskStoreSnapshot> {
     await this.fs.ready;
-    this.checkpoints.clear();
+    this.eventSequences.clear();
     const index = parseJson<SessionIndex>(this.fs.read(this.sessionIndex), { activeTaskId: null, taskIds: [] });
     const tasks = index.taskIds
       .filter(id => !this.isTaskDeleted(id))
@@ -45,13 +34,10 @@ export class HarnessTaskStore {
       .filter((task): task is TaskSession => task !== null);
     const taskIds = new Set(tasks.map(task => task.id));
     const contexts = tasks.flatMap(task => parseJson<TaskContext[]>(this.fs.read(this.contextsPath(task.id)), []));
-    const events = tasks.flatMap(task => parseJsonLines<TaskEvent>(this.fs.read(this.eventsPath(task.id))));
     for (const task of tasks) {
-      const checkpoint = parseJson<TaskCheckpoint | null>(this.fs.read(this.checkpointPath(task.id)), null);
-      if (checkpoint) this.checkpoints.set(task.id, {
-        ...checkpoint,
-        messages: stableCheckpointMessages(checkpoint.messages),
-      });
+      const eventSource = this.fs.read(this.eventsPath(task.id));
+      const lastEvent = parseJson<TaskEvent | null>(eventSource?.trimEnd().split('\n').at(-1) ?? null, null);
+      if (lastEvent) this.eventSequences.set(task.id, lastEvent.sequence);
     }
     const artifacts = this.fs.list()
       .filter(path => path.startsWith(this.artifactRoot) && path.endsWith('/meta.json'))
@@ -62,7 +48,6 @@ export class HarnessTaskStore {
       tasks,
       contexts,
       artifacts,
-      events,
     };
   }
 
@@ -70,7 +55,7 @@ export class HarnessTaskStore {
     const timestamp = this.now();
     return {
       id: this.uuid(), title: title.trim() || 'Untitled task', status: 'idle',
-      contextIds: [], capabilityIds: [], artifactIds: [],
+      capabilityIds: [],
       createdAt: timestamp, updatedAt: timestamp,
     };
   }
@@ -96,8 +81,10 @@ export class HarnessTaskStore {
     };
   }
 
-  newEvent(taskId: string, sequence: number, type: string, data: JsonValue = null): TaskEvent {
-    return { id: this.uuid(), taskId, sequence, type, timestamp: this.now(), data };
+  checkpointMessages(taskId: string | null): HarnessMessage[] {
+    if (!taskId) return [];
+    const checkpoint = parseJson<TaskCheckpoint | null>(this.fs.read(this.checkpointPath(taskId)), null);
+    return checkpoint ? stableCheckpointMessages(checkpoint.messages) : [];
   }
 
   async persistIndex(activeTaskId: string | null, tasks: TaskSession[]): Promise<void> {
@@ -123,39 +110,40 @@ export class HarnessTaskStore {
     await this.writeJson(this.artifactMetaPath(artifact.id), artifact);
   }
 
-  async deleteTask(task: TaskSession): Promise<void> {
-    if (!this.isTaskDeleted(task.id)) {
-      await this.writeJson(this.tombstonePath(task.id), { taskId: task.id, deletedAt: this.now() });
+  async deleteTask(taskId: string): Promise<void> {
+    if (!this.isTaskDeleted(taskId)) {
+      await this.writeJson(this.tombstonePath(taskId), { taskId, deletedAt: this.now() });
     }
-    const taskPrefix = `${this.sessionRoot}${task.id}/`;
-    const relatedArtifactIds = new Set(task.artifactIds);
+    const taskPrefix = `${this.sessionRoot}${taskId}/`;
+    const relatedArtifactIds = new Set<string>();
     for (const path of this.fs.list().filter(path => path.startsWith(this.artifactRoot) && path.endsWith('/meta.json'))) {
       const artifact = parseJson<HarnessArtifact | null>(this.fs.read(path), null);
-      if (artifact?.taskId === task.id) relatedArtifactIds.add(artifact.id);
+      if (artifact?.taskId === taskId) relatedArtifactIds.add(artifact.id);
     }
     const artifactPrefixes = [...relatedArtifactIds].map(id => `${this.artifactRoot}${id}/`);
     const paths = this.fs.list().filter(path => path.startsWith(taskPrefix)
       || artifactPrefixes.some(prefix => path.startsWith(prefix)));
     for (const path of paths) await this.fs.remove(path);
-    this.checkpoints.delete(task.id);
+    this.eventSequences.delete(taskId);
   }
 
-  async appendEvent(event: TaskEvent): Promise<void> {
-    this.assertTaskWritable(event.taskId);
-    const path = this.eventsPath(event.taskId);
+  async appendEvent(taskId: string, type: string, data: JsonValue = null): Promise<TaskEvent> {
+    this.assertTaskWritable(taskId);
+    const path = this.eventsPath(taskId);
     const previous = this.fs.read(path);
+    const sequence = (this.eventSequences.get(taskId) ?? 0) + 1;
+    this.eventSequences.set(taskId, sequence);
+    const event = { id: this.uuid(), taskId, sequence, type, timestamp: this.now(), data };
     await this.fs.write(path, `${previous ? `${previous.trimEnd()}\n` : ''}${JSON.stringify(event)}\n`);
+    return event;
   }
 
-  async persistCheckpoint(taskId: string, messages: HarnessMessage[]): Promise<TaskCheckpoint> {
+  async persistCheckpoint(taskId: string, messages: readonly HarnessMessage[]): Promise<void> {
     this.assertTaskWritable(taskId);
     // Vue messages may be reactive proxies, which structuredClone rejects.
     // JSON is also the persisted checkpoint format, so clone through it here.
     const cloned = JSON.parse(JSON.stringify(stableCheckpointMessages(messages))) as HarnessMessage[];
-    const checkpoint: TaskCheckpoint = { id: this.uuid(), taskId, messages: cloned, savedAt: this.now() };
-    this.checkpoints.set(taskId, checkpoint);
-    await this.writeJson(this.checkpointPath(taskId), checkpoint);
-    return checkpoint;
+    await this.writeJson(this.checkpointPath(taskId), { taskId, messages: cloned, savedAt: this.now() });
   }
 
   touch(task: TaskSession, status?: TaskStatus): void {
@@ -195,12 +183,4 @@ function parseJson<T>(source: string | null, fallback: T): T {
   if (!source) return fallback;
   try { return JSON.parse(source) as T; }
   catch { return fallback; }
-}
-
-function parseJsonLines<T>(source: string | null): T[] {
-  if (!source) return [];
-  return source.split('\n').filter(Boolean).flatMap(line => {
-    try { return [JSON.parse(line) as T]; }
-    catch { return []; }
-  });
 }

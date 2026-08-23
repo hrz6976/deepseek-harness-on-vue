@@ -1,95 +1,85 @@
-import { Service, type Context, type Plugin } from '@deepseek-ai/cordis';
-import { watch } from 'vue';
-import type { WatchStopHandle } from 'vue';
+import { Service, type Context } from '@deepseek-ai/cordis';
 import { log } from '@/kernel/log';
 import { compilePlugin } from '@/kernel/compile';
-import { plugins, mountPlugin, unmountPlugin } from '@/kernel/host';
-import { PLUGIN_DIR } from '@/kernel/boot';
-import { bumpCapabilityVersion, capabilities, capabilityHealth, validateCapabilityManifest } from '@/kernel/capabilities';
-import { persistCapabilityPackage, readCapabilityManifest } from '@/kernel/capability-package';
+import { mountPlugin, unmountPlugin } from '@/kernel/host';
+import {
+  bumpCapabilityVersion, capabilities, capabilityHealth, emptyContributionInventory,
+  legacyCapabilityManifest, validateCapabilityManifest,
+} from '@/kernel/capabilities';
+import {
+  CAPABILITY_PACKAGE_ROOT, PLUGIN_DIR, capabilityIndexPath, persistCapabilityPackage, readCapabilityManifest,
+} from '@/kernel/capability-package';
 import type { CapabilityManifest } from '@/shared/capability-protocol';
-import { systemPluginNames } from '@/kernel/system-plugin-names';
-import type { ManagerService } from '@/shared/runtime';
+import { SYSTEM_PLUGIN_NAMES } from '@/kernel/system-plugin-names';
+import type { CapabilityCatalogEntry, ManagerService, PluginDefaults } from '@/shared/runtime';
 import { errorMessage } from '@/shared/runtime';
 import { principalForContext } from '@/kernel/broker';
 import { assertPrincipalPermission } from '@/shared/capability-policy';
 
 class ManagerRuntime extends Service implements ManagerService {
-  constructor(ctx: Context, readonly implementation: ManagerService) {
+  constructor(ctx: Context, private readonly implementation: ManagerService) {
     super(ctx, 'manager');
   }
 
-  private authorize(): void {
+  private authorized<T>(run: () => T): T {
     assertPrincipalPermission(principalForContext(this.ctx), 'capability.manage');
+    return run();
   }
 
-  list(): string[] {
-    this.authorize();
-    return this.implementation.list();
-  }
-
-  catalog() {
-    this.authorize();
-    return this.implementation.catalog();
-  }
-
-  create(name: string, source: string, manifest?: CapabilityManifest): Promise<string> {
-    this.authorize();
-    return this.implementation.create(name, source, manifest);
-  }
-
-  mount(name: string, config?: Record<string, unknown> | null): Promise<string> {
-    this.authorize();
-    return this.implementation.mount(name, config);
-  }
-
-  unmount(name: string): Promise<string> {
-    this.authorize();
-    return this.implementation.unmount(name);
-  }
-
-  remove(name: string): Promise<string> {
-    this.authorize();
-    return this.implementation.remove(name);
-  }
+  catalog() { return this.authorized(() => this.implementation.catalog()); }
+  create(name: string, source: string, manifest?: CapabilityManifest) { return this.authorized(() => this.implementation.create(name, source, manifest)); }
+  mount(name: string, config?: Record<string, unknown> | null) { return this.authorized(() => this.implementation.mount(name, config)); }
+  unmount(name: string) { return this.authorized(() => this.implementation.unmount(name)); }
+  remove(name: string) { return this.authorized(() => this.implementation.remove(name)); }
 }
 
-export const name = 'manager';
-export const inject = ['fs'];
+interface SourceState { timer?: ReturnType<typeof setTimeout>; pending?: string }
 
-export function apply(ctx: Context): void {
-  const loaded = new Map<string, { source: string | null }>();
-  const watchers = new Map<string, WatchStopHandle>();
-  const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const pendingReloads = new Map<string, string>();
-  let stopFlush: WatchStopHandle | null = null;
+interface ManagerBootstrap { defaults: PluginDefaults; search?: string; reservedNames?: readonly string[] }
+interface ActivateOptions {
+  builtin?: boolean;
+  config?: Record<string, unknown> | null;
+  manifest?: CapabilityManifest;
+  manifestSource?: 'generated' | 'declared';
+  bumpManifest?: boolean;
+}
+
+const name = 'manager';
+const inject = ['fs'];
+
+function apply(ctx: Context, bootstrap?: ManagerBootstrap): void | Promise<void> {
+  const sources = new Map<string, SourceState>();
+  const reserved = new Set(bootstrap?.reservedNames ?? SYSTEM_PLUGIN_NAMES);
+  let loopBusy = false;
 
   const fs = ctx.fs;
-  const loop = () => ctx.reflect.get('loop') as import('../shared/runtime').LoopService | undefined;
   const task = () => ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+  const parentFor = (scope = 'task') => scope === 'task' ? task()?.scope() ?? ctx : ctx;
+  const sourceState = (pluginName: string) => {
+    const state = sources.get(pluginName) ?? {};
+    sources.set(pluginName, state);
+    return state;
+  };
+  const dropSource = (pluginName: string) => {
+    const state = sources.get(pluginName);
+    if (state?.timer) clearTimeout(state.timer);
+    sources.delete(pluginName);
+  };
 
-  async function loadAndMount(
-    pluginName: string,
-    source: string,
-    plugin: Plugin,
-    config?: Record<string, unknown> | null,
-    manifestOverride?: CapabilityManifest,
-  ) {
-    clearTimeout(debounceTimers.get(pluginName));
-    const previous = plugins.find(entry => entry.name === pluginName);
+  async function activate(pluginName: string, source: string, options: ActivateOptions = {}) {
+    const plugin = await compilePlugin(pluginName, source);
+    const file = sourceState(pluginName);
+    if (file.timer) clearTimeout(file.timer);
+    const previous = capabilities.get(pluginName);
     const previousVersion = previous?.version ?? -1;
-    const previousManifest = previous?.manifest;
-    const previousManifestSource = previous?.manifestSource;
-    const previousSource = loaded.get(pluginName)?.source ?? null;
-    const nextConfig = config !== undefined ? config : previous?.config ?? null;
-    const storedManifest = readCapabilityManifest(fs, pluginName, false);
-    const manifest = manifestOverride ?? previousManifest ?? storedManifest?.manifest;
-    const manifestSource = manifestOverride
-      ? 'declared' as const
-      : previousManifestSource ?? storedManifest?.source;
+    const storedManifest = readCapabilityManifest(fs, pluginName, options.builtin ?? false);
+    const manifest = options.manifest ?? previous?.manifest ?? storedManifest?.manifest;
+    const manifestSource = options.manifestSource ?? previous?.manifestSource ?? storedManifest?.source;
 
     const entry = await mountPlugin(pluginName, plugin, {
-      config: nextConfig,
+      builtin: options.builtin,
+      config: options.config !== undefined ? options.config : previous?.config ?? null,
+      parent: parentFor(manifest?.scope),
       ...(manifest ? { manifest, manifestSource } : {}),
     });
     // A compile probe cannot see apply-time failures. When dependencies are
@@ -103,142 +93,170 @@ export function apply(ctx: Context): void {
         await unmountPlugin(pluginName);
         if (previous) {
           const restored = await mountPlugin(pluginName, previous.plugin, {
-            builtin: previous.builtin,
             config: previous.config,
+            parent: parentFor(previous.manifest.scope),
             manifest: previous.manifest,
             manifestSource: previous.manifestSource,
           });
           restored.version = previous.version;
           restored.hmrError = errorMessage(error);
-          loaded.set(pluginName, { source: previousSource });
-          attachWatcher(pluginName);
         }
         throw error;
       }
     }
     entry.version = previousVersion + 1;
-    if (previous && !manifestOverride) bumpCapabilityVersion(entry);
+    if (options.bumpManifest ?? Boolean(previous && !options.manifest)) bumpCapabilityVersion(entry);
     entry.hmrError = '';
-    if (entry.manifest.scope === 'task') void task()?.attachCapability(entry.manifest.id);
-    loaded.set(pluginName, { source });
-    attachWatcher(pluginName);
+    await persistCapabilityPackage(fs, entry, source);
     return entry;
   }
 
-  async function archiveMountedCapability(pluginName: string, source: string): Promise<void> {
-    const entry = plugins.find(plugin => plugin.name === pluginName);
-    if (entry) await persistCapabilityPackage(fs, entry, source);
-  }
-
-  function attachWatcher(pluginName: string): void {
-    if (systemPluginNames.has(pluginName)) return;
-    if (watchers.has(pluginName)) return;
-    const path = PLUGIN_DIR + pluginName + '.js';
-    const stop = watch(
-      () => fs.read(path),
-      content => {
-        if (content == null || loaded.get(pluginName)?.source === content) return;
-        clearTimeout(debounceTimers.get(pluginName));
-        debounceTimers.set(pluginName, setTimeout(() => scheduleReload(pluginName, content), 300));
-      },
-    );
-    watchers.set(pluginName, stop);
+  async function tryActivate(pluginName: string, source: string, options: ActivateOptions = {}) {
+    try { return { entry: await activate(pluginName, source, options), error: '' }; }
+    catch (error) { return { entry: null, error: errorMessage(error) }; }
   }
 
   function scheduleReload(pluginName: string, content: string): void {
-    if (loop()?.running.value) {
-      pendingReloads.set(pluginName, content);
-      stopFlush ??= watch(() => loop()?.running.value, running => {
-        if (running) return;
-        stopFlush?.();
-        stopFlush = null;
-        const batch = [...pendingReloads];
-        pendingReloads.clear();
-        for (const [pendingName, pendingSource] of batch) void reload(pendingName, pendingSource);
-      });
-      log(`HMR: [${pluginName}] changed during a run — reload deferred until the run ends`, 'warn');
-      return;
-    }
-    void reload(pluginName, content);
+    if (!loopBusy) return void reload(pluginName, content);
+    sourceState(pluginName).pending = content;
+    log(`HMR: [${pluginName}] changed during a run — reload deferred until the run ends`, 'warn');
   }
 
   async function reload(pluginName: string, content: string): Promise<void> {
-    if (!plugins.find(plugin => plugin.name === pluginName)) {
-      loaded.set(pluginName, { source: content });
-      return;
+    if (!capabilities.has(pluginName) || fs.read(capabilityIndexPath(pluginName)) === content) return;
+    const result = await tryActivate(pluginName, content);
+    if (result.entry) return log(`HMR: plugin [${pluginName}] hot-reloaded through a new Cordis fiber`, 'ok');
+    const entry = capabilities.get(pluginName);
+    if (entry) entry.hmrError = result.error;
+    log(`HMR: new source for [${pluginName}] was rejected (${result.error}); the previous plugin is active`, 'err');
+  }
+
+  async function initialize({ defaults, search }: ManagerBootstrap): Promise<void> {
+    const refreshed = new Set<string>();
+    await Promise.all([fs.ready, task()?.ready]);
+    const params = new URLSearchParams(search ?? globalThis.location?.search ?? '');
+    if (params.has('reset')) {
+      for (const path of fs.list().filter(path => path.startsWith(PLUGIN_DIR) || path.startsWith(CAPABILITY_PACKAGE_ROOT))) await fs.remove(path);
+      log('factory reset: capability packages wiped, reseeding shipped defaults', 'warn');
+      globalThis.history?.replaceState?.(null, '', globalThis.location?.pathname ?? '/');
     }
-    try {
-      const plugin = await compilePlugin(pluginName, content);
-      await loadAndMount(pluginName, content, plugin);
-      await archiveMountedCapability(pluginName, content);
-      log(`HMR: plugin [${pluginName}] hot-reloaded through a new Cordis fiber`, 'ok');
-      ctx.emit('plugin/reloaded', pluginName);
-    } catch (error: unknown) {
-      const entry = plugins.find(plugin => plugin.name === pluginName);
-      if (entry) entry.hmrError = errorMessage(error);
-      log(`HMR: new source for [${pluginName}] was rejected (${errorMessage(error)}); the previous plugin is active`, 'err');
+
+    for (const pluginName of reserved) {
+      const packageRoot = `${CAPABILITY_PACKAGE_ROOT}${pluginName}/`;
+      const legacyPaths = fs.list().filter(path => path === `${PLUGIN_DIR}${pluginName}.js` || path.startsWith(packageRoot));
+      for (const path of legacyPaths) await fs.remove(path);
+      if (legacyPaths.length) log(`boot: removed legacy OPFS copy of system plugin [${pluginName}]`, 'ok');
     }
+
+    for (const [pluginName, definition] of Object.entries(defaults)) {
+      if (reserved.has(pluginName)) continue;
+      const path = `${PLUGIN_DIR}${pluginName}.js`;
+      const workingSource = fs.read(path);
+      if (workingSource == null) { await fs.write(path, definition.source); continue; }
+      if (workingSource === definition.source) continue;
+      let storedManifest: ReturnType<typeof readCapabilityManifest> = null;
+      try { storedManifest = readCapabilityManifest(fs, pluginName, true); }
+      catch { /* activation reports malformed manifests without overwriting their source */ }
+      const activeSource = fs.read(capabilityIndexPath(pluginName));
+      if (storedManifest?.source !== 'generated' || storedManifest.manifest.version !== '0.1.0' || activeSource !== workingSource) continue;
+      await fs.write(path, definition.source);
+      refreshed.add(pluginName);
+      log(`boot: updated untouched shipped capability [${pluginName}]`, 'ok');
+    }
+
+    const stored = fs.list()
+      .filter(path => path.startsWith(PLUGIN_DIR) && path.endsWith('.js'))
+      .map(path => path.slice(PLUGIN_DIR.length, -3));
+    const names = [...Object.keys(defaults).filter(pluginName => !reserved.has(pluginName)),
+      ...stored.filter(pluginName => !reserved.has(pluginName) && !(pluginName in defaults))];
+    for (const pluginName of names) {
+      const definition = defaults[pluginName];
+      if (definition?.autoMount === false) continue;
+      const source = fs.read(`${PLUGIN_DIR}${pluginName}.js`) ?? definition?.source;
+      if (source == null) continue;
+      const builtin = pluginName in defaults;
+      let storedManifest: ReturnType<typeof readCapabilityManifest> = null;
+      try { storedManifest = readCapabilityManifest(fs, pluginName, builtin); }
+      catch { /* activate reports the stored manifest error */ }
+      const scope = storedManifest?.manifest.scope ?? (builtin ? 'global' : 'task');
+      if (task() && scope === 'task' && !task()?.activeTask()?.capabilityIds.includes(pluginName)) continue;
+      const activeSource = fs.read(capabilityIndexPath(pluginName));
+      const options: ActivateOptions = {
+        builtin,
+        ...(storedManifest ? { manifest: storedManifest.manifest, manifestSource: storedManifest.source } : {}),
+        bumpManifest: !refreshed.has(pluginName) && activeSource != null && activeSource !== source
+          && (storedManifest?.source ?? 'generated') === 'generated',
+      };
+      const result = await tryActivate(pluginName, source, options);
+      if (result.entry) continue;
+      const fallbackSource = fs.read(capabilityIndexPath(pluginName));
+      if (!fallbackSource || fallbackSource === source) {
+        log(`boot: plugin ${pluginName} failed to activate: ${result.error} — skipped (fix the draft, remove_plugin it, or ?reset)`, 'err');
+        continue;
+      }
+      const fallback = capabilities.get(pluginName)
+        ? { entry: capabilities.get(pluginName)!, error: '' }
+        : await tryActivate(pluginName, fallbackSource, { ...options, bumpManifest: false });
+      if (!fallback.entry) {
+        if (capabilities.has(pluginName)) await unmountPlugin(pluginName);
+        log(`boot: plugin ${pluginName} and its last active revision failed: ${fallback.error}`, 'err');
+        continue;
+      }
+      fallback.entry.hmrError = `Working draft rejected during boot: ${result.error}`;
+      log(`boot: plugin ${pluginName} working draft was rejected; restored the last active revision`, 'warn');
+    }
+    log(`boot complete: ${names.length} plugin file(s) processed`, 'ok');
+  }
+
+  function catalogEntry(pluginName: string): CapabilityCatalogEntry | null {
+    if (reserved.has(pluginName)) return null;
+    const entry = capabilities.get(pluginName);
+    let manifest = entry?.manifest;
+    try { manifest ??= readCapabilityManifest(fs, pluginName, false)?.manifest ?? legacyCapabilityManifest(pluginName, false); }
+    catch { return null; }
+    const health = entry ? capabilityHealth(entry) : null;
+    return {
+      id: manifest.id, title: manifest.title,
+      description: manifest.description ?? '', scope: manifest.scope, version: manifest.version,
+      status: entry?.status ?? 'disposed',
+      attached: manifest.scope !== 'task' || Boolean(task()?.activeTask()?.capabilityIds.includes(manifest.id)),
+      providers: [...(manifest.requires.providers ?? [])],
+      permissions: manifest.permissions.map(permission => permission.id),
+      contributes: emptyContributionInventory(entry?.contributions ?? manifest.contributes),
+      health: health?.state ?? 'healthy', issues: health?.issues ?? [],
+    };
   }
 
   const service: ManagerService = {
-    list: () => [...loaded.keys()],
-    catalog: () => [...capabilities.values()].map(entry => {
-      const health = capabilityHealth(entry);
-      return {
-        kind: 'capability' as const,
-        id: entry.manifest.id,
-        name: entry.name,
-        title: entry.manifest.title,
-        description: entry.manifest.description ?? '',
-        scope: entry.manifest.scope,
-        version: entry.manifest.version,
-        status: entry.status,
-        attached: entry.manifest.scope !== 'task' || Boolean(task()?.activeTask()?.capabilityIds.includes(entry.manifest.id)),
-        providers: [...(entry.manifest.requires.providers ?? [])],
-        permissions: entry.manifest.permissions.map(permission => permission.id),
-        contributes: JSON.parse(JSON.stringify(entry.contributions)),
-        health: health.state,
-        issues: health.issues,
-      };
-    }),
+    catalog: () => [...new Set([
+      ...capabilities.keys(),
+      ...fs.list().filter(path => path.startsWith(PLUGIN_DIR) && path.endsWith('.js')).map(path => path.slice(PLUGIN_DIR.length, -3)),
+    ])].map(catalogEntry).filter((entry): entry is CapabilityCatalogEntry => Boolean(entry)),
     async create(pluginName, source, manifest) {
       if (!/^[a-z][a-z0-9_-]*$/iu.test(pluginName || '')) return 'Error: name must start with a letter, only letters/digits/-/_';
-      if (systemPluginNames.has(pluginName)) return `Error: ${pluginName} is a reserved system plugin name`;
+      if (reserved.has(pluginName)) return `Error: ${pluginName} is a reserved system plugin name`;
       let normalizedManifest: CapabilityManifest | undefined;
       try { normalizedManifest = manifest ? validateCapabilityManifest(manifest, pluginName) : undefined; }
       catch (error: unknown) { return `Error: invalid capability manifest: ${errorMessage(error)}`; }
 
-      let plugin: Plugin;
-      try { plugin = await compilePlugin(pluginName, source); }
-      catch (error: unknown) { return `Error: plugin ${pluginName} failed to compile: ${errorMessage(error)}`; }
-      const taskRuntime = task();
-      const taskScoped = (normalizedManifest?.scope ?? 'task') === 'task';
-      const wasAttached = Boolean(taskRuntime?.activeTask()?.capabilityIds.includes(pluginName));
-      if (taskScoped && !wasAttached) await taskRuntime?.attachCapability(pluginName);
-      try {
-        await loadAndMount(pluginName, source, plugin, undefined, normalizedManifest);
-        await archiveMountedCapability(pluginName, source);
-        // The editable file is a draft pointer. Publish it only after the
-        // candidate Fiber and active capability revision have succeeded.
-        await fs.write(PLUGIN_DIR + pluginName + '.js', source);
-        return `plugin ${pluginName} compiled and mounted; its Cordis contributions are live`;
-      } catch (error) {
-        if (taskScoped && !wasAttached) await taskRuntime?.detachCapability(pluginName);
-        throw error;
-      }
+      const result = await tryActivate(pluginName, source, {
+        ...(normalizedManifest ? { manifest: normalizedManifest, manifestSource: 'declared' as const } : {}),
+      });
+      if (!result.entry) return `Error: plugin ${pluginName} failed to activate: ${result.error}`;
+      // The editable file is a draft pointer. Publish it only after the
+      // candidate Fiber and active capability revision have succeeded.
+      await fs.write(PLUGIN_DIR + pluginName + '.js', source);
+      if (result.entry.manifest.scope === 'task') await task()?.attachCapability(result.entry.manifest.id);
+      return `plugin ${pluginName} compiled and mounted; ${result.entry.contributions.panels.length ? `visible UI: ${result.entry.contributions.panels.join(', ')}` : 'no UI panel registered'}`;
     },
     async mount(pluginName, config) {
-      if (systemPluginNames.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be mounted from OPFS`;
+      if (reserved.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be mounted from OPFS`;
       const source = fs.read(PLUGIN_DIR + pluginName + '.js');
       if (source == null) return `Error: no source at ${PLUGIN_DIR + pluginName + '.js'}`;
-      try {
-        const plugin = await compilePlugin(pluginName, source);
-        await loadAndMount(pluginName, source, plugin, config ?? null);
-        await archiveMountedCapability(pluginName, source);
-        return `plugin ${pluginName} mounted`;
-      } catch (error: unknown) {
-        return `Error: plugin ${pluginName} failed to compile: ${errorMessage(error)}`;
-      }
+      const result = await tryActivate(pluginName, source, { config: config ?? null });
+      if (!result.entry) return `Error: plugin ${pluginName} failed to activate: ${result.error}`;
+      if (result.entry.manifest.scope === 'task') await task()?.attachCapability(result.entry.manifest.id);
+      return `plugin ${pluginName} mounted`;
     },
     async unmount(pluginName) {
       if (!await unmountPlugin(pluginName)) return `Error: plugin ${pluginName} is not mounted`;
@@ -246,63 +264,59 @@ export function apply(ctx: Context): void {
       return `plugin ${pluginName} unmounted (file kept)`;
     },
     async remove(pluginName) {
-      if (systemPluginNames.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be removed`;
-      const capabilityId = plugins.find(plugin => plugin.name === pluginName)?.manifest.id ?? pluginName;
-      if (!plugins.find(plugin => plugin.name === pluginName)) {
-        if (fs.read(PLUGIN_DIR + pluginName + '.js') != null) {
-          await fs.remove(PLUGIN_DIR + pluginName + '.js');
-          loaded.delete(pluginName);
-          watchers.get(pluginName)?.();
-          watchers.delete(pluginName);
-          await task()?.detachCapability(capabilityId);
-          return `plugin ${pluginName} was not running; its file was deleted`;
-        }
-        return `Error: plugin ${pluginName} does not exist (mounted: ${plugins.map(plugin => plugin.name).join(', ') || 'none'})`;
-      }
-      loaded.delete(pluginName);
-      watchers.get(pluginName)?.();
-      watchers.delete(pluginName);
-      clearTimeout(debounceTimers.get(pluginName));
-      pendingReloads.delete(pluginName);
-      await unmountPlugin(pluginName);
-      await fs.remove(PLUGIN_DIR + pluginName + '.js');
-      await task()?.detachCapability(capabilityId);
-      return `plugin ${pluginName} unmounted; its Cordis effects and source are gone`;
+      if (reserved.has(pluginName)) return `Error: ${pluginName} is a bundled system plugin and cannot be removed`;
+      const mounted = capabilities.has(pluginName);
+      const path = PLUGIN_DIR + pluginName + '.js';
+      if (!mounted && fs.read(path) == null) return `Error: plugin ${pluginName} does not exist (mounted: ${[...capabilities.keys()].join(', ') || 'none'})`;
+      dropSource(pluginName);
+      if (mounted) await unmountPlugin(pluginName);
+      await fs.remove(path);
+      await task()?.detachCapability(pluginName);
+      return mounted
+        ? `plugin ${pluginName} unmounted; its Cordis effects and source are gone`
+        : `plugin ${pluginName} was not running; its file was deleted`;
     },
   };
 
   new ManagerRuntime(ctx, service);
 
-  // Boot seeds and mounts capabilities after this kernel service is alive.
-  // Discover each new editable source as it arrives so first-run files get
-  // the same HMR watcher as files restored before startup.
-  ctx.on('plugin/mounted', (pluginName: string) => {
-    if (systemPluginNames.has(pluginName)) return;
-    const source = fs.read(PLUGIN_DIR + pluginName + '.js');
-    if (source == null) return;
-    if (!loaded.has(pluginName)) loaded.set(pluginName, { source });
-    attachWatcher(pluginName);
+  const mountIfMissing = async (id: string) => { if (!capabilities.has(id)) await service.mount(id); };
+  ctx.on('task/activated', async () => {
+    for (const id of task()?.activeTask()?.capabilityIds ?? []) await mountIfMissing(id);
   });
-
-  void fs.ready.then(() => {
-    for (const path of fs.list().filter(path => path.startsWith(PLUGIN_DIR) && path.endsWith('.js'))) {
-      const pluginName = path.slice(PLUGIN_DIR.length, -3);
-      if (systemPluginNames.has(pluginName)) continue;
-      if (!loaded.has(pluginName)) loaded.set(pluginName, { source: fs.read(path) });
-      attachWatcher(pluginName);
+  ctx.on('task/capability-attached', mountIfMissing);
+  ctx.on('task/capability-detached', async (id: string) => {
+    const entry = capabilities.get(id);
+    if (entry?.manifest.scope === 'task') await unmountPlugin(id);
+  });
+  ctx.on('loop/busy', () => { loopBusy = true; });
+  ctx.on('loop/idle', async () => {
+    loopBusy = false;
+    for (const [name, file] of sources) if (file.pending !== undefined) {
+      const source = file.pending; delete file.pending; await reload(name, source);
     }
+  });
+  ctx.on('workspace/changed', (path: string, content: string | null) => {
+    if (!path.startsWith(PLUGIN_DIR) || !path.endsWith('.js') || content == null) return;
+    const pluginName = path.slice(PLUGIN_DIR.length, -3);
+    if (reserved.has(pluginName) || fs.read(capabilityIndexPath(pluginName)) === content) return;
+    const file = sourceState(pluginName);
+    if (file.timer) clearTimeout(file.timer);
+    file.timer = setTimeout(() => scheduleReload(pluginName, content), 300);
   });
 
   ctx.effect(() => () => {
-    for (const stop of watchers.values()) stop();
-    watchers.clear();
-    stopFlush?.();
-    stopFlush = null;
-    for (const timer of debounceTimers.values()) clearTimeout(timer);
-    debounceTimers.clear();
+    for (const source of sources.values()) {
+      if (source.timer) clearTimeout(source.timer);
+    }
+    sources.clear();
     log('manager plugin unmounted', 'warn');
-  }, 'manager.watchers');
+  }, 'manager.hmr');
+  return bootstrap ? initialize(bootstrap) : undefined;
 }
 
-export const managerPlugin = { name, inject, apply };
-export default managerPlugin;
+export function createManagerPlugin(bootstrap?: ManagerBootstrap, requireTask = Boolean(bootstrap)) {
+  return { name, inject: requireTask ? [...inject, 'task'] : inject, apply: (ctx: Context) => apply(ctx, bootstrap) };
+}
+
+export const managerPlugin = createManagerPlugin();

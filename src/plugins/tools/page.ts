@@ -29,6 +29,14 @@ const queryPageParameters = z.object({
   limit: z.number().int().positive().max(500).optional(),
 });
 const targetParameters = z.object({ target: ElementRefSchema });
+const styleInspectParameters = targetParameters.extend({
+  pseudo: z.enum(['::before', '::after']).describe('Inspect the selected pseudo-element instead of the element itself.').optional(),
+  properties: z.array(z.string().trim().min(1).max(200)).max(100)
+    .describe('Optional computed CSS properties. Omit to return every property enumerated by getComputedStyle(), including custom properties.').optional(),
+  includeMatchedRules: z.boolean().default(true)
+    .describe('Include matching rules from readable author stylesheets.'),
+  maxRules: z.number().int().positive().max(200).default(100),
+});
 const typeParameters = z.object({
   target: ElementRefSchema,
   value: z.string().max(1_000_000),
@@ -89,7 +97,7 @@ const scriptParameters = z.object({
 const PAGE_DYNAMIC_GROUP = {
   id: 'page.dynamic',
   title: 'Dynamic Page Rules',
-  description: 'Observe DOM changes, keep declarative rules active for future nodes, or use explicitly approved expert page code.',
+  description: 'Observe DOM changes or keep declarative rules active for future matching nodes.',
   scope: 'task',
   tags: ['page', 'dom', 'mutation', 'live-rule'],
 } as const;
@@ -98,6 +106,7 @@ export function apply(ctx: Context): void {
 
   const snapshotDescription = 'Read a compressed, framework-neutral DOM snapshot of the active page. Returns stable element references for later patches.';
   const queryDescription = 'Find elements in the active page with a CSS selector and return stable references and fingerprints.';
+  const styleInspectDescription = 'Read all computed CSS properties, inline declarations, and matching author rules for a referenced element or its ::before/::after pseudo-element. This is a read-only core inspection and needs no approval.';
   const previewDescription = 'Validate a transactional DOM patch without changing the page. Always preview a non-trivial patch before applying it.';
   const applyDescription = 'Apply and verify a DOM adjustment as one undoable temporary transaction. Ordinary reversible patches need no separate confirmation; persistence still requires explicit approval.';
   const revertDescription = 'Undo an applied page patch by transaction id.';
@@ -106,6 +115,12 @@ export function apply(ctx: Context): void {
   ctx.tools.register({ name: 'page_snapshot', description: snapshotDescription, parameters: snapshotParameters, run: ({ selector, maxNodes, maxDepth }) => request(ctx, { type: 'page/snapshot', options: { selector, maxNodes, maxDepth } }) });
   ctx.tools.register({ name: 'page_query', description: queryDescription, parameters: queryParameters, run: ({ selector, limit }) => request(ctx, { type: 'page/query', selector, limit }) });
   ctx.tools.register({ name: 'page_query_page', description: 'Query a large matching set one bounded page at a time.', parameters: queryPageParameters, run: ({ selector, offset, limit }) => request(ctx, { type: 'page/query-page', selector, offset, limit }) });
+  ctx.tools.register({
+    name: 'page_style_inspect', description: styleInspectDescription, parameters: styleInspectParameters,
+    run: ({ target, pseudo, properties, includeMatchedRules, maxRules }) => request(ctx, {
+      type: 'page/style-inspect', target, pseudo, properties, includeMatchedRules, maxRules,
+    }),
+  });
   ctx.tools.register({ name: 'page_click', description: 'Click a referenced page element through the trusted Page provider. Requires user approval.', parameters: targetParameters, run: ({ target }) => request(ctx, { type: 'page/click', target }) });
   ctx.tools.register({ name: 'page_type', description: 'Enter text into a referenced input or editable element through the trusted Page provider. Requires user approval.', parameters: typeParameters, run: ({ target, value, clear }) => request(ctx, { type: 'page/type', target, value, clear }) });
   ctx.tools.register({ name: 'page_scroll', description: 'Scroll the page or bring a referenced element into view.', parameters: scrollParameters, run: ({ target, x, y, behavior }) => request(ctx, { type: 'page/scroll', target, x, y, behavior }) });
@@ -120,7 +135,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register({ name: 'page_live_rules_apply', description: 'Install or replace one temporary declarative rule set. The trusted content runtime reapplies idempotent actions to current and future matching nodes.', parameters: liveRulesInstallParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ id, label, rules }) => request(ctx, { type: 'page/live-rules-install', id, label, rules }) });
   ctx.tools.register({ name: 'page_live_rules_remove', description: 'Stop a temporary declarative live-rule set by id. Existing DOM changes are not reverted.', parameters: idParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ id }) => request(ctx, { type: 'page/live-rules-remove', id }) });
   ctx.tools.register({ name: 'page_picker_start', description: 'Open the visual element picker so the user can click a page element and attach an annotation.', parameters: emptyParameters, run: () => request(ctx, { type: 'page/picker-start' }) });
-  ctx.tools.register({ name: 'page_script_run', description: 'Expert-only: execute JavaScript in the trusted MAIN or USER_SCRIPT page world. Always requires explicit user approval; prefer snapshots, patches, and live rules.', parameters: scriptParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ code, world }) => request(ctx, { type: 'page/eval', code, world }) });
+  ctx.tools.register({ name: 'page_script_run', description: 'Execute one-off JavaScript in the trusted MAIN or USER_SCRIPT page world when typed page tools cannot express the required behavior. Arbitrary code still requires explicit user approval.', parameters: scriptParameters, run: ({ code, world }) => request(ctx, { type: 'page/eval', code, world }) });
   ctx.tools.register({
     name: 'page_recipe_save', description: recipeDescription, parameters: recipeParameters,
     async run({ type, id, name: recipeName, matches, operations, liveRules, source, runAt, enabled }) {
@@ -149,8 +164,6 @@ export function apply(ctx: Context): void {
   ctx.prompt.register({
     name: 'page-tools',
     order: 10,
-    text: 'The host page is controlled only through framework-neutral page_* tools. Plugins and run_js never run in host DOM. Treat element references as capabilities: obtain and preserve them from snapshots/queries. Use page_query_page for large sets. After click/type, wait for an expected state and page_settle before reading again. Click/type cross the trusted approval boundary. Preview non-trivial patches. For DOM that is created or reconciled later, load the page.dynamic tool group with capability_load. Use live rules for simple declarative changes. When actual page behavior or arbitrary DOM logic is required, preview with page_script_run and, after explicit approval, persist the same idempotent source through page_recipe_save with type userscript. Userscripts always use the browser USER_SCRIPT world. If Chrome reports that User Scripts are disabled, explain how to enable them once and do not retry with MAIN.',
+    text: 'The host page is controlled only through framework-neutral page_* tools. Plugins and run_js never run in host DOM. Treat element references as capabilities: obtain and preserve them from snapshots/queries. For visual or CSS work, inspect the exact element and relevant ::before/::after state with page_style_inspect before changing it, then inspect the resulting computed style after applying; never infer the cascade from class names alone. Use page_query_page for large sets. After click/type, wait for an expected state and page_settle before reading again. Click/type cross the trusted approval boundary. Preview non-trivial patches. For DOM that is created or reconciled later, load the page.dynamic tool group with capability_load and use live rules for simple declarative changes. When actual page behavior or arbitrary DOM logic is required, use page_script_run and, after explicit approval, persist the same idempotent source through page_recipe_save with type userscript. Userscripts always use the browser USER_SCRIPT world. If Chrome reports that User Scripts are disabled, explain how to enable them once and do not retry with MAIN.',
   });
 }
-
-export default { name, inject, apply };

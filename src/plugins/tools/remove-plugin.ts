@@ -12,5 +12,3 @@ export function apply(ctx: Context): void {
     run: ({ name: pluginName }) => ctx.manager.remove(pluginName),
   });
 }
-
-export default { name, inject, apply };

@@ -44,8 +44,8 @@ export function apply(ctx) {
 
 Key points:
 - Plugins are functions, classes, or objects with apply(ctx, config). Named name/inject/apply exports are the clearest authoring form.
-- Register contributions explicitly through ctx.tools.register, ctx.prompt.register, and ctx.ui.register. Cordis binds every registration, listener, service, timer cleanup, and nested plugin to the calling Fiber.
-- A template belongs only inside a Vue component registered with ctx.ui.register. Pure logic plugins need no Vue component.
+- Register contributions explicitly through ctx.tools.register, ctx.prompt.register, and ctx.ui.register; include UI when the user expects a visible surface. Cordis binds every registration, listener, service, timer cleanup, and nested plugin to the calling Fiber.
+- "Create a plugin" means call create_plugin in the current turn, not merely write a workspace file or artifact. Pure logic and tool-only plugins appear in the capability inspector but intentionally render no page surface.
 - UI placement is declarative: use region ('main' or 'side') and order; the component must not Teleport into shell DOM.
 - Declare required services in inject. A Fiber stays pending until they exist and is automatically restarted if a required service changes.
 - Use ctx.provide(name, service), ctx.on/emit/waterfall, and ctx.effect for custom services, events, middleware, and resources.
@@ -80,5 +80,3 @@ export function apply(ctx: Context): void {
   });
   ctx.prompt.register({ name: 'create-plugin', order: 30, text: RECIPE });
 }
-
-export default { name, inject, apply };

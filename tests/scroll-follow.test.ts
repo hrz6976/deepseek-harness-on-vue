@@ -5,7 +5,7 @@ import {
   distanceFromScrollBottom,
   isNearScrollBottom,
   nextScrollFollowState,
-} from '../src/extension/scroll-follow';
+} from '@/extension/scroll-follow';
 
 test('scroll following remains active within the bottom threshold', () => {
   const metrics = { scrollTop: 1_192, scrollHeight: 1_600, clientHeight: 400 };

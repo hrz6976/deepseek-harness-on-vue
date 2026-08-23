@@ -3,33 +3,20 @@ import type { CapabilityEnvelope, CapabilityResponse, CapabilityStreamChunk } fr
 import { assertPrincipalAuthorized } from '@/shared/capability-policy';
 import { approvalForRequest, type ApprovalRequest } from './approval-policy';
 import { TrustedCapabilityHost } from './capability-host';
-import { OpfsStore } from './opfs-store';
+import { OpfsStore } from '@/kernel/opfs-store';
 import { isInspectableUrl, parseSidePanelTabId, sidePanelPortName } from './tab-scope';
+import { requiredElement } from './required-element';
 import './sidepanel.css';
 
-const frameElement = document.querySelector<HTMLIFrameElement>('#harness-sandbox');
-if (!frameElement) throw new Error('Harness sandbox frame is missing.');
-const frame = frameElement;
-const sandboxStatusElement = document.querySelector<HTMLElement>('#sandbox-status');
-const siteAccessElement = document.querySelector<HTMLElement>('#site-access');
-const siteAccessLabelElement = document.querySelector<HTMLElement>('#site-access-label');
-const siteAccessButtonElement = document.querySelector<HTMLButtonElement>('#site-access-button');
-const approvalDialogElement = document.querySelector<HTMLDialogElement>('#approval-dialog');
-const approvalTitleElement = document.querySelector<HTMLElement>('#approval-title');
-const approvalBodyElement = document.querySelector<HTMLElement>('#approval-body');
-const approvalConfirmElement = document.querySelector<HTMLButtonElement>('#approval-confirm');
-if (!sandboxStatusElement || !siteAccessElement || !siteAccessLabelElement || !siteAccessButtonElement
-  || !approvalDialogElement || !approvalTitleElement || !approvalBodyElement || !approvalConfirmElement) {
-  throw new Error('Harness trusted site-access controls are missing.');
-}
-const sandboxStatus = sandboxStatusElement;
-const siteAccess = siteAccessElement;
-const siteAccessLabel = siteAccessLabelElement;
-const siteAccessButton = siteAccessButtonElement;
-const approvalDialog = approvalDialogElement;
-const approvalTitle = approvalTitleElement;
-const approvalBody = approvalBodyElement;
-const approvalConfirm = approvalConfirmElement;
+const frame = requiredElement<HTMLIFrameElement>('#harness-sandbox');
+const sandboxStatus = requiredElement<HTMLElement>('#sandbox-status');
+const siteAccess = requiredElement<HTMLElement>('#site-access');
+const siteAccessLabel = requiredElement<HTMLElement>('#site-access-label');
+const siteAccessButton = requiredElement<HTMLButtonElement>('#site-access-button');
+const approvalDialog = requiredElement<HTMLDialogElement>('#approval-dialog');
+const approvalTitle = requiredElement<HTMLElement>('#approval-title');
+const approvalBody = requiredElement<HTMLElement>('#approval-body');
+const approvalConfirm = requiredElement<HTMLButtonElement>('#approval-confirm');
 
 const boundTabId = await resolveBoundTabId().catch(error => {
   reportStartupFailure(error);
@@ -336,6 +323,16 @@ function showApproval(request: ApprovalRequest): Promise<boolean> {
   approvalTitle.textContent = request.title;
   approvalBody.textContent = request.body;
   approvalConfirm.textContent = request.confirmLabel;
+  approvalConfirm.disabled = false;
+  const origins = request.origins;
+  approvalConfirm.onclick = origins ? event => {
+    event.preventDefault();
+    approvalConfirm.disabled = true;
+    void chrome.permissions.request({ origins }).then(
+      granted => approvalDialog.close(granted ? 'confirm' : 'cancel'),
+      error => { approvalBody.textContent = error instanceof Error ? error.message : String(error); approvalConfirm.disabled = false; },
+    );
+  } : null;
   approvalDialog.classList.toggle('danger', request.danger === true);
   approvalDialog.returnValue = '';
   approvalDialog.showModal();

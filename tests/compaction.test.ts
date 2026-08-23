@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import {
   estimateMessageTokens, estimateContextTokens, findCutIndex,
   serializeTranscript, runCompaction, DEFAULT_SETTINGS,
-} from '../src/plugins/compaction';
-import { toPiMessages } from '../src/plugins/llm';
+} from '@/plugins/compaction';
+import { toPiMessages } from '@/plugins/llm';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 afterEach(async () => { await cleanupTestRuntime(); });
@@ -126,11 +126,11 @@ test('runCompaction: summarizer failure throws and leaves the log untouched', as
 // (this file runs in its own node:test process, so the plugin's global bus
 // listeners and services can't leak into the other test files)
 test('plugin end-to-end: over-threshold log is compacted before the next request', async () => {
-  const { toolsPlugin } = await import('../src/plugins/tools');
-  const { promptPlugin } = await import('../src/plugins/prompt');
-  const { loopPlugin } = await import('../src/plugins/loop');
-  const { compactionPlugin } = await import('./../src/plugins/compaction');
-  const { services } = await import('../src/kernel/services');
+  const { toolsPlugin } = await import('@/plugins/tools');
+  const { promptPlugin } = await import('@/plugins/prompt');
+  const { loopPlugin } = await import('@/plugins/loop');
+  const compactionPlugin = await import('@/plugins/compaction');
+  const { runtime } = await import('@/kernel/cordis');
 
   await applyTestPlugin(toolsPlugin);
   await applyTestPlugin(promptPlugin);
@@ -146,21 +146,23 @@ test('plugin end-to-end: over-threshold log is compacted before the next request
       })();
     },
   });
+  const taskMessages = [];
+  await provideTestService('task', { ready: Promise.resolve(), messages: taskMessages, activeTask: () => null, async appendEvent() {} });
   await applyTestPlugin(loopPlugin);
   await applyTestPlugin(compactionPlugin);
-  const loop = services.get('loop').value;
-  const compaction = services.get('compaction').value;
+  const loop = runtime.reflect.get('loop');
+  const compaction = runtime.reflect.get('compaction');
   compaction.settings.reserveTokens = 500;   // threshold: > 1000 - 500 = 500 tokens
   compaction.settings.keepRecentTokens = 10;
 
-  loop.messages.push({ role: 'user', text: 'a'.repeat(4000) }); // ~1000 tokens — must be summarized away
-  loop.messages.push({ role: 'user', text: 'b'.repeat(4000) }); // crosses the keep budget — stays
+  taskMessages.push({ role: 'user', text: 'a'.repeat(4000) }); // ~1000 tokens — must be summarized away
+  taskMessages.push({ role: 'user', text: 'b'.repeat(4000) }); // crosses the keep budget — stays
   await loop.run('finish up');
 
-  assert.equal(loop.messages[0].role, 'summary');
-  assert.equal(loop.messages[0].text, 'CHECKPOINT');
-  assert.ok(notesOf(loop).includes('上下文接近上限，正在压缩…'));
-  assert.ok(notesOf(loop).some(t => /^上下文已压缩：约 \d+k → \d+k tokens$/.test(t)));
+  assert.equal(taskMessages[0].role, 'summary');
+  assert.equal(taskMessages[0].text, 'CHECKPOINT');
+  assert.ok(notesOf(taskMessages).includes('上下文接近上限，正在压缩…'));
+  assert.ok(notesOf(taskMessages).some(t => /^上下文已压缩：约 \d+k → \d+k tokens$/.test(t)));
   const agentReq = requests.find(r => !/summarization assistant/.test(r.systemPrompt));
   assert.ok(agentReq.messages.some(m => m.role === 'summary'), 'agent request must carry the checkpoint');
   assert.ok(!agentReq.messages.some(m => (m.text || '').includes('aaaa')), 'summarized prefix must be gone');
@@ -168,4 +170,4 @@ test('plugin end-to-end: over-threshold log is compacted before the next request
 
 });
 
-const notesOf = loop => loop.messages.filter(m => m.role === 'note').map(m => m.text);
+const notesOf = messages => messages.filter(m => m.role === 'note').map(m => m.text);

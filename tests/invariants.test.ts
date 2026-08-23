@@ -7,14 +7,14 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
-import { bus } from '../src/kernel/bus';
-import { services } from '../src/kernel/services';
-import { useTool } from '../src/kernel/contrib';
-import { toolsPlugin } from '../src/plugins/tools';
-import { promptPlugin } from '../src/plugins/prompt';
-import { createSnapshotBuffer, loopPlugin } from '../src/plugins/loop';
-import { toHarnessFinishReason, toPiMessages } from '../src/plugins/llm';
-import { translateESM, compilePlugin } from '../src/kernel/compile';
+import { useBusOn } from '@/kernel/bus';
+import { runtime } from '@/kernel/cordis';
+import { useTool } from '@/kernel/contrib';
+import { toolsPlugin } from '@/plugins/tools';
+import { promptPlugin } from '@/plugins/prompt';
+import { createSnapshotBuffer, loopPlugin } from '@/plugins/loop';
+import { toHarnessFinishReason, toPiMessages } from '@/plugins/llm';
+import { translateESM, compilePlugin } from '@/kernel/compile';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 // ---------------------------------------------------------------- helpers --
@@ -36,9 +36,12 @@ async function mountHarness(script, options = {}) {
       return script(req, requests.length);
     },
   });
-  if (options.task) await provideTestService('task', options.task);
+  const task = {
+    ready: Promise.resolve(), messages: [], activeTask: () => null, async appendEvent() {}, ...options.task,
+  };
+  await provideTestService('task', task);
   await applyTestPlugin(loopPlugin);
-  return { loop: services.get('loop').value, requests };
+  return { loop: Object.assign(runtime.reflect.get('loop'), { messages: task.messages }), requests };
 }
 
 afterEach(async () => { await cleanupTestRuntime(); });
@@ -118,6 +121,17 @@ test('loop: notes and streaming/error partials never reach the model', async () 
   }
   // the completed history DID go: note + 2 partials injected, so only the goal is eligible
   assert.deepEqual(requests[0].messages.map(m => m.role), ['user']);
+});
+
+test('loop publishes Cordis busy and idle lifecycle events', async () => {
+  const events = [];
+  await applyTestPlugin({ name: 'loop-lifecycle-observer', apply(ctx) {
+    ctx.on('loop/busy', () => { events.push('busy'); });
+    ctx.on('loop/idle', () => { events.push('idle'); });
+  } });
+  const { loop } = await mountHarness(doneText('ok'));
+  await loop.run('goal');
+  assert.deepEqual(events, ['busy', 'idle']);
 });
 
 test('loop: length is incomplete, audited, and continued with an internal directive', async () => {
@@ -284,7 +298,7 @@ test('loop: tools/pre-execute veto blocks the call, tool body never runs', async
     else yield finishEvent('finished');
   });
   const dispose = useTool({ name: 'guarded', description: '', parameters: z.object({}), run: () => { ran = true; return 'secret'; } });
-  const off = bus.on('tools/pre-execute', req => req.name === 'guarded' ? { ...req, veto: 'disabled by policy' } : req);
+  const off = useBusOn('tools/pre-execute', req => req.name === 'guarded' ? { ...req, veto: 'disabled by policy' } : req);
   await loop.run('goal');
   const call = loop.messages.find(m => m.role === 'assistant')?.toolCalls[0];
   assert.equal(ran, false);
@@ -326,7 +340,7 @@ test('loop: a model that never stops calling tools hits the failsafe turn limit'
 test('loop/turn-start: fires before the request; splices to the log shape it', async () => {
   const { loop, requests } = await mountHarness(doneText('ok'));
   loop.messages.push({ role: 'user', text: 'ancient history' });
-  const off = bus.on('loop/turn-start', (arg, next) => {
+  const off = useBusOn('loop/turn-start', (arg, next) => {
     arg.messages.splice(0, 1, { role: 'summary', text: 'SUM' }); // what compaction does
     return next(arg);
   });
@@ -341,7 +355,7 @@ test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async
   const { loop, requests } = await mountHarness(async function* () {
     yield { type: 'error', message: 'maximum context length is 131072 tokens' };
   });
-  const off = bus.on('loop/llm-error', (arg, next) => { fired++; return next({ ...arg, retry: true }); });
+  const off = useBusOn('loop/llm-error', (arg, next) => { fired++; return next({ ...arg, retry: true }); });
   await loop.run('goal');
   assert.equal(fired, 2);           // consulted on both failures
   assert.equal(requests.length, 2); // but retried only once
@@ -448,14 +462,14 @@ test('loop: tool calls and results are persisted as audit events', async () => {
 // ------------------------------------------------------------------ bus misc --
 test('bus.emit follows Cordis synchronous error propagation', async () => {
   let reached = 0;
-  const off1 = bus.on('misc/emit', () => { throw new Error('boom'); });
-  const off2 = bus.on('misc/emit', () => { reached++; });
-  assert.throws(() => bus.emit('misc/emit'), /boom/);
+  const off1 = useBusOn('misc/emit', () => { throw new Error('boom'); });
+  const off2 = useBusOn('misc/emit', () => { reached++; });
+  assert.throws(() => runtime.emit('misc/emit'), /boom/);
   assert.equal(reached, 0);
   off1(); off2();
 });
 
 test('bus.waterfall: no listeners passes the argument through untouched', async () => {
   const v = { untouched: true };
-  assert.equal(await bus.waterfall('misc/nobody-listens', v), v);
+  assert.equal(await runtime.waterfall('misc/nobody-listens', v, value => value), v);
 });

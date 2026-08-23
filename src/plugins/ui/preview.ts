@@ -19,10 +19,8 @@ const PreviewPanel = defineComponent({
   },
 });
 
-export const previewPlugin = {
+export default {
   name: 'preview',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'preview', region: 'side', order: 20, component: PreviewPanel }); },
 };
-
-export default previewPlugin;

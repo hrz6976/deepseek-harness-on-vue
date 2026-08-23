@@ -4,7 +4,13 @@ import { Window } from 'happy-dom';
 import { createElement } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import type { ElementRef, PageCommand, PageCommandResult, PatchTransaction } from '../src/shared/page-protocol';
+import type {
+  ElementRef,
+  PageCommand,
+  PageCommandResult,
+  PageStyleInspection,
+  PatchTransaction,
+} from '@/shared/page-protocol';
 
 const browserWindow = new Window({ url: 'https://legacy.example.test/dashboard' });
 browserWindow.document.body.innerHTML = `
@@ -39,7 +45,7 @@ Object.defineProperty(globalThis, 'chrome', {
   },
 });
 
-await import('../src/extension/content-script');
+await import('@/extension/content-script');
 
 async function command(value: PageCommand): Promise<PageCommandResult> {
   assert.ok(contentListener, 'content-script message listener should be installed');
@@ -72,6 +78,61 @@ test('content runtime snapshots and queries framework-neutral DOM references', a
   });
   assert.equal(stale.ok, false);
   if (!stale.ok) assert.match(stale.error, /lease expired/);
+});
+
+test('style inspection reads computed, inline, matched, and pseudo-element CSS without page eval', async () => {
+  const style = browserWindow.document.createElement('style');
+  style.id = 'fixture-theme';
+  style.textContent = `
+    #action {
+      --tw-translate-x: -50%;
+      display: flex;
+      position: relative;
+      color: rgb(120, 107, 209);
+    }
+    #action::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: 12px;
+      width: 20px;
+      translate: -50% 0;
+    }
+  `;
+  browserWindow.document.head.append(style);
+  const action = browserWindow.document.querySelector<HTMLElement>('#action')!;
+  action.style.setProperty('align-items', 'center');
+
+  const query = await command({ type: 'page/query', selector: '#action' });
+  assert.equal(query.ok, true);
+  if (!query.ok) return;
+  const target = (query.value as ElementRef[])[0]!;
+
+  const elementResult = await command({ type: 'page/style-inspect', target });
+  assert.equal(elementResult.ok, true);
+  if (!elementResult.ok) return;
+  const elementStyle = elementResult.value as PageStyleInspection;
+  assert.equal(elementStyle.computed.display, 'flex');
+  assert.equal(elementStyle.computed['--tw-translate-x'], '-50%');
+  assert.equal(elementStyle.inline['align-items']?.value, 'center');
+  assert.ok(elementStyle.matchedRules.some(rule => rule.selector === '#action'
+    && rule.declarations.position?.value === 'relative'));
+  assert.equal(elementStyle.unreadableStyleSheets.length, 0);
+
+  const pseudoResult = await command({
+    type: 'page/style-inspect', target, pseudo: '::after',
+    properties: ['position', 'left', 'bottom', 'width', 'translate'],
+  });
+  assert.equal(pseudoResult.ok, true);
+  if (!pseudoResult.ok) return;
+  const pseudoStyle = pseudoResult.value as PageStyleInspection;
+  assert.equal(pseudoStyle.pseudo, '::after');
+  const pseudoRule = pseudoStyle.matchedRules.find(rule => rule.selector === '#action::after');
+  assert.equal(pseudoRule?.declarations.left?.value, '50%');
+  assert.equal(pseudoRule?.declarations.bottom?.value, '12px');
+  assert.equal(pseudoRule?.declarations.translate?.value, '-50% 0');
+  style.remove();
+  action.removeAttribute('style');
 });
 
 test('page capability paginates queries and performs approved-style interactions', async () => {

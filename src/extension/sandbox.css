@@ -264,6 +264,7 @@ button.list-row:hover, .list-row.selected { background: #ededeb; }
 .capability-surfaces > p { margin: -4px 3px 10px; color: var(--muted); font-size: 11px; }
 .runtime-host { display: grid; gap: 8px; }
 .runtime-host > *:empty { display: none; }
+.runtime-surfaces:not(:empty) { padding: 0 12px 10px; }
 
 article.page-plugin-item { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; max-width: none; white-space: normal; }
 .page-plugin-copy { display: grid; min-width: 0; gap: 3px; }

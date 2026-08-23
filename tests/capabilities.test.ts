@@ -1,14 +1,16 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { capabilities, capabilityHealth, recordCapabilityContribution, validateCapabilityManifest } from '../src/kernel/capabilities';
-import { mountPlugin, plugins, unmountPlugin } from '../src/kernel/host';
-import { capabilityIndexPath, capabilityManifestPath, capabilityVersionPath, persistCapabilityPackage, readCapabilityManifest } from '../src/kernel/capability-package';
-import { TrustedCapabilityHost } from '../src/extension/capability-host';
+import { capabilities, capabilityHealth, recordCapabilityContribution, validateCapabilityManifest } from '@/kernel/capabilities';
+import { mountPlugin } from '@/kernel/host';
+import { capabilityIndexPath, capabilityManifestPath, capabilityVersionPath, persistCapabilityPackage, readCapabilityManifest } from '@/kernel/capability-package';
+import { TrustedCapabilityHost } from '@/extension/capability-host';
 import { reactive, ref } from 'vue';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
-import { toolsPlugin, type ToolsRuntime } from '../src/plugins/tools';
-import { cordis } from '../src/kernel/cordis';
+import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
+import { createSystemPlugin, runtime } from '@/kernel/cordis';
+import { principalForContext } from '@/kernel/broker';
 import { z } from 'zod';
+import type { Context } from '@deepseek-ai/cordis';
 
 afterEach(async () => { await cleanupTestRuntime(); });
 
@@ -25,7 +27,7 @@ test('capability manifests validate identity, version, provider and unique permi
   assert.throws(() => validateCapabilityManifest({ ...valid, permissions: [{ id: 'mcp.read' }, { id: 'mcp.read' }] }), /must be unique/);
 });
 
-test('generated manifests learn observed contributions and unmount clears the registry', async () => {
+test('generated manifests learn contributions and Fiber disposal clears the registry', async () => {
   await mountPlugin('temporary-tool', { apply() {} });
   const entry = capabilities.get('temporary-tool')!;
   const dispose = recordCapabilityContribution('temporary-tool', 'tools', 'task_search');
@@ -35,7 +37,7 @@ test('generated manifests learn observed contributions and unmount clears the re
   dispose();
   assert.deepEqual(entry.contributions.tools, []);
   assert.equal(capabilityHealth(entry).state, 'degraded');
-  assert.equal(await unmountPlugin('temporary-tool'), true);
+  await entry.fiber?.dispose();
   assert.equal(capabilities.has('temporary-tool'), false);
 });
 
@@ -100,9 +102,11 @@ test('trusted providers enforce declared provider, permission, and task identity
   }), { ok: true });
 });
 
-test('task-scoped contributions are visible only on tasks that attach the capability', async () => {
-  const task = { id: 'task-1', capabilityIds: [] as string[] };
-  await provideTestService('task', { activeTask: () => task, activeTaskId: ref('task-1') });
+test('task-scoped Fiber is owned by the active task scope', async () => {
+  const task = { id: 'task-1', capabilityIds: ['task-tool'] };
+  let taskScope!: Context;
+  const scopeFiber = await applyTestPlugin({ name: 'task:task-1', apply(ctx) { taskScope = ctx; } });
+  await provideTestService('task', { activeTask: () => task, activeTaskId: ref('task-1'), scope: () => taskScope });
   await applyTestPlugin(toolsPlugin);
   const entry = await mountPlugin('task-tool', {
     inject: ['tools'],
@@ -110,14 +114,45 @@ test('task-scoped contributions are visible only on tasks that attach the capabi
       ctx.tools.register({ name: 'only_here', description: '', parameters: z.object({}), run: () => 'ok' });
     },
   }, {
+    parent: taskScope,
     manifest: {
       id: 'task-tool', version: '1.0.0', title: 'Task tool', scope: 'task',
       contributes: { tools: ['only_here'] }, requires: {}, permissions: [],
     },
   });
   await entry.fiber?.await();
-  const tools = cordis.reflect.get('tools') as ToolsRuntime;
-  assert.deepEqual(tools.schemas().map(tool => tool.name), []);
-  task.capabilityIds.push('task-tool');
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
   assert.deepEqual(tools.schemas().map(tool => tool.name), ['only_here']);
+  await scopeFiber.dispose();
+  assert.deepEqual(tools.schemas(), []);
+  assert.equal(capabilities.has('task-tool'), false);
+});
+
+test('nested Cordis plugins inherit capability identity and contribution ownership', async () => {
+  let systemScope!: Context;
+  await applyTestPlugin(createSystemPlugin('manager', { apply(ctx) { systemScope = ctx; } }));
+  await applyTestPlugin(toolsPlugin);
+  let nestedId = '';
+  const entry = await mountPlugin('composed', {
+    inject: ['tools'],
+    async apply(ctx) {
+      await ctx.plugin({
+        name: 'composed-child', inject: ['tools'],
+        apply(child) {
+          nestedId = principalForContext(child).id;
+          child.tools.register({ name: 'nested_tool', description: '', parameters: z.object({}), run: () => 'ok' });
+        },
+      });
+    },
+  }, {
+    parent: systemScope,
+    manifest: {
+      id: 'composed', version: '1.0.0', title: 'Composed', scope: 'global',
+      contributes: { tools: ['nested_tool'] }, requires: { providers: ['workspace'] },
+      permissions: [{ id: 'workspace.read' }],
+    },
+  });
+  await entry.fiber?.await();
+  assert.equal(nestedId, 'composed');
+  assert.deepEqual(entry.contributions.tools, ['nested_tool']);
 });

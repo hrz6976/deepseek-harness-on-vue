@@ -1,3 +1,5 @@
+import { requiredElement } from './required-element';
+
 interface StoredLlmConfig {
   baseURL: string;
   model: string;
@@ -5,12 +7,12 @@ interface StoredLlmConfig {
 }
 
 const CONFIG_KEY = 'secrets.llm';
-const form = requiredElement<HTMLFormElement>('settings');
-const baseUrlInput = requiredElement<HTMLInputElement>('base-url');
-const modelInput = requiredElement<HTMLInputElement>('model');
-const apiKeyInput = requiredElement<HTMLInputElement>('api-key');
-const statusElement = requiredElement<HTMLElement>('status');
-const submitButton = requiredElement<HTMLButtonElement>('submit');
+const form = requiredElement<HTMLFormElement>('#settings');
+const baseUrlInput = requiredElement<HTMLInputElement>('#base-url');
+const modelInput = requiredElement<HTMLInputElement>('#model');
+const apiKeyInput = requiredElement<HTMLInputElement>('#api-key');
+const statusElement = requiredElement<HTMLElement>('#status');
+const submitButton = requiredElement<HTMLButtonElement>('#submit');
 
 void restore();
 
@@ -56,10 +58,4 @@ async function save(): Promise<void> {
 function setStatus(message: string, state: 'progress' | 'success' | 'error'): void {
   statusElement.textContent = message;
   statusElement.dataset.state = state;
-}
-
-function requiredElement<T extends HTMLElement>(id: string): T {
-  const element = document.getElementById(id);
-  if (!element) throw new Error(`Missing #${id}`);
-  return element as T;
 }

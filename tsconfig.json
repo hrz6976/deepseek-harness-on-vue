@@ -8,8 +8,10 @@
       "@/*": ["src/*"]
     },
     "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
-    "types": ["chrome", "node", "@crxjs/vite-plugin/client"],
+    "types": ["chrome", "node", "vite/client", "@crxjs/vite-plugin/client"],
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noUncheckedIndexedAccess": true,
     "useUnknownInCatchVariables": true,
     "skipLibCheck": true,

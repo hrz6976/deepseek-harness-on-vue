@@ -157,5 +157,3 @@ function normalizeAlias(value: string): string {
   const normalized = value.replace(/[^a-zA-Z0-9_-]+/gu, '_').replace(/^([^a-zA-Z])/u, 'mcp_$1');
   return normalized.slice(0, 64);
 }
-
-export default { name, inject, apply };

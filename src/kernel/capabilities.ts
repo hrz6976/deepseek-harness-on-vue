@@ -1,4 +1,5 @@
 import { shallowReactive } from 'vue';
+import type { Context } from '@deepseek-ai/cordis';
 import type {
   CapabilityContributionInventory,
   PluginEntry,
@@ -9,10 +10,8 @@ import type {
   CapabilityProvider,
 } from '@/shared/capability-protocol';
 import { CapabilityManifestSchema } from '@/shared/capability-protocol';
-import { cordis } from './cordis';
-import type { TaskRuntimeService } from '@/shared/runtime';
 
-export type CapabilityContributionKind = keyof CapabilityContributionInventory;
+type CapabilityContributionKind = keyof CapabilityContributionInventory;
 
 export interface CapabilityHealth {
   state: 'healthy' | 'degraded' | 'failed';
@@ -23,10 +22,16 @@ export interface CapabilityHealth {
 
 export const capabilities = shallowReactive(new Map<string, PluginEntry>());
 
+export function capabilityForContext(ctx: Context): PluginEntry | undefined {
+  for (let fiber = ctx.fiber; fiber.uid; fiber = fiber.parent.fiber) {
+    const entry = capabilities.get(fiber.name);
+    if (entry?.fiber === fiber) return entry;
+  }
+}
+
 const BUILTIN_PROVIDER_REQUIREMENTS: Record<string, CapabilityProvider[]> = {
   page: ['page', 'site-skill'],
   llm: ['llm'],
-  loop: ['llm'],
   compaction: ['llm'],
   'file-editor': ['workspace'],
   artifacts: ['workspace'],
@@ -47,7 +52,6 @@ const BUILTIN_PERMISSIONS: Record<string, CapabilityPermission[]> = {
     { id: 'site-skill.manage', reason: 'Persist approved site capabilities.' },
   ],
   llm: [{ id: 'llm.use', reason: 'Send the task context to the configured model provider.' }],
-  loop: [{ id: 'llm.use', reason: 'Run model turns for the active task.' }],
   compaction: [{ id: 'llm.use', reason: 'Summarize oversized task context.' }],
   'file-editor': [
     { id: 'workspace.read', reason: 'Read virtual workspace files.' },
@@ -74,8 +78,11 @@ const BUILTIN_PERMISSIONS: Record<string, CapabilityPermission[]> = {
   ],
 };
 
-export function emptyContributionInventory(): CapabilityContributionInventory {
-  return { tools: [], panels: [], prompts: [], services: [], events: [], workflows: [] };
+export function emptyContributionInventory(source: Partial<CapabilityContributionInventory> = {}): CapabilityContributionInventory {
+  return {
+    tools: [...(source.tools ?? [])], panels: [...(source.panels ?? [])], prompts: [...(source.prompts ?? [])],
+    services: [...(source.services ?? [])], events: [...(source.events ?? [])], workflows: [...(source.workflows ?? [])],
+  };
 }
 
 export function legacyCapabilityManifest(name: string, builtin: boolean): CapabilityManifest {
@@ -103,7 +110,7 @@ export function validateCapabilityManifest(input: unknown, expectedId?: string):
 
 export function registerCapability(entry: PluginEntry): void {
   const current = capabilities.get(entry.manifest.id);
-  if (current && current !== entry) throw new Error(`capability id "${entry.manifest.id}" is already owned by plugin [${current.name}]`);
+  if (current && current !== entry) throw new Error(`capability id "${entry.manifest.id}" is already owned by another Fiber`);
   capabilities.set(entry.manifest.id, entry);
 }
 
@@ -162,14 +169,6 @@ export function capabilityHealth(entry: PluginEntry): CapabilityHealth {
     undeclared,
     missing,
   };
-}
-
-export function capabilityIsActive(entryOrId: PluginEntry | string): boolean {
-  const entry = typeof entryOrId === 'string' ? capabilities.get(entryOrId) : entryOrId;
-  if (!entry || entry.manifest.scope !== 'task') return true;
-  const task = cordis.reflect.get('task') as TaskRuntimeService | undefined;
-  const active = task?.activeTask();
-  return Boolean(active?.capabilityIds.includes(entry.manifest.id));
 }
 
 function addGeneratedDeclaration(manifest: CapabilityManifest, kind: CapabilityContributionKind, name: string): void {

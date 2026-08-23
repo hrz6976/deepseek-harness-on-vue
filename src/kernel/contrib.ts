@@ -2,41 +2,25 @@
 // apply(ctx); these helpers exist for host UI code that already runs in a Vue
 // setup scope. There are intentionally no contribution components: templates
 // describe real UI, never a plugin manifest.
-import { computed, getCurrentInstance, onUnmounted } from 'vue';
+import { getCurrentInstance, onUnmounted } from 'vue';
 import type { ZodType } from 'zod';
-import { useService } from './services';
 import { currentCordisContext } from './cordis';
-import type { LayoutService, NamedToolDefinition, PromptSectionDefinition } from '@/shared/runtime';
+import type { NamedToolDefinition, PromptSectionDefinition, ServiceTypes } from '@/shared/runtime';
 
-// ---- tools ------------------------------------------------------------------
-export function useTool<Parameters extends ZodType>(def: NamedToolDefinition<Parameters>) {
+type ContributionService = 'tools' | 'prompt';
+
+function useContribution<K extends ContributionService>(name: K, register: (service: ServiceTypes[K]) => () => Promise<void>) {
   const ctx = currentCordisContext();
-  const tools = ctx.reflect.get('tools') as import('../plugins/tools').ToolsRuntime | undefined;
-  const dispose = tools
-    ? tools.register(def as NamedToolDefinition)
-    : ctx.inject(['tools'], injected => { injected.tools.register(def as NamedToolDefinition); }).dispose;
+  const service = ctx.reflect.get(name) as ServiceTypes[K] | undefined;
+  const dispose = service ? register(service) : ctx.inject([name], injected => {
+    register(injected.reflect.get(name) as ServiceTypes[K]);
+  }).dispose;
   if (getCurrentInstance()) onUnmounted(() => { void dispose(); });
   return dispose;
 }
 
-// ---- prompt sections --------------------------------------------------------
-export function usePromptSection(def: PromptSectionDefinition) {
-  const ctx = currentCordisContext();
-  const prompt = ctx.reflect.get('prompt') as import('../plugins/prompt').PromptRuntime | undefined;
-  const dispose = prompt
-    ? prompt.register(def)
-    : ctx.inject(['prompt'], injected => { injected.prompt.register(def); }).dispose;
-  if (getCurrentInstance()) onUnmounted(() => { void dispose(); });
-  return dispose;
-}
+export const useTool = <Parameters extends ZodType>(def: NamedToolDefinition<Parameters>) =>
+  useContribution('tools', tools => tools.register(def as NamedToolDefinition));
 
-// ---- layout -----------------------------------------------------------------
-// No panel registry — a plugin's render output IS its panel; placement uses
-// native <Teleport> into target ELEMENTS handed out by the layout service
-// (never #id selectors: host-page id collisions are a Phase-2 hazard). The
-// v-if on the target covers mount timing: the target element registers
-// reactively when the layout frame mounts.
-export function useLayoutTarget(region: string) {
-  const layout = useService<LayoutService>('layout');
-  return computed(() => layout.value?.regions.get(region) ?? null);
-}
+export const usePromptSection = (def: PromptSectionDefinition) =>
+  useContribution('prompt', prompt => prompt.register(def));

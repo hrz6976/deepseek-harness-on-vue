@@ -2,7 +2,18 @@ import type { Context } from '@deepseek-ai/cordis';
 import { z } from 'zod';
 
 export const name = 'read-state';
-export const inject = ['state', 'tools', 'prompt'];
+export const inject = ['ui', 'tools', 'prompt'];
+
+const STATE_LIMIT = 8000;
+
+export function serializeState(value: unknown, limit = STATE_LIMIT): string {
+  try {
+    const json = JSON.stringify(value) ?? '{}';
+    return json.length > limit ? json.slice(0, limit) + ` …(truncated, ${json.length} chars total)` : json;
+  } catch (error) {
+    return `Error: state is not JSON-serializable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 export function apply(ctx: Context): void {
   ctx.tools.register({
@@ -12,23 +23,22 @@ export function apply(ctx: Context): void {
       name: z.string().min(1).describe('Plugin name; omit to list all readable state.').optional(),
     }),
     run({ name: pluginName }) {
+      const all = ctx.ui.listState();
       if (!pluginName) {
-        const all = ctx.state.list();
         return all.length ? JSON.stringify(all) : 'no plugin currently exposes readable state';
       }
-      return ctx.state.read(pluginName);
+      const state = ctx.ui.readState(pluginName);
+      return state ? serializeState(state) : `Error: plugin ${pluginName} exposes no state (currently exposing: ${all.map(entry => entry.name).join(', ') || 'none'})`;
     },
   });
   ctx.prompt.register({
     name: 'read-state',
     order: 35,
     text: () => {
-      const all = ctx.state.list();
+      const all = ctx.ui.listState();
       return all.length
         ? `Plugins expose live readable UI state (read it with read_state): ${all.map(entry => `${entry.name} {${entry.keys.join(', ')}}`).join('; ')}.`
         : '';
     },
   });
 }
-
-export default { name, inject, apply };

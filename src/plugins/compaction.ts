@@ -100,11 +100,11 @@ export function serializeTranscript(messages: HarnessMessage[]): string {
 }
 
 // Prompts adapted from pi-coding-agent's compaction module.
-export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding agent, then produce a structured summary following the exact format specified.
+const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding agent, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
 
-export const SUMMARIZATION_PROMPT = `The conversation above is to be summarized into a context checkpoint that another LLM will use to continue the work.
+const SUMMARIZATION_PROMPT = `The conversation above is to be summarized into a context checkpoint that another LLM will use to continue the work.
 
 Use this EXACT format:
 
@@ -232,15 +232,11 @@ export function apply(ctx: Context): void {
       contextWindow: () => getLlm()?.contextWindow ?? 131072,
       // manual "Compact" from the UI; loop must be idle (the button enforces it)
       async compact() {
-        const loop = ctx.reflect.get('loop') as import('../shared/runtime').LoopService | undefined;
-        if (!loop || !getLlm()) return false;
-        try { return await compact(loop.messages); }
-        catch (error: unknown) { note(loop.messages, `compaction failed: ${errorMessage(error)}`); return false; }
+        const task = ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+        if (!task || !getLlm()) return false;
+        try { return await compact(task.messages); }
+        catch (error: unknown) { note(task.messages, `compaction failed: ${errorMessage(error)}`); return false; }
       },
     });
     ctx.effect(() => () => log('compaction plugin unmounted', 'warn'), 'compaction.log-dispose');
 }
-
-export const compactionPlugin = { name, apply };
-
-export default compactionPlugin;

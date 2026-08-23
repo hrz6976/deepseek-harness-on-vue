@@ -3,6 +3,7 @@ import type { FsService, PluginEntry } from '@/shared/runtime';
 import { validateCapabilityManifest } from './capabilities';
 
 export const CAPABILITY_PACKAGE_ROOT = '.harness/capabilities/';
+export const PLUGIN_DIR = '.plugins/';
 
 export function capabilityManifestPath(id: string): string { return `${CAPABILITY_PACKAGE_ROOT}${id}/manifest.json`; }
 export function capabilityIndexPath(id: string): string { return `${CAPABILITY_PACKAGE_ROOT}${id}/index.js`; }
@@ -20,7 +21,7 @@ export function readCapabilityManifest(fs: FsService, id: string, builtin: boole
 }
 
 export async function persistCapabilityPackage(fs: FsService, entry: PluginEntry, source: string): Promise<void> {
-  const manifest = validateCapabilityManifest(entry.manifest, entry.name);
+  const manifest = validateCapabilityManifest(entry.manifest, entry.manifest.id);
   await Promise.all([
     fs.write(capabilityManifestPath(manifest.id), `${JSON.stringify(manifest, null, 2)}\n`),
     fs.write(capabilityIndexPath(manifest.id), source),

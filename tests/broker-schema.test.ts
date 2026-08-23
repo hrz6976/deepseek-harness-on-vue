@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive } from 'vue';
-import { assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, SiteUserScriptSchema } from '../src/shared/broker-schema';
-import { systemPrincipal } from '../src/kernel/broker';
-import { workspaceRevision } from '../src/shared/capability-protocol';
+import { assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, SiteUserScriptSchema } from '@/shared/broker-schema';
+import { systemPrincipal } from '@/kernel/broker';
+import { workspaceRevision } from '@/shared/capability-protocol';
+import { matchesPagePattern } from '@/shared/page-protocol';
 
 test('broker envelope removes Vue proxies before the structured-clone boundary', () => {
   const messages = reactive([{ role: 'user' as const, text: 'hello' }]);
@@ -46,4 +47,10 @@ test('persisted page code has a distinct userscript schema', () => {
     matches: ['https://example.test/calendar*'], enabled: true, world: 'ISOLATED',
     source: 'document.body.remove()', createdAt: 1, updatedAt: 1,
   }).success, false);
+});
+
+test('page match patterns share one implementation across UI and runtime', () => {
+  assert.equal(matchesPagePattern('https://*.example.test/calendar*', 'https://www.example.test/calendar/1'), true);
+  assert.equal(matchesPagePattern('https://*.example.test/calendar*', 'https://www.example.test/news'), false);
+  assert.equal(matchesPagePattern('<all_urls>', 'chrome://extensions'), false);
 });

@@ -1,7 +1,16 @@
+import type { z } from 'zod';
 import type { JsonValue } from './runtime';
-
-export type PageWorld = 'ISOLATED' | 'MAIN' | 'USER_SCRIPT';
-export type NodeRef = string;
+import type {
+  ElementFingerprintSchema,
+  ElementRefSchema,
+  LiveRuleActionSchema,
+  LiveRuleSchema,
+  PageCommandSchema,
+  PatchOperationSchema,
+  SiteRecipeSchema,
+  SiteSkillSchema,
+  SiteUserScriptSchema,
+} from './broker-schema';
 
 export interface PageScope {
   tabId: number;
@@ -12,24 +21,8 @@ export interface PageScope {
   origin: string;
 }
 
-export interface ElementFingerprint {
-  tag: string;
-  id?: string;
-  role?: string;
-  name?: string;
-  text?: string;
-  classes: string[];
-  attributes: Record<string, string>;
-}
-
-export interface ElementRef {
-  nodeRef: NodeRef;
-  documentId?: string;
-  generation?: number;
-  selector: string;
-  fingerprint: ElementFingerprint;
-  rect?: { x: number; y: number; width: number; height: number };
-}
+export type ElementFingerprint = z.infer<typeof ElementFingerprintSchema>;
+export type ElementRef = z.infer<typeof ElementRefSchema>;
 
 export interface SnapshotNode extends ElementRef {
   children?: SnapshotNode[];
@@ -50,16 +43,31 @@ export interface PageQueryPage {
   total: number;
 }
 
-export type PatchOperation =
-  | { kind: 'set-text'; target: ElementRef; value: string }
-  | { kind: 'set-attribute'; target: ElementRef; name: string; value: string }
-  | { kind: 'remove-attribute'; target: ElementRef; name: string }
-  | { kind: 'set-style'; target: ElementRef; property: string; value: string; priority?: '' | 'important' }
-  | { kind: 'add-class'; target: ElementRef; value: string }
-  | { kind: 'remove-class'; target: ElementRef; value: string }
-  | { kind: 'hide'; target: ElementRef }
-  | { kind: 'remove'; target: ElementRef }
-  | { kind: 'insert-html'; target: ElementRef; position: InsertPosition; html: string };
+export interface PageStyleDeclaration {
+  value: string;
+  priority: string;
+}
+
+export interface PageMatchedStyleRule {
+  selector: string;
+  declarations: Record<string, PageStyleDeclaration>;
+  source: string;
+  order: number;
+  conditions: Array<{ text: string; active: boolean }>;
+}
+
+export interface PageStyleInspection {
+  scope: PageScope;
+  target: ElementRef;
+  pseudo?: '::before' | '::after';
+  computed: Record<string, string>;
+  inline: Record<string, PageStyleDeclaration>;
+  matchedRules: PageMatchedStyleRule[];
+  unreadableStyleSheets: string[];
+  truncated: boolean;
+}
+
+export type PatchOperation = z.infer<typeof PatchOperationSchema>;
 
 export interface PatchVerification {
   operation: number;
@@ -85,87 +93,36 @@ export interface Annotation {
   createdAt: number;
 }
 
-export type LiveRuleAction =
-  | { kind: 'set-text'; value: string }
-  | { kind: 'set-attribute'; name: string; value: string }
-  | { kind: 'remove-attribute'; name: string }
-  | { kind: 'set-style'; property: string; value: string; priority?: '' | 'important' }
-  | { kind: 'add-class'; value: string }
-  | { kind: 'remove-class'; value: string }
-  | { kind: 'hide' }
-  | { kind: 'remove' };
-
-export interface LiveRulePredicate {
-  text?: { equals?: string; includes?: string };
-  attributes?: Array<{ name: string; equals?: string; includes?: string; exists?: boolean }>;
-}
+export type LiveRuleAction = z.infer<typeof LiveRuleActionSchema>;
 
 /**
  * A declarative, idempotent rule owned by the isolated content runtime. It is
  * deliberately less expressive than host JavaScript: future matching nodes
  * can be restyled or normalized without granting arbitrary page authority.
  */
-export interface LiveRule {
-  id: string;
-  selector: string;
-  predicate?: LiveRulePredicate;
-  actions: LiveRuleAction[];
-}
-
-export interface SiteRecipe {
-  type?: 'recipe';
-  id: string;
-  name: string;
-  matches: string[];
-  enabled: boolean;
-  world: 'ISOLATED';
-  operations?: PatchOperation[];
-  liveRules?: LiveRule[];
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface SiteUserScript {
-  type: 'userscript';
-  id: string;
-  name: string;
-  matches: string[];
-  enabled: boolean;
-  runAt: 'document_start' | 'document_end' | 'document_idle';
-  source: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export type SiteSkill = SiteRecipe | SiteUserScript;
+export type LiveRule = z.infer<typeof LiveRuleSchema>;
+export type LiveRulePredicate = NonNullable<LiveRule['predicate']>;
+export type SiteRecipe = z.infer<typeof SiteRecipeSchema>;
+export type SiteUserScript = z.infer<typeof SiteUserScriptSchema>;
+export type SiteSkill = z.infer<typeof SiteSkillSchema>;
 
 export function isSiteUserScript(skill: SiteSkill): skill is SiteUserScript {
   return skill.type === 'userscript';
 }
 
-export type PageCommand =
-  | { type: 'page/snapshot'; options?: { selector?: string; maxNodes?: number; maxDepth?: number } }
-  | { type: 'page/query'; selector: string; limit?: number }
-  | { type: 'page/query-page'; selector: string; offset?: number; limit?: number }
-  | { type: 'page/click'; target: ElementRef }
-  | { type: 'page/type'; target: ElementRef; value: string; clear?: boolean }
-  | { type: 'page/scroll'; target?: ElementRef; x?: number; y?: number; behavior?: ScrollBehavior }
-  | { type: 'page/wait'; selector: string; state?: 'attached' | 'visible' | 'hidden' | 'detached'; timeoutMs?: number }
-  | { type: 'page/settle'; quietMs?: number; timeoutMs?: number }
-  | { type: 'page/patch-preview'; label: string; operations: PatchOperation[] }
-  | { type: 'page/patch-apply'; label: string; operations: PatchOperation[] }
-  | { type: 'page/patch-revert'; transactionId: string }
-  | { type: 'page/patch-verify'; transactionId: string }
-  | { type: 'page/observe'; enabled: boolean }
-  | { type: 'page/live-rules-preview'; rules: LiveRule[] }
-  | { type: 'page/live-rules-install'; id: string; label: string; rules: LiveRule[] }
-  | { type: 'page/live-rules-remove'; id: string }
-  | { type: 'page/picker-start' }
-  | { type: 'page/picker-stop' }
-  | { type: 'page/eval'; code: string; world: Exclude<PageWorld, 'ISOLATED'> };
+export function matchesPagePattern(pattern: string, url: string): boolean {
+  if (pattern === '<all_urls>') return /^https?:/u.test(url);
+  const expression = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*');
+  try { return new RegExp(`^${expression}$`, 'u').test(url); }
+  catch { return false; }
+}
+
+export type PageCommand = z.infer<typeof PageCommandSchema>;
 
 export type PageCommandResult =
-  | { ok: true; value: JsonValue | PageSnapshot | PageQueryPage | ElementRef[] | PatchTransaction | null }
+  | { ok: true; value: JsonValue | PageSnapshot | PageQueryPage | PageStyleInspection | ElementRef[] | PatchTransaction | null }
   | { ok: false; error: string; code?: 'permission-required' | 'unsupported' | 'not-found' | 'invalid-request' };
 
 export type PageEvent =

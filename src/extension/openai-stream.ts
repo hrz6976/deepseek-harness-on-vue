@@ -1,4 +1,4 @@
-import type { JsonObject, LlmStreamEvent, TokenUsage } from '@/shared/runtime';
+import { parseJsonObject, type LlmStreamEvent, type TokenUsage } from '@/shared/runtime';
 
 export interface OpenAiStreamChunk {
   id?: string;
@@ -70,16 +70,9 @@ export class OpenAiStreamAccumulator {
       thinking: this.#thinking,
       toolCalls: [...this.#toolCalls.entries()]
         .sort(([left], [right]) => left - right)
-        .map(([, call]) => ({ ...call, argsObj: parseArgs(call.args) })),
+        .map(([, call]) => ({ ...call, argsObj: parseJsonObject(call.args) })),
       ...(this.#finishReason ? { finishReason: this.#finishReason } : {}),
       ...(type === 'done' && this.#usage ? { usage: this.#usage } : {}),
     };
   }
-}
-
-function parseArgs(source: string): JsonObject {
-  try {
-    const value = JSON.parse(source) as unknown;
-    return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
-  } catch { return {}; }
 }

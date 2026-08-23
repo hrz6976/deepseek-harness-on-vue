@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attachAnnotationContext, canSubmitPageMessage, formatAnnotationContext, takeAnnotationSubmission } from '../src/extension/annotation-context';
-import type { Annotation } from '../src/shared/page-protocol';
+import { attachAnnotationContext, canSubmitPageMessage, formatAnnotationContext, takeAnnotationSubmission } from '@/extension/annotation-context';
+import type { Annotation } from '@/shared/page-protocol';
 
 test('annotation context preserves user text and the selected element identity', () => {
   const annotation: Annotation = {
@@ -22,6 +22,7 @@ test('annotation context preserves user text and the selected element identity',
   assert.match(prompt, /#content/);
   assert.match(prompt, /Dashboard/);
   assert.match(prompt, /https:\/\/example\.test\/page/);
+  assert.match(prompt, /page_style_inspect/);
   assert.equal(formatAnnotationContext([]), '');
 
   const request = attachAnnotationContext({

@@ -1,7 +1,13 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive } from 'vue';
-import { HarnessTaskStore, stableCheckpointMessages } from '../src/kernel/task-store';
+import { HarnessTaskStore, stableCheckpointMessages } from '@/kernel/task-store';
+import { createTaskRuntimePlugin } from '@/plugins/task-runtime';
+import { runtime } from '@/kernel/cordis';
+import type { TaskRuntimeService } from '@/shared/runtime';
+import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
+
+afterEach(async () => { await cleanupTestRuntime(); });
 
 function fakeFs(initial: Record<string, string> = {}) {
   const files = reactive(new Map(Object.entries(initial)));
@@ -22,15 +28,12 @@ test('task store restores task identity independently from page/tab state', asyn
   const task = store.newTask('Research launch');
   const page = store.newContext(task.id, { kind: 'page', title: 'Product', locator: 'https://example.test/product', metadata: { tabId: 7 } });
   const file = store.newContext(task.id, { kind: 'file', title: 'brief.md', locator: 'brief.md' });
-  task.contextIds.push(page.id, file.id);
   const artifact = store.newArtifact(task.id, { kind: 'report', title: 'Launch report', source: { type: 'agent' }, status: 'ready', content: { summary: 'done' } });
-  task.artifactIds.push(artifact.id);
-  const event = store.newEvent(task.id, 1, 'task/created', { title: task.title });
 
   await store.persistTask(task);
   await store.persistContexts(task.id, [page, file]);
   await store.persistArtifact(artifact);
-  await store.appendEvent(event);
+  await store.appendEvent(task.id, 'task/created', { title: task.title });
   await store.persistCheckpoint(task.id, [{ role: 'user', text: 'continue this task' }]);
   await store.persistIndex(task.id, [task]);
 
@@ -40,8 +43,8 @@ test('task store restores task identity independently from page/tab state', asyn
   assert.deepEqual(restored.tasks.map(item => item.title), ['Research launch']);
   assert.deepEqual(restored.contexts.map(item => item.kind), ['page', 'file']);
   assert.deepEqual(restored.artifacts.map(item => item.title), ['Launch report']);
-  assert.equal(restored.events[0]?.sequence, 1);
-  assert.equal(restoredStore.checkpoints.get(task.id)?.messages[0]?.role, 'user');
+  assert.match(fs.read(`.harness/sessions/${task.id}/events.jsonl`)!, /"sequence":1/);
+  assert.equal(restoredStore.checkpointMessages(task.id)[0]?.role, 'user');
 });
 
 test('each page host has an isolated task list and artifact namespace', async () => {
@@ -56,9 +59,6 @@ test('each page host has an isolated task list and artifact namespace', async ()
   const yuriArtifact = yuri.newArtifact(yuriTask.id, {
     kind: 'site-skill', title: 'YuriSeason skill', source: { type: 'agent' },
   });
-  githubTask.artifactIds.push(githubArtifact.id);
-  yuriTask.artifactIds.push(yuriArtifact.id);
-
   await github.persistTask(githubTask);
   await github.persistArtifact(githubArtifact);
   await github.persistIndex(githubTask.id, [githubTask]);
@@ -89,22 +89,19 @@ test('task deletion removes the session and its artifact metadata', async () => 
     status: 'ready',
     content: { summary: 'temporary' },
   });
-  task.contextIds.push(context.id);
-  task.artifactIds.push(artifact.id);
-
   await store.persistTask(task);
   await store.persistContexts(task.id, [context]);
   await store.persistArtifact(artifact);
-  await store.appendEvent(store.newEvent(task.id, 1, 'task/created'));
+  await store.appendEvent(task.id, 'task/created');
   await store.persistCheckpoint(task.id, [{ role: 'user', text: 'temporary message' }]);
 
-  await store.deleteTask(task);
+  await store.deleteTask(task.id);
 
   assert.equal(fs.list().some(path => path.startsWith(`.harness/sessions/${task.id}/`)), false);
   assert.equal(fs.list().some(path => path.startsWith(`.harness/artifacts/${artifact.id}/`)), false);
   assert.notEqual(fs.read(`.harness/tombstones/tasks/${task.id}.json`), null);
   assert.equal(fs.read('keep.txt'), 'keep');
-  assert.equal(store.checkpoints.has(task.id), false);
+  assert.deepEqual(store.checkpointMessages(task.id), []);
 });
 
 test('a deleted task cannot be resurrected by a stale runtime', async () => {
@@ -117,7 +114,7 @@ test('a deleted task cannot be resurrected by a stale runtime', async () => {
   await store.persistIndex(task.id, [task]);
   await staleStore.load();
 
-  await store.deleteTask(task);
+  await store.deleteTask(task.id);
   await store.persistIndex(null, []);
 
   await assert.rejects(staleStore.persistTask({ ...task, title: 'Resurrected' }), /deleted in another Harness panel/);
@@ -131,8 +128,8 @@ test('task events are append-only JSONL records', async () => {
   const fs = fakeFs();
   let id = 0;
   const store = new HarnessTaskStore(fs, () => 100 + id, () => `event-${++id}`);
-  await store.appendEvent(store.newEvent('task-1', 1, 'first'));
-  await store.appendEvent(store.newEvent('task-1', 2, 'second', { ok: true }));
+  await store.appendEvent('task-1', 'first');
+  await store.appendEvent('task-1', 'second', { ok: true });
   const source = fs.read('.harness/sessions/task-1/events.jsonl')!;
   assert.equal(source.trim().split('\n').length, 2);
   assert.match(source, /"type":"first".*\n.*"type":"second"/s);
@@ -151,4 +148,26 @@ test('task checkpoints exclude transient notes and unfinished assistants', async
 
   assert.deepEqual(messages.map(message => message.role), ['user', 'assistant', 'summary']);
   assert.equal(messages[1]?.role === 'assistant' ? messages[1].status : null, 'done');
+});
+
+test('task runtime owns one conversation and checkpoints it across task switches', async () => {
+  await provideTestService('fs', fakeFs());
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.reflect.get('task') as TaskRuntimeService;
+  await task.ready;
+  const first = task.activeTask()!;
+  const firstScope = task.scope();
+  task.messages.push({ role: 'user', text: 'first conversation' });
+
+  const second = await task.createTask('Second');
+  const secondScope = task.scope();
+  assert.equal(firstScope.fiber.uid, null);
+  assert.deepEqual(task.messages, []);
+  task.messages.push({ role: 'user', text: 'second conversation' });
+
+  await task.activateTask(first.id);
+  assert.equal(secondScope.fiber.uid, null);
+  assert.equal(task.messages[0]?.text, 'first conversation');
+  await task.activateTask(second.id);
+  assert.equal(task.messages[0]?.text, 'second conversation');
 });

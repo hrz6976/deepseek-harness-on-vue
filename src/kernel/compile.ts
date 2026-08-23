@@ -6,7 +6,6 @@
 // same source:
 //   - Cordis default function/class/{ apply } exports, or named
 //     `name` / `inject` / `Config` / `apply` exports
-//   - Vue component objects remain a UI-only compatibility form
 //   - imports: SINGLE-LINE static forms only, at the top of the file, from
 //     public registry specifiers only (see kernel/modules.js): named
 //     `import { a, b as c } from 'x'`, namespace `import * as ns from 'x'`,
@@ -19,7 +18,7 @@
 // comments, blank lines) is scanned, so `import` text inside template
 // literals further down is never touched.
 import type { Plugin } from '@deepseek-ai/cordis';
-import { modules } from './modules';
+import { modules, preparePluginModules } from './modules';
 import { normalizePlugin } from './plugin-runtime';
 
 function normalizeSpecifier(raw: string): string {
@@ -66,7 +65,7 @@ export function translateESM(source: string): string {
   return `${translated}\nObject.assign(module.exports, { ${names.join(', ')} });`;
 }
 
-export async function importPluginSource(source: string): Promise<Record<string, unknown>> {
+async function importPluginSource(source: string): Promise<Record<string, unknown>> {
   try {
     const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
     try { return await import(/* @vite-ignore */ url); }
@@ -79,13 +78,12 @@ export async function importPluginSource(source: string): Promise<Record<string,
   }
 }
 
-export const normalizePluginDef = normalizePlugin;
-
 // Compile-probe: module top-level errors throw HERE, which is what lets
 // create/HMR roll back before touching the running instance. apply-time
 // errors become Fiber failures at mount. The sourceURL keeps DevTools
 // stack frames named (plugins have no esbuild sourcemap).
 export async function compilePlugin(name: string, source: string): Promise<Plugin> {
+  await preparePluginModules(source);
   const translated = rewriteImports(source) + `\n//# sourceURL=harness-plugin://${name}`;
-  return normalizePluginDef(await importPluginSource(translated), name);
+  return normalizePlugin(await importPluginSource(translated), name);
 }

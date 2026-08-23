@@ -1,11 +1,10 @@
-import type { ComputedRef, Ref, ShallowRef } from 'vue';
+import type { Component, Ref } from 'vue';
 import type { output, ZodType } from 'zod';
 import type { CapabilityManifest, CapabilityRequest } from './capability-protocol';
-import type { Fiber, Plugin } from '@deepseek-ai/cordis';
+import type { Context, Fiber, Plugin } from '@deepseek-ai/cordis';
 export type { Plugin } from '@deepseek-ai/cordis';
 import type {
   HarnessArtifact,
-  TaskCheckpoint,
   TaskContext,
   TaskEvent,
   TaskSession,
@@ -147,13 +146,11 @@ export interface ToolsService {
 }
 
 export interface FsService {
-  files: Map<string, string>;
   ready: Promise<void>;
   read(path: string): string | null;
   list(): string[];
   write(path: string, content: string): Promise<void>;
   remove(path: string): Promise<void>;
-  clear?(): Promise<void>;
   refresh?(): Promise<void>;
 }
 
@@ -162,16 +159,27 @@ export interface PromptService {
   assemble(context?: { fs?: FsService | null }): string;
 }
 
+export interface UiContribution {
+  name: string;
+  component: Component;
+  props?: Record<string, unknown> | null;
+  region?: string;
+  order?: number;
+}
+
+export interface UiService {
+  register(definition: UiContribution): () => Promise<void>;
+  listState(): Array<{ name: string; keys: string[] }>;
+  readState(name: string): unknown | null;
+}
+
 export interface LoopService {
-  messages: HarnessMessage[];
   running: Ref<boolean>;
   stop(): void;
-  reset(): void;
   run(goal: string): Promise<void>;
 }
 
 export interface ManagerService {
-  list(): string[];
   catalog(): CapabilityCatalogEntry[];
   create(name: string, source: string, manifest?: CapabilityManifest): Promise<string>;
   mount(name: string, config?: Record<string, unknown> | null): Promise<string>;
@@ -180,9 +188,7 @@ export interface ManagerService {
 }
 
 export interface CapabilityCatalogEntry {
-  kind: 'capability';
   id: string;
-  name: string;
   title: string;
   description: string;
   scope: 'task' | 'workspace' | 'site' | 'global';
@@ -196,11 +202,6 @@ export interface CapabilityCatalogEntry {
   issues: string[];
 }
 
-export interface StateService {
-  list(): Array<{ name: string; keys: string[] }>;
-  read(name: string): string;
-}
-
 export interface CompactionService {
   settings: Record<string, unknown>;
   compact(): Promise<boolean>;
@@ -211,13 +212,14 @@ export interface CompactionService {
 
 export interface TaskRuntimeService {
   ready: Promise<void>;
+  messages: HarnessMessage[];
   refresh(): Promise<void>;
   tasks: TaskSession[];
   contexts: TaskContext[];
   artifacts: HarnessArtifact[];
-  events: TaskEvent[];
   activeTaskId: Ref<string | null>;
   activeTask(): TaskSession | null;
+  scope(): Context;
   createTask(title?: string): Promise<TaskSession>;
   activateTask(id: string): Promise<TaskSession>;
   deleteTask(id: string): Promise<void>;
@@ -230,8 +232,7 @@ export interface TaskRuntimeService {
   createArtifact(input: Pick<HarnessArtifact, 'kind' | 'title' | 'source'> & Partial<Pick<HarnessArtifact, 'status' | 'contentPath' | 'content' | 'verification'>>): Promise<HarnessArtifact>;
   updateArtifact(id: string, patch: Partial<Pick<HarnessArtifact, 'title' | 'status' | 'contentPath' | 'content' | 'verification'>>): Promise<HarnessArtifact>;
   appendEvent(type: string, data?: JsonValue): Promise<TaskEvent>;
-  saveCheckpoint(messages: HarnessMessage[]): Promise<TaskCheckpoint>;
-  loadCheckpoint(taskId?: string): TaskCheckpoint | null;
+  saveCheckpoint(messages?: readonly HarnessMessage[]): Promise<void>;
 }
 
 export interface BrokerService {
@@ -239,28 +240,19 @@ export interface BrokerService {
   stream(request: CapabilityRequest): AsyncIterable<JsonValue>;
 }
 
-export interface LayoutService {
-  regions: Map<string, Element>;
-  target(name: string): Element | null;
-}
-
 export interface ServiceTypes {
   fs: FsService;
   llm: LlmService;
   tools: ToolsService;
   prompt: PromptService;
+  ui: UiService;
   loop: LoopService;
   manager: ManagerService;
-  state: StateService;
-  layout: LayoutService;
   broker: BrokerService;
   compaction: CompactionService;
   task: TaskRuntimeService;
   [name: string]: unknown;
 }
-
-export type ServiceName = keyof ServiceTypes & string;
-export type ServiceSlot<T = unknown> = ShallowRef<T>;
 
 export interface PromptSectionDefinition {
   name: string;
@@ -278,17 +270,15 @@ export interface CapabilityContributionInventory {
 }
 
 export interface PluginEntry {
-  name: string;
   manifest: CapabilityManifest;
   manifestSource: 'generated' | 'declared';
   contributions: CapabilityContributionInventory;
   plugin: Plugin;
   fiber: Fiber | null;
   version: number;
-  status: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | 'disposed';
+  readonly status: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | 'disposed';
   error: string;
   hmrError: string;
-  builtin: boolean;
   config: Record<string, unknown> | null;
 }
 
@@ -306,4 +296,15 @@ export interface HarnessRuntimeGlobal {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function toJsonValue(value: unknown): JsonValue {
+  return value === undefined ? null : JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
+export function parseJsonObject(source: string): JsonObject {
+  try {
+    const value = JSON.parse(source) as unknown;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
+  } catch { return {}; }
 }

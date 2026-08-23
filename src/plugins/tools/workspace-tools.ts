@@ -143,7 +143,7 @@ export function apply(ctx: Context): void {
   });
 }
 
-export function proposedContentDiff(before: string, after: string, path: string, created: boolean): string {
+function proposedContentDiff(before: string, after: string, path: string, created: boolean): string {
   if (before === after) return `(no changes to ${path})`;
   const left = before.split('\n');
   const right = after.split('\n');
@@ -166,5 +166,3 @@ export function proposedContentDiff(before: string, after: string, path: string,
     ...contextAfter.map(line => ` ${line}`),
   ].join('\n');
 }
-
-export default { name, inject, apply };

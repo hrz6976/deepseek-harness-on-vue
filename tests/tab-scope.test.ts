@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { PageEvent, PageScope } from '../src/shared/page-protocol';
+import type { PageEvent, PageScope } from '@/shared/page-protocol';
 import {
   isInspectableUrl,
   pageEventTabId,
@@ -8,7 +8,7 @@ import {
   parseSidePanelTabId,
   sidePanelPath,
   sidePanelPortName,
-} from '../src/extension/tab-scope';
+} from '@/extension/tab-scope';
 
 const scope = (tabId: number): PageScope => ({
   tabId,

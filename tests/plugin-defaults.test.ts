@@ -3,8 +3,8 @@ import { basename, resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { transformWithOxc } from 'vite';
-import { rewriteImports } from '../src/kernel/compile';
-import { systemPluginNameFromPath, systemPluginNames } from '../src/kernel/system-plugin-names';
+import { rewriteImports } from '@/kernel/compile';
+import { systemPluginNameFromPath, systemPluginNames } from '@/kernel/system-plugin-names';
 
 test('reserved system plugin paths cannot be mistaken for editable capabilities', () => {
   assert.equal(systemPluginNameFromPath('.plugins/loop.js'), 'loop');

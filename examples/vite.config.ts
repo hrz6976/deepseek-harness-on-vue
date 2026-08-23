@@ -8,6 +8,10 @@ const examplesRoot = fileURLToPath(new URL('.', import.meta.url));
 export default defineConfig({
   root: examplesRoot,
   plugins: [react()],
+  server: {
+    host: '127.0.0.1',
+    port: 0,
+  },
   resolve: {
     alias: {
       '@': resolve(examplesRoot, '../src'),

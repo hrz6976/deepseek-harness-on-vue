@@ -56,13 +56,13 @@ export function apply(ctx) {
 
 Templates exist only inside the `dice-panel` Vue component. Tools and prompts do not hide as null-rendering template nodes. `definePlugin()` is unnecessary because Cordis already has the correct function/class/object plugin union.
 
-The compiler also accepts a default Cordis function, class, or `{ apply }` object. A default Vue component object is retained as a UI-only compatibility form: the compiler wraps it in a Cordis plugin that calls `ctx.ui.register()`. New generated plugins should use explicit `apply(ctx)`.
+The compiler accepts a default Cordis function, class, or `{ apply }` object. UI follows the same ownership model: plugins explicitly call `ctx.ui.register()` from `apply(ctx)`.
 
 ## Lifecycle mapping
 
 | Concern | Implementation |
 |---|---|
-| Plugin instance | One Cordis `Fiber` per `ctx.plugin()` |
+| Plugin instance | One Cordis `Fiber` per `ctx.plugin()`; nested Fibers inherit the nearest capability identity |
 | Missing dependencies | Fiber stays `PENDING` until every declared injection exists |
 | Service replacement | Consumers unload and reactivate through Cordis dependency epochs |
 | Resources | `ctx.effect()` owns sync/async disposers and releases them in reverse order |
@@ -71,7 +71,7 @@ The compiler also accepts a default Cordis function, class, or `{ apply }` objec
 | Unmount | `await fiber.dispose()` before capability metadata and source are detached |
 | UI failure | Per-contribution Vue error boundary; it does not redefine Fiber ownership |
 
-`src/kernel/services.ts`, `bus.ts`, and `contrib.ts` are now Vue/legacy facades over Cordis. They keep existing host UI reactive while Cordis remains the source of truth. The old singleton collector and template contribution components were removed.
+`src/kernel/services.ts`, `bus.ts`, and `contrib.ts` are Vue-facing adapters over Cordis. They keep host UI reactive while Cordis remains the source of truth. The old singleton collector and template contribution components were removed.
 
 ## Contribution services
 
@@ -88,7 +88,7 @@ Dynamic source supports named `name` / `inject` / `Config` / `apply` exports and
 
 HMR follows this sequence:
 
-1. Watch the reactive FS cache.
+1. Receive the workspace provider's Cordis `workspace/changed` event.
 2. Compile/import the new source before touching the running Fiber.
 3. If compilation or activation fails, keep the old Fiber active and record `hmrError`; the edited file remains a working draft.
 4. If compilation succeeds, await old-Fiber disposal and mount a new Fiber with the prior config and capability manifest.

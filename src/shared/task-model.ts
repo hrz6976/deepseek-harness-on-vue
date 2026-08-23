@@ -9,10 +9,7 @@ export interface TaskSession {
   id: string;
   title: string;
   status: TaskStatus;
-  contextIds: string[];
   capabilityIds: string[];
-  artifactIds: string[];
-  checkpointId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,7 +57,6 @@ export interface TaskEvent {
 }
 
 export interface TaskCheckpoint {
-  id: string;
   taskId: string;
   messages: HarnessMessage[];
   savedAt: number;
@@ -71,5 +67,4 @@ export interface TaskStoreSnapshot {
   tasks: TaskSession[];
   contexts: TaskContext[];
   artifacts: HarnessArtifact[];
-  events: TaskEvent[];
 }

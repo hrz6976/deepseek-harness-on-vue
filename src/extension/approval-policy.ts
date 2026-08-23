@@ -5,6 +5,7 @@ export interface ApprovalRequest {
   body: string;
   confirmLabel: string;
   danger?: boolean;
+  origins?: string[];
 }
 
 export function approvalForRequest(request: CapabilityRequest): ApprovalRequest | null {
@@ -40,7 +41,8 @@ export function approvalForRequest(request: CapabilityRequest): ApprovalRequest 
     return { title: '移除页面插件？', body: '刷新页面后，插件效果将不再应用。', confirmLabel: '移除', danger: true };
   }
   if (request.provider === 'mcp' && request.action === 'connect') {
-    return { title: '连接 MCP？', body: request.input.url, confirmLabel: '允许连接', danger: true };
+    const { protocol, hostname } = new URL(request.input.url);
+    return { title: '连接 MCP？', body: request.input.url, confirmLabel: '授权并连接', danger: true, origins: [`${protocol}//${hostname}/*`] };
   }
   return null;
 }

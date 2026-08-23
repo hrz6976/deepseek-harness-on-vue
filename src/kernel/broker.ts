@@ -1,6 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
-import { capabilities } from '@/kernel/capabilities';
-import { cordis, systemFiberId } from '@/kernel/cordis';
+import { capabilityForContext } from '@/kernel/capabilities';
+import { systemContextId } from '@/kernel/cordis';
 import { permissionIds, type PrincipalGrant } from '@/shared/capability-policy';
 import type {
   CapabilityPrincipal,
@@ -14,7 +14,6 @@ export interface BrokerTransport {
 }
 
 const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
-  'boot': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
   'manager': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
   'task-runtime': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
   'workspace': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
@@ -28,13 +27,27 @@ const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
   },
 };
 
-function activeTaskId(): string | undefined {
-  const task = cordis.reflect.get('task') as TaskRuntimeService | undefined;
-  return task?.activeTaskId.value ?? undefined;
-}
-
 export function principalForContext(ctx: Context): CapabilityPrincipal {
-  const systemId = systemFiberId(ctx.fiber);
+  const entry = capabilityForContext(ctx);
+  if (entry) {
+    const task = ctx.reflect.get('task') as TaskRuntimeService | undefined;
+    const active = entry.manifest.scope === 'task' ? task?.activeTask() : null;
+    if (entry.manifest.scope === 'task' && !active?.capabilityIds.includes(entry.manifest.id)) {
+      throw new Error(`Task-scoped capability "${entry.manifest.id}" is not attached to the active task.`);
+    }
+    const taskId = active?.id;
+    return {
+      kind: 'capability',
+      id: entry.manifest.id,
+      fiberId: `${entry.manifest.id}:${ctx.fiber.uid ?? 'disposed'}`,
+      scope: entry.manifest.scope,
+      ...(taskId ? { taskId } : {}),
+      providers: [...(entry.manifest.requires.providers ?? [])],
+      permissions: permissionIds(entry.manifest.permissions),
+    };
+  }
+
+  const systemId = systemContextId(ctx);
   if (systemId) {
     const grant = SYSTEM_GRANTS[systemId] ?? { providers: [], permissions: [] };
     return {
@@ -47,23 +60,7 @@ export function principalForContext(ctx: Context): CapabilityPrincipal {
     };
   }
 
-  const entry = [...capabilities.values()].find(candidate => candidate.fiber === ctx.fiber);
-  if (!entry) throw new Error(`Broker access denied for unregistered Fiber <${ctx.fiber.name}>.`);
-  const task = cordis.reflect.get('task') as TaskRuntimeService | undefined;
-  const active = entry.manifest.scope === 'task' ? task?.activeTask() : null;
-  if (entry.manifest.scope === 'task' && !active?.capabilityIds.includes(entry.manifest.id)) {
-    throw new Error(`Task-scoped capability "${entry.manifest.id}" is not attached to the active task.`);
-  }
-  const taskId = active?.id ?? (entry.manifest.scope === 'task' ? activeTaskId() : undefined);
-  return {
-    kind: 'capability',
-    id: entry.manifest.id,
-    fiberId: `${entry.manifest.id}:${ctx.fiber.uid ?? 'disposed'}`,
-    scope: entry.manifest.scope,
-    ...(taskId ? { taskId } : {}),
-    providers: [...(entry.manifest.requires.providers ?? [])],
-    permissions: permissionIds(entry.manifest.permissions),
-  };
+  throw new Error(`Broker access denied for unregistered Fiber <${ctx.fiber.name}>.`);
 }
 
 export function systemPrincipal(id = 'harness-shell'): CapabilityPrincipal {
@@ -78,7 +75,7 @@ export function systemPrincipal(id = 'harness-shell'): CapabilityPrincipal {
 }
 
 /** Cordis traces Service methods back to the Context that read ctx.broker. */
-export class BrokerRuntime extends Service implements BrokerService {
+class BrokerRuntime extends Service implements BrokerService {
   constructor(ctx: Context, readonly transport: BrokerTransport) {
     super(ctx, 'broker');
   }

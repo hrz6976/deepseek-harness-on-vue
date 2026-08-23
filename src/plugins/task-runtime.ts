@@ -1,30 +1,39 @@
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Fiber } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { HarnessTaskStore } from '@/kernel/task-store';
-import type { HarnessArtifact, TaskContext, TaskEvent, TaskStatus } from '@/shared/task-model';
+import type { HarnessArtifact, TaskContext, TaskStatus } from '@/shared/task-model';
 import type { HarnessMessage, JsonValue } from '@/shared/runtime';
 
-export const name = 'task-runtime';
-export const inject = ['fs'];
-
-function applyTaskRuntime(ctx: Context, scope?: string): void {
+function applyTaskRuntime(ctx: Context, storageScope?: string): void {
     const fs = ctx.fs;
-    const store = new HarnessTaskStore(fs, undefined, undefined, scope);
+    const store = new HarnessTaskStore(fs, undefined, undefined, storageScope);
     const tasks = reactive<ReturnType<HarnessTaskStore['newTask']>[]>([]);
     const contexts = reactive<TaskContext[]>([]);
-    // JsonValue is recursively typed; keep Vue's deep UnwrapRef expansion out
-    // of the public service type while retaining a fully reactive array.
     const artifacts = reactive([]) as unknown as HarnessArtifact[];
-    const events = reactive([]) as unknown as TaskEvent[];
+    const messages = reactive<HarnessMessage[]>([]);
     const activeTaskId = ref<string | null>(null);
+    let taskFiber: Fiber | null = null;
 
     const activeTask = () => tasks.find(task => task.id === activeTaskId.value) ?? null;
+    const scope = () => taskFiber?.ctx ?? ctx;
     const persistIndex = () => store.persistIndex(activeTaskId.value, tasks);
-    const requireActive = () => {
-      const task = activeTask();
-      if (!task) throw new Error('no active task');
+    const requireTask = (id: string | null) => {
+      const task = tasks.find(candidate => candidate.id === id);
+      if (!task) throw new Error(id ? `task "${id}" does not exist` : 'no active task');
       return task;
     };
+    const requireActive = () => requireTask(activeTaskId.value);
+    const loadMessages = (taskId: string | null) => messages.splice(0, messages.length, ...store.checkpointMessages(taskId));
+
+    async function resetScope(taskId: string | null, notify = true): Promise<void> {
+      await taskFiber?.dispose();
+      taskFiber = null;
+      if (taskId) {
+        taskFiber = ctx.plugin({ name: `task:${taskId}`, apply() {} }) as Fiber;
+        await taskFiber;
+      }
+      if (notify) await ctx.parallel('task/activated', taskId);
+    }
 
     async function restore(preferCurrentTask: boolean): Promise<void> {
       const previousActiveTaskId = preferCurrentTask ? activeTaskId.value : null;
@@ -32,10 +41,14 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
       tasks.splice(0, tasks.length, ...restored.tasks);
       contexts.splice(0, contexts.length, ...restored.contexts);
       artifacts.splice(0, artifacts.length, ...restored.artifacts);
-      events.splice(0, events.length, ...restored.events);
-      activeTaskId.value = previousActiveTaskId && tasks.some(task => task.id === previousActiveTaskId)
+      const nextTaskId = previousActiveTaskId && tasks.some(task => task.id === previousActiveTaskId)
         ? previousActiveTaskId
         : restored.activeTaskId;
+      activeTaskId.value = nextTaskId;
+      if (!preferCurrentTask || nextTaskId !== previousActiveTaskId) {
+        loadMessages(nextTaskId);
+        await resetScope(nextTaskId, preferCurrentTask);
+      }
     }
 
     const ready = (async () => {
@@ -49,18 +62,24 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
     }
 
     async function createTask(title = 'New task') {
+      if (activeTask()) await saveCheckpoint();
       const task = store.newTask(title);
       tasks.push(task);
       activeTaskId.value = task.id;
+      messages.splice(0);
+      await resetScope(task.id);
       await store.persistTask(task);
       await persistIndex();
       return task;
     }
 
     async function activateTask(id: string) {
-      const task = tasks.find(candidate => candidate.id === id);
-      if (!task) throw new Error(`task "${id}" does not exist`);
+      const task = requireTask(id);
+      if (id === activeTaskId.value) return task;
+      if (activeTask()) await saveCheckpoint();
       activeTaskId.value = id;
+      loadMessages(id);
+      await resetScope(id);
       await persistIndex();
       return task;
     }
@@ -69,30 +88,29 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
       const index = tasks.findIndex(task => task.id === id);
       if (index < 0) return;
       const task = tasks[index]!;
-      await store.deleteTask(task);
+      await store.deleteTask(task.id);
       tasks.splice(index, 1);
       contexts.splice(0, contexts.length, ...contexts.filter(context => context.taskId !== id));
       artifacts.splice(0, artifacts.length, ...artifacts.filter(artifact => artifact.taskId !== id));
-      events.splice(0, events.length, ...events.filter(event => event.taskId !== id));
 
       if (activeTaskId.value === id) {
         activeTaskId.value = tasks[Math.min(index, tasks.length - 1)]?.id ?? null;
+        loadMessages(activeTaskId.value);
+        if (tasks.length) await resetScope(activeTaskId.value);
       }
       if (!tasks.length) await createTask('New task');
       else await persistIndex();
     }
 
     async function renameTask(id: string, title: string): Promise<void> {
-      const task = tasks.find(candidate => candidate.id === id);
-      if (!task) throw new Error(`task "${id}" does not exist`);
+      const task = requireTask(id);
       task.title = title.trim() || task.title;
       store.touch(task);
       await store.persistTask(task);
     }
 
     async function setStatus(id: string, status: TaskStatus): Promise<void> {
-      const task = tasks.find(candidate => candidate.id === id);
-      if (!task) throw new Error(`task "${id}" does not exist`);
+      const task = requireTask(id);
       store.touch(task, status);
       await store.persistTask(task);
     }
@@ -103,7 +121,6 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
       if (existing) return existing;
       const context = store.newContext(task.id, input);
       contexts.push(context);
-      task.contextIds.push(context.id);
       store.touch(task);
       await Promise.all([store.persistContexts(task.id, contexts.filter(item => item.taskId === task.id)), store.persistTask(task)]);
       return context;
@@ -116,32 +133,25 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
       if (!context) return;
       const task = tasks.find(candidate => candidate.id === context.taskId);
       if (!task) return;
-      task.contextIds = task.contextIds.filter(contextId => contextId !== id);
       store.touch(task);
       await Promise.all([store.persistContexts(task.id, contexts.filter(item => item.taskId === task.id)), store.persistTask(task)]);
     }
 
-    async function attachCapability(id: string): Promise<void> {
+    async function setCapability(id: string, attached: boolean): Promise<void> {
       const task = requireActive();
-      if (task.capabilityIds.includes(id)) return;
-      task.capabilityIds.push(id);
+      if (task.capabilityIds.includes(id) === attached) return;
+      task.capabilityIds = attached ? [...task.capabilityIds, id] : task.capabilityIds.filter(capabilityId => capabilityId !== id);
       store.touch(task);
       await store.persistTask(task);
+      await ctx.parallel(`task/capability-${attached ? 'attached' : 'detached'}`, id);
     }
-
-    async function detachCapability(id: string): Promise<void> {
-      const task = requireActive();
-      if (!task.capabilityIds.includes(id)) return;
-      task.capabilityIds = task.capabilityIds.filter(capabilityId => capabilityId !== id);
-      store.touch(task);
-      await store.persistTask(task);
-    }
+    const attachCapability = (id: string) => setCapability(id, true);
+    const detachCapability = (id: string) => setCapability(id, false);
 
     async function createArtifact(input: Pick<HarnessArtifact, 'kind' | 'title' | 'source'> & Partial<Pick<HarnessArtifact, 'status' | 'contentPath' | 'content' | 'verification'>>) {
       const task = requireActive();
       const artifact = store.newArtifact(task.id, input);
       artifacts.push(artifact);
-      task.artifactIds.push(artifact.id);
       store.touch(task);
       await Promise.all([store.persistArtifact(artifact), store.persistTask(task)]);
       return artifact;
@@ -157,39 +167,24 @@ function applyTaskRuntime(ctx: Context, scope?: string): void {
 
     async function appendEvent(type: string, data: JsonValue = null) {
       const task = requireActive();
-      const sequence = events.filter(event => event.taskId === task.id).reduce((max, event) => Math.max(max, event.sequence), 0) + 1;
-      const event = store.newEvent(task.id, sequence, type, data);
-      events.push(event);
-      await store.appendEvent(event);
-      return event;
+      return store.appendEvent(task.id, type, data);
     }
 
-    async function saveCheckpoint(messages: HarnessMessage[]) {
+    async function saveCheckpoint(source: readonly HarnessMessage[] = messages) {
       const task = requireActive();
-      const checkpoint = await store.persistCheckpoint(task.id, messages);
-      task.checkpointId = checkpoint.id;
+      await store.persistCheckpoint(task.id, source);
       store.touch(task);
       await store.persistTask(task);
-      return checkpoint;
     }
 
     ctx.provide('task', {
-      ready, tasks, contexts, artifacts, events, activeTaskId, activeTask,
+      ready, messages, tasks, contexts, artifacts, activeTaskId, activeTask, scope,
       refresh,
       createTask, activateTask, deleteTask, renameTask, setStatus, addContext, removeContext, attachCapability, detachCapability,
       createArtifact, updateArtifact, appendEvent, saveCheckpoint,
-      loadCheckpoint: (taskId?: string) => store.checkpoints.get(taskId ?? activeTaskId.value ?? '') ?? null,
     });
 }
 
-export function apply(ctx: Context): void {
-  applyTaskRuntime(ctx);
-}
-
 export function createTaskRuntimePlugin(scope?: string) {
-  return { name, inject, apply: (ctx: Context) => applyTaskRuntime(ctx, scope) };
+  return { name: 'task-runtime', inject: ['fs'], apply: (ctx: Context) => applyTaskRuntime(ctx, scope) };
 }
-
-export const taskRuntimePlugin = { name, inject, apply };
-
-export default taskRuntimePlugin;

@@ -117,12 +117,12 @@ export function apply(ctx: Context): void {
         if (!broker) return 'Error: this Harness runtime has no trusted Site Skill provider';
         return JSON.stringify(await broker.request({ provider: 'site-skill', action: 'apply', input: { id } }));
       }
-      let entry = ctx.manager.catalog().find(candidate => candidate.id === id || candidate.name === id);
+      let entry = ctx.manager.catalog().find(candidate => candidate.id === id);
       if (!entry) return `Error: capability ${id} was not found`;
       if (entry.status !== 'active' && entry.status !== 'pending') {
-        const mounted = await ctx.manager.mount(entry.name);
+        const mounted = await ctx.manager.mount(entry.id);
         if (mounted.startsWith('Error:')) return mounted;
-        entry = ctx.manager.catalog().find(candidate => candidate.id === id || candidate.name === id) ?? entry;
+        entry = ctx.manager.catalog().find(candidate => candidate.id === id) ?? entry;
       }
       if (entry.scope === 'task') await ctx.task.attachCapability(entry.id);
       const contributedTools = new Set(entry.contributes.tools);
@@ -149,7 +149,7 @@ export function apply(ctx: Context): void {
     parameters: z.object({ kind: z.enum(['capability', 'tool-group']), id: z.string().min(1).max(300) }),
     async run({ kind, id }) {
       if (kind === 'tool-group') return JSON.stringify({ id, unloaded: ctx.tools.unload(id) });
-      const entry = ctx.manager.catalog().find(candidate => candidate.id === id || candidate.name === id);
+      const entry = ctx.manager.catalog().find(candidate => candidate.id === id);
       if (!entry) return `Error: capability ${id} was not found`;
       if (entry.scope !== 'task') return `Error: ${entry.id} has ${entry.scope} scope and cannot be detached from one task`;
       await ctx.task.detachCapability(entry.id);
@@ -172,5 +172,3 @@ function readSiteSkills(value: JsonValue): SiteSkill[] {
     ? [candidate as unknown as SiteSkill]
     : []);
 }
-
-export default { name, inject, apply };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from '../src/extension/agent-policy';
+import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from '@/extension/agent-policy';
 
 test('page-agent policy separates host DOM changes from sandbox plugins', () => {
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /page_recipe_save/);

@@ -2,14 +2,14 @@ import { assertPrincipalAuthorized } from '@/shared/capability-policy';
 import type { CapabilityPrincipal, CapabilityProvider, CapabilityRequest } from '@/shared/capability-protocol';
 import type { JsonValue } from '@/shared/runtime';
 
-export interface CapabilityHostContext {
+interface CapabilityHostContext {
   tabId: number;
   principal: CapabilityPrincipal;
 }
 
 type ProviderRequest<P extends CapabilityProvider> = Extract<CapabilityRequest, { provider: P }>;
 
-export interface TrustedCapabilityProvider<P extends CapabilityProvider> {
+interface TrustedCapabilityProvider<P extends CapabilityProvider> {
   request?(request: ProviderRequest<P>, context: CapabilityHostContext): JsonValue | Promise<JsonValue>;
   stream?(request: ProviderRequest<P>, context: CapabilityHostContext): AsyncIterable<JsonValue>;
 }
@@ -30,10 +30,6 @@ export class TrustedCapabilityHost {
 
   has(provider: CapabilityProvider): boolean {
     return this.#providers.has(provider);
-  }
-
-  canStream(request: CapabilityRequest): boolean {
-    return typeof this.#providers.get(request.provider)?.stream === 'function';
   }
 
   async request(request: CapabilityRequest, context: CapabilityHostContext): Promise<JsonValue> {

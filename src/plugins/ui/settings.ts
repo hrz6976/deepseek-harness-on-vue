@@ -64,10 +64,8 @@ const SettingsPanel = defineComponent({
   },
 });
 
-export const settingsPlugin = {
+export default {
   name: 'settings',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'settings', region: 'side', order: 30, component: SettingsPanel }); },
 };
-
-export default settingsPlugin;

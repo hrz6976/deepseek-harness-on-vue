@@ -22,12 +22,11 @@ export {
   useToolGuard,
 } from '@/kernel/bus';
 export {
-  useLayoutTarget,
   usePromptSection,
   useTool,
 } from '@/kernel/contrib';
 export { entries as logEntries, log } from '@/kernel/log';
-export { errorMessage } from '@/shared/runtime';
+export { errorMessage, parseJsonObject } from '@/shared/runtime';
 export { systemPluginNameFromPath } from '@/kernel/system-plugin-names';
 export {
   CapabilityManifestSchema,

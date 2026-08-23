@@ -1,0 +1,169 @@
+<n-config-provider :theme-overrides="uiTheme">
+  <main class="shell">
+    <header class="app-header">
+      <div class="brand">
+        <strong>Harness</strong>
+        <button class="task-identity" type="button" @click="openInspector('tasks')">
+          <span>{{ activeTask?.title || '正在恢复任务' }}</span>
+          <small><i :class="activeTask?.status"></i>{{ taskStatusLabel }}</small>
+        </button>
+      </div>
+      <nav class="actions" aria-label="任务视图">
+        <n-tooltip trigger="hover"><template #trigger><n-button quaternary circle size="small" aria-label="上下文" @click="openInspector('contexts')"><template #icon><n-icon><Paperclip /></n-icon></template></n-button></template>上下文</n-tooltip>
+        <n-tooltip trigger="hover"><template #trigger><n-button quaternary circle size="small" aria-label="产物" @click="openInspector('artifacts')"><template #icon><n-icon><Box /></n-icon></template></n-button></template>产物</n-tooltip>
+        <n-tooltip trigger="hover"><template #trigger><n-button quaternary circle size="small" aria-label="能力" @click="openInspector('capabilities')"><template #icon><n-icon><LayersSubtract /></n-icon></template></n-button></template>能力</n-tooltip>
+        <n-dropdown trigger="click" :options="appMenuOptions" @select="handleAppMenuSelect">
+          <n-button quaternary circle size="small" aria-label="更多"><template #icon><n-icon><Dots /></n-icon></template></n-button>
+        </n-dropdown>
+      </nav>
+    </header>
+
+    <section class="context-bar" aria-label="当前上下文">
+      <div class="context-chips">
+        <n-tag v-for="context in activeContexts.slice(0, 2)" :key="context.id" size="small" :bordered="false" round :title="context.locator">
+          <span class="context-kind">{{ contextKindLabel(context.kind) }}</span>{{ context.title }}
+        </n-tag>
+        <n-button v-if="activeContexts.length > 2" text size="tiny" @click="openInspector('contexts')">+{{ activeContexts.length - 2 }}</n-button>
+        <span v-if="!activeContexts.length" class="context-empty">未附加上下文</span>
+      </div>
+      <div class="page-actions" aria-label="网页能力">
+        <n-button text size="small" :disabled="busy" @click="snapshot"><template #icon><n-icon><World /></n-icon></template>读取</n-button>
+        <n-button text size="small" :disabled="busy" @click="picker"><template #icon><n-icon><Activity /></n-icon></template>批注</n-button>
+        <n-button text size="small" @click="openPagePlugins"><template #icon><n-icon><Tool /></n-icon></template>Skills</n-button>
+      </div>
+    </section>
+
+    <div class="runtime-host runtime-surfaces"><UiContributionsHost region="main" /><UiContributionsHost region="side" /></div>
+
+    <div class="timeline-shell">
+    <section ref="timelineEl" class="timeline" aria-live="polite" tabindex="0" @scroll.passive="onTimelineScroll" @wheel.passive="onTimelineWheel" @pointerdown="beginTimelinePointerScroll" @keydown="onTimelineKeydown">
+      <n-empty v-if="displayBlocks.length === 0 && !busy" size="small" description="附加网页或文件，然后描述任务" />
+      <article
+        v-for="block in displayBlocks"
+        :key="block.id"
+        :class="[block.type === 'message' ? block.message.role : block.item.kind, { 'tool-record': block.type === 'message' && block.message.role === 'assistant' && block.message.toolCalls.length }]"
+      >
+        <template v-if="block.type === 'message' && block.message.role === 'assistant' && block.message.toolCalls.length">
+          <div class="tool-turn-heading"><n-icon><Tool /></n-icon><strong>{{ block.message.toolCalls.length }} 个工具调用</strong></div>
+          <n-collapse arrow-placement="right">
+            <n-collapse-item v-for="call in block.message.toolCalls" :key="call.id" :name="call.id">
+              <template #header>
+                <div class="tool-call-title"><code>{{ call.name }}</code><n-tag size="tiny" :bordered="false" :type="toolStatusType(call)">{{ toolStatusLabel(call) }}</n-tag></div>
+              </template>
+              <div class="tool-payload">
+                <span>参数</span><pre>{{ formatToolArguments(call) }}</pre>
+                <template v-if="call.result !== undefined"><span>结果</span><pre>{{ call.result }}</pre></template>
+              </div>
+            </n-collapse-item>
+          </n-collapse>
+        </template>
+        <template v-else-if="block.type === 'message' && block.message.role === 'assistant'">
+          <div class="assistant-answer">{{ displayMessageText(block.message) }}</div>
+          <n-button v-if="block.message.text" text size="tiny" class="message-action" @click="saveMessageArtifact(block.message)"><template #icon><n-icon><FileText /></n-icon></template>存为报告</n-button>
+        </template>
+        <template v-else-if="block.type === 'message'">
+          <div v-if="displayMessageText(block.message)" class="message-text">{{ displayMessageText(block.message) }}</div>
+          <div v-if="block.message.role === 'user' && block.annotations?.length" class="message-annotations" aria-label="随消息发送的页面批注">
+            <section v-for="annotation in block.annotations" :key="annotation.id" class="message-annotation">
+              <span class="message-annotation-label">批注</span><p>{{ annotation.text }}</p><code>{{ annotation.target.selector }}</code>
+            </section>
+          </div>
+        </template>
+        <template v-else>{{ block.item.text }}</template>
+      </article>
+      <div v-if="busy" class="agent-working"><n-icon><Activity /></n-icon><span>Agent 正在执行</span></div>
+    </section>
+    <n-button v-if="!followTimeline" class="timeline-jump" circle size="small" aria-label="回到底部" @click="resumeTimelineFollow"><template #icon><n-icon><ArrowDown /></n-icon></template></n-button>
+    </div>
+
+    <form class="composer" @submit.prevent="send">
+      <div class="composer-field">
+        <div v-if="annotations.length" class="annotation-context">
+          <span>{{ annotations.length }} 个批注</span>
+          <n-button text size="tiny" @click="clearAnnotations">清除</n-button>
+        </div>
+        <n-input v-model:value="input" class="composer-input" type="textarea" :bordered="false" :autosize="{ minRows: 2, maxRows: 6 }" placeholder="描述任务，或让 Harness 读取、分析和构建…" @keydown.ctrl.enter.prevent="send" />
+        <div class="composer-footer">
+          <span class="composer-hint">Ctrl Enter 发送</span>
+          <n-button type="primary" size="small" :loading="busy" :disabled="!runtimeReady || !canSend" @click="send">
+            <template #icon><n-icon><Send /></n-icon></template>{{ !runtimeReady ? '初始化中' : busy ? '处理中' : '发送' }}
+          </n-button>
+        </div>
+      </div>
+    </form>
+
+    <n-drawer v-model:show="inspectorOpen" width="min(380px, 94vw)" placement="right">
+      <n-drawer-content :title="inspectorTitle" closable :native-scrollbar="false">
+        <p v-if="inspector !== 'tasks'" class="drawer-subtitle">{{ activeTask?.title }}</p>
+        <div v-show="inspector === 'tasks'" class="task-list">
+          <n-button type="primary" secondary block @click="createTask">新建任务</n-button>
+          <div v-for="row in taskRows" :key="row.task.id" class="list-row task-row" :class="{ selected: row.task.id === activeTask?.id }">
+            <button class="task-row-main" type="button" @click="activateTask(row.task.id)">
+              <span><strong>{{ row.task.title }}</strong><small>{{ row.contextCount }} 上下文 · {{ row.artifactCount }} 产物 · {{ row.task.capabilityIds.length }} 能力</small></span><i :class="row.task.status"></i>
+            </button>
+            <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="deleteTask(row.task.id)">
+              <template #trigger><n-button quaternary circle size="tiny" type="error" aria-label="删除任务"><template #icon><n-icon><Trash /></n-icon></template></n-button></template>
+              删除“{{ row.task.title }}”？相关对话和产物记录会一起删除。
+            </n-popconfirm>
+          </div>
+        </div>
+
+        <div v-show="inspector === 'contexts'">
+          <section class="inspector-section">
+            <h3>已附加</h3>
+            <n-empty v-if="!activeContexts.length" size="small" description="还没有网页、文件、选区或 MCP 上下文" />
+            <div v-for="context in activeContexts" :key="context.id" class="list-row">
+              <span><strong>{{ context.title }}</strong><small>{{ context.kind }} · {{ context.locator }}</small></span>
+              <n-button quaternary circle size="tiny" type="error" aria-label="移除上下文" @click="removeContext(context)"><template #icon><n-icon><Trash /></n-icon></template></n-button>
+            </div>
+          </section>
+          <section class="inspector-section">
+            <h3>Workspace 文件</h3>
+            <n-empty v-if="!workspaceFiles.length" size="small" description="Workspace 里还没有可附加文件" />
+            <button v-for="path in workspaceFiles" :key="path" class="list-row attach-row" type="button" @click="attachWorkspaceFile(path)"><span><strong>{{ path.split('/').at(-1) }}</strong><small>{{ path }}</small></span><b>添加</b></button>
+          </section>
+        </div>
+
+        <div v-show="inspector === 'artifacts'">
+          <n-empty v-if="!activeArtifacts.length" size="small" description="报告、文件和 ChangeSet 会沉淀在这里" />
+          <article v-for="artifact in activeArtifacts" :key="artifact.id" class="artifact-row">
+            <div><n-tag size="tiny" :bordered="false">{{ artifact.kind }}</n-tag><strong>{{ artifact.title }}</strong></div>
+            <small>v{{ artifact.version }} · {{ artifact.status }} · {{ artifact.verification.status }}</small><code v-if="artifact.contentPath">{{ artifact.contentPath }}</code>
+          </article>
+        </div>
+
+        <div v-show="inspector === 'capabilities'" class="capability-view">
+          <div class="capability-list">
+            <article v-for="card in capabilityCards" :key="card.entry.manifest.id" class="capability-row">
+              <div><strong>{{ card.entry.manifest.title }}</strong><n-tag size="tiny" :bordered="false">{{ card.health.state }}</n-tag></div>
+              <p>{{ card.entry.manifest.scope }} scope · v{{ card.entry.manifest.version }}</p>
+              <small>{{ card.entry.contributions.tools.length }} tools · {{ card.entry.contributions.services.length }} services · {{ card.entry.contributions.events.length }} events</small>
+              <div v-if="card.entry.manifest.scope === 'task'" class="capability-controls">
+                <n-button size="tiny" secondary @click="disableCapability(card.entry.manifest.id)">停用</n-button>
+                <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="removeCapability(card.entry.manifest.id)">
+                  <template #trigger><n-button size="tiny" quaternary type="error">删除</n-button></template>删除此任务能力及其源码？
+                </n-popconfirm>
+              </div>
+              <details v-if="card.entry.manifest.permissions.length || card.health.issues.length"><summary>声明与权限</summary><p v-for="permission in card.entry.manifest.permissions" :key="permission.id">{{ permission.id }} — {{ permission.reason || '未说明用途' }}</p><p v-for="issue in card.health.issues" :key="issue">{{ issue }}</p></details>
+            </article>
+          </div>
+        </div>
+      </n-drawer-content>
+    </n-drawer>
+
+    <n-drawer v-model:show="pagePluginsOpen" width="min(380px, 94vw)" placement="right">
+      <n-drawer-content title="Site Skills" closable :native-scrollbar="false">
+        <p class="drawer-subtitle">{{ currentPageHost }}</p>
+        <n-empty v-if="!pagePluginsBusy && currentPagePlugins.length === 0" size="small" description="当前页面还没有 Site Skill" />
+        <article v-for="plugin in currentPagePlugins" :key="plugin.id" class="page-plugin-item">
+          <div class="page-plugin-copy"><strong>{{ plugin.name }}</strong><span>{{ plugin.matches.join(', ') }}</span></div>
+          <n-switch size="small" :value="plugin.enabled" :loading="pagePluginsBusy" @update:value="setPagePluginEnabled(plugin, $event)" />
+          <n-popconfirm positive-text="移除" negative-text="取消" @positive-click="removePagePlugin(plugin)">
+            <template #trigger><n-button quaternary circle size="tiny" type="error" aria-label="移除 Site Skill"><template #icon><n-icon><Trash /></n-icon></template></n-button></template>移除此 Site Skill？
+          </n-popconfirm>
+        </article>
+        <p class="page-plugins-hint">停用或移除后，刷新页面即可清除已应用效果。</p>
+      </n-drawer-content>
+    </n-drawer>
+  </main>
+</n-config-provider>

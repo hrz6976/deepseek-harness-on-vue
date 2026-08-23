@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldDisplayMessage } from '../src/extension/message-presentation';
+import { shouldDisplayMessage } from '@/extension/message-presentation';
 
 test('context checkpoints stay internal to the model transcript', () => {
   assert.equal(shouldDisplayMessage({

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
+console.log('wow')
+
 function ReviewFixture() {
   const [count, setCount] = useState(0);
   const [compact, setCompact] = useState(false);

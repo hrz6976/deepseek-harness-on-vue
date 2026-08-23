@@ -1,6 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { shallowReactive } from 'vue';
-import { capabilityIsActive, recordCapabilityContribution } from '@/kernel/capabilities';
+import { capabilityForContext, recordCapabilityContribution } from '@/kernel/capabilities';
 import type { PromptSectionDefinition } from '@/shared/runtime';
 
 interface PromptEntry {
@@ -24,7 +24,7 @@ export class PromptRuntime extends Service {
       throw new Error(`prompt section "${name}" needs string or function text`);
     }
 
-    const owner = this.ctx.fiber.name;
+    const owner = capabilityForContext(this.ctx)?.manifest.id ?? this.ctx.fiber.name;
     const previous = this.sections.get(name);
     if (previous && previous.owner !== owner) {
       throw new Error(`duplicate prompt section "${name}": already contributed by plugin [${previous.owner}]`);
@@ -44,7 +44,6 @@ export class PromptRuntime extends Service {
 
   assemble(): string {
     return [...this.sections]
-      .filter(([, entry]) => capabilityIsActive(entry.owner))
       .map(([name, entry]) => ({ name, order: entry.definition.order ?? 50, text: entry.definition.text }))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
       .map(section => typeof section.text === 'function' ? section.text() : section.text)
@@ -59,5 +58,3 @@ export const promptPlugin = {
     new PromptRuntime(ctx);
   },
 };
-
-export default promptPlugin;

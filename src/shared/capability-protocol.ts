@@ -6,7 +6,6 @@ const uniqueNames = (label: string) => z.array(z.string().trim().min(1))
   .refine(items => new Set(items).size === items.length, `${label} entries must be unique`);
 
 export const CapabilityScopeSchema = z.enum(['task', 'workspace', 'site', 'global']);
-export type CapabilityScope = z.infer<typeof CapabilityScopeSchema>;
 
 export const CapabilityProviderSchema = z.enum(
   ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp'],
@@ -70,8 +69,7 @@ export type PageCapabilityRequest = {
 export type WorkspaceCapabilityRequest =
   | { provider: 'workspace'; action: 'list'; contextId?: string; input: Record<string, never> }
   | { provider: 'workspace'; action: 'write'; contextId?: string; input: { path: string; content: string; expectedRevision?: string | null } }
-  | { provider: 'workspace'; action: 'remove'; contextId?: string; input: { path: string; expectedRevision?: string | null } }
-  | { provider: 'workspace'; action: 'clear'; contextId?: string; input: Record<string, never> };
+  | { provider: 'workspace'; action: 'remove'; contextId?: string; input: { path: string; expectedRevision?: string | null } };
 
 export type SiteSkillCapabilityRequest =
   | { provider: 'site-skill'; action: 'list'; contextId?: string; input: Record<string, never> }
@@ -130,18 +128,6 @@ export interface CapabilityStreamChunk<T = JsonValue> {
   done: boolean;
   value?: T;
   error?: string;
-}
-
-export function isCapabilityEnvelope(value: unknown): value is CapabilityEnvelope {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<CapabilityEnvelope>;
-  return candidate.channel === 'harness-broker-v1'
-    && typeof candidate.session === 'string'
-    && typeof candidate.requestId === 'string'
-    && !!candidate.principal
-    && typeof candidate.principal === 'object'
-    && !!candidate.payload
-    && typeof candidate.payload === 'object';
 }
 
 /** Stable optimistic-concurrency token for one workspace file body. */
