@@ -9,9 +9,9 @@
     "build:standalone": "vite build --mode standalone",
     "build:fixtures": "vite build --config examples/vite.config.ts",
     "dev:fixtures": "vite --config examples/vite.config.ts",
-    "watch": "vite build --mode extension --watch",
+    "watch": "node scripts/watch-extension.mjs",
     "serve": "node serve.mjs",
-    "dev": "vite --mode extension",
+    "dev": "npm run watch",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run build:standalone && npm run build:fixtures"

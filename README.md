@@ -10,7 +10,7 @@ npm run check              # strict typecheck + tests + 扩展、standalone、�
 npm run build              # Chrome 扩展 → dist/extension
 npm run build:standalone   # standalone → dist/standalone
 npm run build:fixtures     # legacy + React 19 宿主页 → dist/fixtures
-npm run dev                # CRXJS + Vite 扩展开发模式
+npm run dev                # 扩展 watch build；构建后在 chrome://extensions 手动重新加载
 npm run dev:fixtures       # 本地宿主页：/legacy-host/ 与 /react-host/
 npm test                   # node:test；包含内容脚本 DOM 集成测试
 ```
