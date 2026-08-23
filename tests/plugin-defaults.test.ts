@@ -4,13 +4,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { transformWithOxc } from 'vite';
 import { rewriteImports } from '../src/kernel/compile';
+import { systemPluginNameFromPath, systemPluginNames } from '../src/kernel/system-plugin-names';
+
+test('reserved system plugin paths cannot be mistaken for editable capabilities', () => {
+  assert.equal(systemPluginNameFromPath('.plugins/loop.js'), 'loop');
+  assert.equal(systemPluginNameFromPath('.plugins/page.js'), null);
+  assert.equal(systemPluginNameFromPath('nested/.plugins/loop.js'), null);
+});
 
 test('every shipped TypeScript plugin survives the build transform and import registry', async () => {
   const roots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
   const files = (await Promise.all(roots.map(async root => {
     const directory = resolve(root);
     return (await readdir(directory, { withFileTypes: true }))
-      .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && entry.name !== 'fs.ts')
+      .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && !systemPluginNames.has(basename(entry.name, '.ts')))
       .map(entry => resolve(directory, entry.name));
   }))).flat();
 
@@ -31,6 +38,7 @@ test('every shipped TypeScript plugin survives the build transform and import re
     compiled.push(name);
   }
 
-  assert.ok(compiled.includes('tools'));
-  assert.ok(compiled.includes('loop'));
+  assert.equal(compiled.includes('tools'), false);
+  assert.equal(compiled.includes('loop'), false);
+  assert.ok(compiled.includes('page'));
 });

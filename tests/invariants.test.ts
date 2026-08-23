@@ -4,25 +4,30 @@
 // swapped for a scripted async generator; tools run through the real
 // toolsPlugin collector and the real bus waterfall seams.
 // Run: npm test
-import { test, after } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import { bus } from '../src/kernel/bus';
-import { services, provideService } from '../src/kernel/services';
+import { services } from '../src/kernel/services';
 import { useTool } from '../src/kernel/contrib';
 import { toolsPlugin } from '../src/plugins/tools';
-import { loopPlugin } from '../src/plugins/loop';
-import { toPiMessages } from '../src/plugins/llm';
+import { promptPlugin } from '../src/plugins/prompt';
+import { createSnapshotBuffer, loopPlugin } from '../src/plugins/loop';
+import { toHarnessFinishReason, toPiMessages } from '../src/plugins/llm';
 import { translateESM, compilePlugin } from '../src/kernel/compile';
+import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 // ---------------------------------------------------------------- helpers --
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Mount loop + tools with a scripted engine. `script(req, turn)` is an async
 // generator; `requests` collects a frozen copy of every request the loop sent.
-function mountHarness(script) {
+async function mountHarness(script, options = {}) {
   const requests = [];
-  toolsPlugin.setup();
-  provideService('llm', {
+  await applyTestPlugin(toolsPlugin);
+  await applyTestPlugin(promptPlugin);
+  await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => {}, remove: async () => {} });
+  await provideTestService('llm', {
     stream(req) {
       requests.push({
         tools: req.tools.map(t => t.name),
@@ -31,16 +36,27 @@ function mountHarness(script) {
       return script(req, requests.length);
     },
   });
-  loopPlugin.setup();
+  if (options.task) await provideTestService('task', options.task);
+  await applyTestPlugin(loopPlugin);
   return { loop: services.get('loop').value, requests };
 }
 
-after(() => { services.delete('llm'); services.delete('tools'); services.delete('loop'); });
+afterEach(async () => { await cleanupTestRuntime(); });
 
-const doneText = text => async function* () {
-  yield { type: 'update', text, thinking: '', toolCalls: [] };
-  yield { type: 'done', text, thinking: '', toolCalls: [] };
-};
+test('stream snapshot buffer coalesces cumulative updates and flushes the final state', () => {
+  const commits = [];
+  const buffer = createSnapshotBuffer(snapshot => commits.push(snapshot));
+  buffer.push({ type: 'update', text: 'a', thinking: '', toolCalls: [] });
+  buffer.push({ type: 'update', text: 'ab', thinking: '', toolCalls: [] });
+  buffer.push({ type: 'done', text: 'abc', thinking: '', toolCalls: [] });
+  assert.deepEqual(commits.map(snapshot => snapshot.text), ['abc']);
+});
+
+const finishEvent = text => ({
+  type: 'done', text, thinking: '', finishReason: 'stop', toolCalls: [],
+});
+
+const doneText = text => async function* () { yield finishEvent(text); };
 
 const notesOf = loop => loop.messages.filter(m => m.role === 'note').map(m => m.text);
 
@@ -81,9 +97,16 @@ test('toPiMessages: thinking precedes text; plain reply stops with "stop"', () =
   assert.deepEqual(out[0].content.map(c => c.type), ['thinking', 'text']);
 });
 
+test('DeepSeek/pi finish reasons survive the engine adapter', () => {
+  assert.equal(toHarnessFinishReason('stop'), 'stop');
+  assert.equal(toHarnessFinishReason('toolUse'), 'tool_calls');
+  assert.equal(toHarnessFinishReason('length'), 'length');
+  assert.equal(toHarnessFinishReason('deferred'), 'unknown');
+});
+
 // ------------------------------------------------------ loop: request filter --
 test('loop: notes and streaming/error partials never reach the model', async () => {
-  const { loop, requests } = mountHarness(doneText('ok'));
+  const { loop, requests } = await mountHarness(doneText('ok'));
   loop.messages.push({ role: 'note', text: 'a note' });
   loop.messages.push({ role: 'assistant', text: 'partial', thinking: '', toolCalls: [], status: 'streaming' });
   loop.messages.push({ role: 'assistant', text: 'broke', thinking: '', toolCalls: [], status: 'error' });
@@ -97,13 +120,156 @@ test('loop: notes and streaming/error partials never reach the model', async () 
   assert.deepEqual(requests[0].messages.map(m => m.role), ['user']);
 });
 
+test('loop: length is incomplete, audited, and continued with an internal directive', async () => {
+  const events = [];
+  const task = {
+    activeTask: () => ({ id: 'task-1' }),
+    async appendEvent(type, data) { events.push({ type, data }); },
+  };
+  const { loop, requests } = await mountHarness(async function* (req, turn) {
+    if (turn === 1) {
+      yield {
+        type: 'done', responseId: 'response-1', text: '让我先构造 pre', thinking: '',
+        toolCalls: [{ id: 'partial', name: 'page_patch_preview', args: '{"operations":' }],
+        finishReason: 'length',
+        usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 120 },
+      };
+    } else {
+      yield {
+        type: 'done', responseId: 'response-2', text: '真正完成。', thinking: '', finishReason: 'stop', toolCalls: [],
+      };
+    }
+  }, { task });
+
+  await loop.run('更新页面样式');
+
+  assert.equal(requests.length, 2);
+  assert.match(requests[1].messages.at(-1).text, /Harness continuation/);
+  assert.equal(requests[1].messages.some(message => message.status === 'incomplete'), false);
+  const assistants = loop.messages.filter(message => message.role === 'assistant');
+  assert.deepEqual(assistants.map(message => message.status), ['incomplete', 'done']);
+  assert.equal(assistants[0].toolCalls.length, 0, 'a truncated tool call must never execute or enter history');
+  assert.deepEqual(events[0], {
+    type: 'turn/end',
+    data: {
+      turn: 1,
+      responseId: 'response-1',
+      finishReason: 'length',
+      outcome: 'incomplete',
+      toolCallCount: 1,
+      usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, totalTokens: 120 },
+    },
+  });
+  assert.equal(events[1].data.finishReason, 'stop');
+  assert.equal(events[1].data.outcome, 'completed');
+});
+
+test('loop: length continuation stops after three retries instead of spinning', async () => {
+  const { loop, requests } = await mountHarness(async function* () {
+    yield { type: 'done', text: 'partial', thinking: '', toolCalls: [], finishReason: 'length' };
+  });
+
+  await loop.run('写入长报告');
+
+  assert.equal(requests.length, 4, 'initial turn plus three bounded continuations');
+  assert.ok(notesOf(loop).some(text => text.includes('after 3 automatic continuations')));
+  assert.ok(loop.messages.filter(message => message.role === 'assistant').every(message => message.status === 'incomplete'));
+});
+
+test('loop: tool_calls without a valid call is a protocol error', async () => {
+  const events = [];
+  const task = {
+    activeTask: () => ({ id: 'task-1' }),
+    async appendEvent(type, data) { events.push({ type, data }); },
+  };
+  const { loop, requests } = await mountHarness(async function* () {
+    yield { type: 'done', text: '', thinking: '', toolCalls: [], finishReason: 'tool_calls' };
+  }, { task });
+
+  await loop.run('修改页面');
+
+  assert.equal(requests.length, 1);
+  assert.equal(loop.messages.find(message => message.role === 'assistant').status, 'error');
+  assert.ok(notesOf(loop).some(text => text.includes('no complete valid call')));
+  assert.equal(events[0].data.outcome, 'protocol-error');
+});
+
+test('loop: an empty stop ends once with a clear provider error', async () => {
+  const { loop, requests } = await mountHarness(async function* () {
+    yield { type: 'done', text: '', thinking: '', toolCalls: [], finishReason: 'stop' };
+  });
+
+  await loop.run('修改这个页面');
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(loop.messages.filter(message => message.role === 'assistant').map(message => message.status), ['error']);
+  assert.ok(notesOf(loop).some(text => text.includes('empty final response')));
+});
+
+test('loop: an omitted terminal state ends once as a protocol error', async () => {
+  const { loop, requests } = await mountHarness(async function* () {
+    yield { type: 'done', text: 'provider omitted finish reason', thinking: '', toolCalls: [] };
+  });
+
+  await loop.run('修改这个页面');
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(loop.messages.filter(message => message.role === 'assistant').map(message => message.status), ['error']);
+  assert.ok(notesOf(loop).some(text => text.includes('unhandled finish reason unknown')));
+});
+
+test('loop: a prose stop is a valid terminal answer without keyword heuristics or repair', async () => {
+  const events = [];
+  const task = {
+    activeTask: () => ({ id: 'task-1' }),
+    async appendEvent(type, data) { events.push({ type, data }); },
+  };
+  const { loop, requests } = await mountHarness(async function* () {
+    yield { type: 'done', text: '你好，有什么可以帮你？', thinking: '', toolCalls: [], finishReason: 'stop' };
+  }, { task });
+
+  await loop.run('你好');
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(loop.messages.filter(message => message.role === 'assistant').map(message => message.status), ['done']);
+  assert.equal(loop.messages.filter(message => message.role === 'assistant').at(-1).text, '你好，有什么可以帮你？');
+  assert.equal(events.at(-1).data.outcome, 'completed');
+});
+
+test('loop: a failed tool result may be followed by a normal terminal explanation', async () => {
+  const { loop, requests } = await mountHarness(async function* (req, turn) {
+    if (turn === 1) {
+      yield {
+        type: 'done', text: '', thinking: '', finishReason: 'tool_calls',
+        toolCalls: [{ id: 'attach-1', name: 'attach_missing', args: '{}', argsObj: {} }],
+      };
+    } else {
+      yield {
+        type: 'done', text: '没有找到要附加的文件，请先创建文件或提供现有路径。',
+        thinking: '', toolCalls: [], finishReason: 'stop',
+      };
+    }
+  });
+  const dispose = useTool({
+    name: 'attach_missing', description: '', parameters: z.object({}),
+    run: () => 'Error: workspace file .plugins/dice.js does not exist',
+  });
+
+  await loop.run('附加 dice plugin');
+
+  assert.equal(requests.length, 2);
+  assert.equal(loop.messages.filter(message => message.role === 'assistant').at(-1).status, 'done');
+  assert.equal(notesOf(loop).some(text => text.includes('protocol error')), false);
+  dispose();
+});
+
 // --------------------------------------------------- loop: truncation / veto --
 test('loop: tool results truncate at 8000 chars before entering history', async () => {
-  const { loop } = mountHarness(async function* (req, turn) {
+  const { loop } = await mountHarness(async function* (req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'big', argsObj: {}, args: '{}' }] };
-    else yield { type: 'done', text: 'finished', thinking: '', toolCalls: [] };
+    else yield finishEvent('finished');
   });
-  const dispose = useTool({ name: 'big', description: '', parameters: {}, run: () => 'x'.repeat(10_000) });
+  const dispose = useTool({ name: 'big', description: '', parameters: z.object({}), run: () => 'x'.repeat(10_000) });
   await loop.run('goal');
   const call = loop.messages.find(m => m.role === 'assistant')?.toolCalls[0];
   assert.equal(call.result.length, 8000);
@@ -113,11 +279,11 @@ test('loop: tool results truncate at 8000 chars before entering history', async 
 
 test('loop: tools/pre-execute veto blocks the call, tool body never runs', async () => {
   let ran = false;
-  const { loop } = mountHarness(async function* (req, turn) {
+  const { loop } = await mountHarness(async function* (req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'guarded', argsObj: {}, args: '{}' }] };
-    else yield { type: 'done', text: 'finished', thinking: '', toolCalls: [] };
+    else yield finishEvent('finished');
   });
-  const dispose = useTool({ name: 'guarded', description: '', parameters: {}, run: () => { ran = true; return 'secret'; } });
+  const dispose = useTool({ name: 'guarded', description: '', parameters: z.object({}), run: () => { ran = true; return 'secret'; } });
   const off = bus.on('tools/pre-execute', req => req.name === 'guarded' ? { ...req, veto: 'disabled by policy' } : req);
   await loop.run('goal');
   const call = loop.messages.find(m => m.role === 'assistant')?.toolCalls[0];
@@ -128,28 +294,28 @@ test('loop: tools/pre-execute veto blocks the call, tool body never runs', async
 
 // ------------------------------------------- loop: per-request snapshot race --
 test('loop: mid-turn tool removal — in-flight turn uses the snapshot, next request drops it', async () => {
-  const { loop, requests } = mountHarness(async function* (req, turn) {
+  const { loop, requests } = await mountHarness(async function* (req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'doomed', argsObj: {}, args: '{}' }] };
-    else yield { type: 'done', text: 'finished', thinking: '', toolCalls: [] };
+    else yield finishEvent('finished');
   });
   let disposeDoomed;
   disposeDoomed = useTool({
-    name: 'doomed', description: '', parameters: {},
+    name: 'doomed', description: '', parameters: z.object({}),
     run: () => { disposeDoomed(); return 'ran from snapshot'; }, // v-if/removal lands mid-turn
   });
   await loop.run('goal');
   const call = loop.messages.find(m => m.role === 'assistant')?.toolCalls[0];
   assert.equal(call.result, 'ran from snapshot'); // in-flight turn still executed it
   assert.deepEqual(requests[0].tools, ['doomed']);
-  assert.deepEqual(requests[1].tools, []); // gone from the NEXT request
+  assert.deepEqual(requests[1].tools, []); // doomed is gone from the NEXT request
 });
 
 // ------------------------------------------------------- loop: turn failsafe --
 test('loop: a model that never stops calling tools hits the failsafe turn limit', async () => {
-  const { loop, requests } = mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function* () {
     yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 'x', name: 'poke', argsObj: {}, args: '{}' }] };
   });
-  const dispose = useTool({ name: 'poke', description: '', parameters: {}, run: () => 'ok' });
+  const dispose = useTool({ name: 'poke', description: '', parameters: z.object({}), run: () => 'ok' });
   await loop.run('goal');
   assert.equal(requests.length, 500); // failsafe kill switch, not a control mechanism
   assert.ok(notesOf(loop).some(t => t.includes('failsafe turn limit (500)')));
@@ -158,7 +324,7 @@ test('loop: a model that never stops calling tools hits the failsafe turn limit'
 
 // ------------------------------------------- loop: compaction plugin seams --
 test('loop/turn-start: fires before the request; splices to the log shape it', async () => {
-  const { loop, requests } = mountHarness(doneText('ok'));
+  const { loop, requests } = await mountHarness(doneText('ok'));
   loop.messages.push({ role: 'user', text: 'ancient history' });
   const off = bus.on('loop/turn-start', (arg, next) => {
     arg.messages.splice(0, 1, { role: 'summary', text: 'SUM' }); // what compaction does
@@ -172,7 +338,7 @@ test('loop/turn-start: fires before the request; splices to the log shape it', a
 
 test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async () => {
   let fired = 0;
-  const { loop, requests } = mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function* () {
     yield { type: 'error', message: 'maximum context length is 131072 tokens' };
   });
   const off = bus.on('loop/llm-error', (arg, next) => { fired++; return next({ ...arg, retry: true }); });
@@ -186,7 +352,7 @@ test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async
 
 // ------------------------------------------------------------ loop: control --
 test('loop: stop mid-stream — loop exits with a "stopped" note, no stuck cursor', async () => {
-  const { loop } = mountHarness(async function* (req) {
+  const { loop } = await mountHarness(async function* (req) {
     while (!req.signal.aborted) {
       yield { type: 'update', text: 'working…', thinking: '', toolCalls: [] };
       await sleep(5);
@@ -203,7 +369,7 @@ test('loop: stop mid-stream — loop exits with a "stopped" note, no stuck curso
 });
 
 test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async () => {
-  const { loop } = mountHarness(async function* () {
+  const { loop } = await mountHarness(async function* () {
     yield { type: 'error', message: 'fetch failed' };
   });
   await loop.run('goal');
@@ -217,7 +383,7 @@ test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async
 });
 
 test('loop: re-entry guard — a second run while running is refused', async () => {
-  const { loop } = mountHarness(async function* (req) {
+  const { loop } = await mountHarness(async function* (req) {
     while (!req.signal.aborted) { yield { type: 'update', text: '…', thinking: '', toolCalls: [] }; await sleep(5); }
   });
   const p = loop.run('first');
@@ -237,10 +403,11 @@ test('compilePlugin: pinned-dialect source compiles (new Function fallback path)
   const def = await compilePlugin('ok42', `
     const n = 6;
     export function mul(x) { return x * n; }
-    export default { setup() { return { answer: mul(7) }; } };
+    export const answer = mul(7);
+    export function apply() {}
   `);
-  assert.equal(typeof def.setup, 'function');
-  assert.equal(def.setup().answer, 42);
+  assert.equal(typeof def.apply, 'function');
+  assert.equal(def.name, 'ok42');
 });
 
 test('translateESM: covers the full pinned dialect (const/let/var/async exports)', () => {
@@ -253,16 +420,38 @@ test('translateESM: covers the full pinned dialect (const/let/var/async exports)
   `;
   const mod = { exports: {} };
   new Function('module', 'exports', translateESM(src))(mod, mod.exports);
-  return mod.exports.setup().sum().then(v => assert.equal(v, 6));
+  return mod.exports.f().then(v => assert.equal(v, 6));
+});
+
+test('loop: tool calls and results are persisted as audit events', async () => {
+  const events = [];
+  const task = {
+    activeTask: () => ({ id: 'task-1' }),
+    async appendEvent(type, data) { events.push({ type, data }); },
+  };
+  const { loop } = await mountHarness(async function* (req, turn) {
+    if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 'call-1', name: 'inspect', argsObj: { target: 'main' }, args: '{"target":"main"}' }] };
+    else yield finishEvent('finished');
+  }, { task });
+  const dispose = useTool({ name: 'inspect', description: '', parameters: z.object({ target: z.string() }), run: ({ target }) => `found ${target}` });
+
+  await loop.run('goal');
+
+  assert.deepEqual(events.map(event => event.type), ['turn/end', 'tool/call-started', 'tool/call-completed', 'turn/end']);
+  assert.deepEqual(events[1].data, { callId: 'call-1', name: 'inspect', args: { target: 'main' } });
+  assert.deepEqual(events[2].data, { callId: 'call-1', name: 'inspect', outcome: 'completed', result: 'found main' });
+  assert.equal(events[0].data.outcome, 'tool-calls');
+  assert.equal(events[3].data.outcome, 'completed');
+  dispose();
 });
 
 // ------------------------------------------------------------------ bus misc --
-test('bus.emit: a throwing listener is logged and does not break the others', async () => {
+test('bus.emit follows Cordis synchronous error propagation', async () => {
   let reached = 0;
   const off1 = bus.on('misc/emit', () => { throw new Error('boom'); });
   const off2 = bus.on('misc/emit', () => { reached++; });
-  bus.emit('misc/emit');
-  assert.equal(reached, 1);
+  assert.throws(() => bus.emit('misc/emit'), /boom/);
+  assert.equal(reached, 0);
   off1(); off2();
 });
 

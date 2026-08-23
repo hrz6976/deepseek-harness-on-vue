@@ -4,11 +4,10 @@
 // exposedStates map, and this plugin is just the read face over that map.
 // Reads are live: the exposed proxy unwraps refs at access time, so the agent
 // always sees state as mutated by user interaction since the last turn.
-import { onUnmounted, getCurrentInstance } from 'vue';
-import { provideService } from '../kernel/services';
-import { exposedStates } from '../kernel/host';
-import { log } from '../kernel/log';
-import { errorMessage } from '../shared/runtime';
+import type { Context } from '@deepseek-ai/cordis';
+import { exposedStates } from '@/kernel/ui';
+import { log } from '@/kernel/log';
+import { errorMessage } from '@/shared/runtime';
 
 const STATE_LIMIT = 8000; // chars, same convention as the loop's tool-result cap
 
@@ -26,8 +25,8 @@ export function serializeState(val: unknown, limit = STATE_LIMIT): string {
 
 export const statePlugin = {
   name: 'state',
-  setup() {
-    provideService('state', {
+  apply(ctx: Context) {
+    ctx.provide('state', {
       // Key names come straight from the exposed object — they double as the
       // model-facing description in the read_state prompt index.
       list: () => [...exposedStates.entries()].map(([name, s]) => ({ name, keys: Object.keys(s) })),
@@ -37,8 +36,7 @@ export const statePlugin = {
         return serializeState(s);
       },
     });
-    if (getCurrentInstance()) onUnmounted(() => log('state plugin unmounted', 'warn'));
-    return () => null;
+    ctx.effect(() => () => log('state plugin unmounted', 'warn'), 'state.log-dispose');
   },
 };
 

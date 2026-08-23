@@ -1,44 +1,201 @@
-// tools: the model-callable tool SERVICE — schemas, live dispatch, and the
-// per-request snapshot. Registration happens through the kernel contribution
-// ABI (<AgentTool> / useTool in kernel/contrib.js) into the kernel's 'tool'
-// collector; this plugin owns only the dispatch policy over it, and is
-// therefore safely reloadable: remounting swaps the policy while every
-// registered tool survives in the kernel collector.
-import { onUnmounted, getCurrentInstance } from 'vue';
-import { getCollector } from '../kernel/collector';
-import { provideService } from '../kernel/services';
-import { log } from '../kernel/log';
-import type { JsonObject, ToolDefinition, ToolSchema } from '../shared/runtime';
-import { errorMessage } from '../shared/runtime';
+import { Service, type Context } from '@deepseek-ai/cordis';
+import { shallowReactive } from 'vue';
+import { z, type ZodType } from 'zod';
+import Ajv2020 from 'ajv/dist/2020.js';
+import { capabilityIsActive, recordCapabilityContribution } from '@/kernel/capabilities';
+import type {
+  JsonObject,
+  JsonSchema,
+  NamedToolDefinition,
+  NamedSchemaToolDefinition,
+  ToolCatalogEntry,
+  ToolAvailability,
+  ToolSchema,
+  ToolsSnapshot,
+} from '@/shared/runtime';
+import { errorMessage } from '@/shared/runtime';
 
-const tools = getCollector<ToolDefinition>('tool');
+interface RuntimeToolDefinition {
+  description: string;
+  schema: JsonSchema;
+  availability?: ToolAvailability;
+  parse(args: JsonObject): { success: true; data: JsonObject } | { success: false; error: string };
+  run(args: JsonObject): unknown | Promise<unknown>;
+}
 
-function callWith(map: ReadonlyMap<string, ToolDefinition>) {
+interface ToolEntry {
+  definition: RuntimeToolDefinition;
+  owner: string;
+  token: object;
+}
+
+// MCP defines tool input schemas as JSON Schema 2020-12. Keep that schema
+// native and validate it with a standard implementation; hand-authored
+// Harness tools continue to use Zod through register().
+const ajv = new Ajv2020({ allErrors: true, strict: false });
+
+function callWith(map: ReadonlyMap<string, RuntimeToolDefinition>) {
   return async (name: string, args: JsonObject): Promise<unknown> => {
-    const t = map.get(name);
-    if (!t) return `Error: tool ${name} does not exist (available: ${[...map.keys()].join(', ') || 'none'})`;
-    try { return await t.run(args ?? {}); } catch (error: unknown) { return `Error: ${errorMessage(error)}`; }
+    const tool = map.get(name);
+    if (!tool) return `Error: tool ${name} does not exist (available: ${[...map.keys()].join(', ') || 'none'})`;
+    try {
+      const parsed = tool.parse(args ?? {});
+      if (!parsed.success) return `Error: invalid arguments for ${name}\n${parsed.error}`;
+      return await tool.run(parsed.data);
+    } catch (error: unknown) {
+      return `Error: ${errorMessage(error)}`;
+    }
   };
 }
-const schemasOf = (map: ReadonlyMap<string, ToolDefinition>): ToolSchema[] => [...map.entries()]
-  .map(([name, tool]) => ({ name, description: tool.description, parameters: tool.parameters }));
+
+function toToolJsonSchema(parameters: ZodType): JsonSchema {
+  const { $schema: _dialect, ...schema } = z.toJSONSchema(parameters, { target: 'draft-7' });
+  return schema as JsonSchema;
+}
+
+const schemasOf = (map: ReadonlyMap<string, RuntimeToolDefinition>): ToolSchema[] => [...map.entries()]
+  .map(([name, tool]) => ({ name, description: tool.description, parameters: tool.schema }));
+
+/** Registration and dispatch are one Cordis service, called as ctx.tools.*. */
+export class ToolsRuntime extends Service {
+  readonly entries = shallowReactive(new Map<string, ToolEntry>());
+  private readonly loadedGroups = new Set<string>();
+
+  constructor(ctx: Context) {
+    super(ctx, 'tools');
+  }
+
+  register<Parameters extends ZodType>(definition: NamedToolDefinition<Parameters>): () => Promise<void> {
+    const { name, description, parameters, availability, run } = definition;
+    return this.registerRuntime(name, {
+      description,
+      schema: toToolJsonSchema(parameters),
+      ...(availability ? { availability } : {}),
+      parse(args) {
+        const parsed = parameters.safeParse(args);
+        return parsed.success
+          ? { success: true, data: parsed.data as JsonObject }
+          : { success: false, error: z.prettifyError(parsed.error) };
+      },
+      run: args => run(args as never),
+    });
+  }
+
+  registerSchema(definition: NamedSchemaToolDefinition): () => Promise<void> {
+    const { name, description, parameters, availability, run } = definition;
+    const validate = ajv.compile(parameters);
+    return this.registerRuntime(name, {
+      description,
+      schema: parameters,
+      ...(availability ? { availability } : {}),
+      parse(args) {
+        return validate(args)
+          ? { success: true, data: args }
+          : { success: false, error: ajv.errorsText(validate.errors, { separator: '\n' }) };
+      },
+      run,
+    });
+  }
+
+  private registerRuntime(name: string, definition: RuntimeToolDefinition): () => Promise<void> {
+    if (!name?.trim()) throw new Error('a tool contribution needs a string name');
+    if (typeof definition.run !== 'function') throw new Error(`tool "${name}" needs a run function`);
+
+    const owner = this.ctx.fiber.name;
+    const previous = this.entries.get(name);
+    if (previous && previous.owner !== owner) {
+      throw new Error(`duplicate tool "${name}": already contributed by plugin [${previous.owner}]`);
+    }
+    const token = {};
+    const entry: ToolEntry = {
+      definition,
+      owner,
+      token,
+    };
+
+    return this.ctx.effect(() => {
+      this.entries.set(name, entry);
+      const disposeContribution = recordCapabilityContribution(owner, 'tools', name);
+      return () => {
+        if (this.entries.get(name)?.token === token) this.entries.delete(name);
+        disposeContribution();
+      };
+    }, `tools.register(${JSON.stringify(name)})`);
+  }
+
+  private definitions(): Map<string, RuntimeToolDefinition> {
+    return new Map([...this.entries]
+      .filter(([, entry]) => capabilityIsActive(entry.owner) && this.isAvailable(entry.definition))
+      .map(([name, entry]) => [name, entry.definition]));
+  }
+
+  private isAvailable(definition: RuntimeToolDefinition): boolean {
+    if (!definition.availability) return true;
+    return this.loadedGroups.has(this.groupKey(definition.availability));
+  }
+
+  private groupKey(group: ToolAvailability): string {
+    const task = this.ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+    if (group.scope === 'task') return `task:${task?.activeTaskId.value ?? 'none'}:${group.id}`;
+    if (group.scope === 'site') {
+      const active = task?.activeTask();
+      const page = active && task?.contexts.find(context => active.contextIds.includes(context.id) && context.kind === 'page');
+      let origin = 'none';
+      try { if (page?.locator) origin = new URL(page.locator).origin; } catch { /* invalid locators have no site scope */ }
+      return `site:${origin}:${group.id}`;
+    }
+    return `${group.scope}:${group.id}`;
+  }
+
+  schemas(): ToolSchema[] {
+    return schemasOf(this.definitions());
+  }
+
+  call(name: string, args: JsonObject): Promise<unknown> {
+    return callWith(this.definitions())(name, args);
+  }
+
+  snapshot(): ToolsSnapshot {
+    const frozen = this.definitions();
+    return { schemas: schemasOf(frozen), call: callWith(frozen) };
+  }
+
+  catalog(): ToolCatalogEntry[] {
+    const groups = new Map<string, ToolCatalogEntry>();
+    for (const [toolName, entry] of this.entries) {
+      if (!capabilityIsActive(entry.owner) || !entry.definition.availability) continue;
+      const group = entry.definition.availability;
+      const current = groups.get(group.id) ?? { ...group, tags: [...(group.tags ?? [])], tools: [], loaded: this.isAvailable(entry.definition) };
+      current.tools.push(toolName);
+      current.loaded ||= this.isAvailable(entry.definition);
+      groups.set(group.id, current);
+    }
+    return [...groups.values()].sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  load(id: string): boolean {
+    const definition = [...this.entries.values()].map(entry => entry.definition)
+      .find(candidate => candidate.availability?.id === id)?.availability;
+    if (!definition) return false;
+    if (definition.scope === 'task' || definition.scope === 'site') {
+      const task = this.ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+      if (!task?.activeTaskId.value || this.groupKey(definition).includes(':none:')) return false;
+    }
+    this.loadedGroups.add(this.groupKey(definition));
+    return true;
+  }
+
+  unload(id: string): boolean {
+    const definition = [...this.entries.values()].map(entry => entry.definition)
+      .find(candidate => candidate.availability?.id === id)?.availability;
+    return definition ? this.loadedGroups.delete(this.groupKey(definition)) : false;
+  }
+}
 
 export const toolsPlugin = {
   name: 'tools',
-  setup() {
-    provideService('tools', {
-      schemas: () => schemasOf(tools.snapshot()),
-      call: async (name: string, args: JsonObject) => callWith(tools.snapshot())(name, args), // live dispatch; loop uses snapshot() instead
-      // Per-request snapshot: the loop freezes schemas + dispatch table at
-      // llm/request time, so HMR or a v-if removing a tool mid-turn cannot
-      // race the model's selection of it.
-      snapshot() {
-        const frozen = tools.snapshot();
-        return { schemas: schemasOf(frozen), call: callWith(frozen) };
-      },
-    });
-    if (getCurrentInstance()) onUnmounted(() => log('tools plugin unmounted', 'warn'));
-    return () => null;
+  apply(ctx: Context) {
+    new ToolsRuntime(ctx);
   },
 };
 

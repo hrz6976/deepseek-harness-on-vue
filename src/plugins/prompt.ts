@@ -1,35 +1,62 @@
-// prompt: system-prompt assembly SERVICE. Sections register through the
-// kernel contribution ABI (<PromptSection> / usePromptSection in
-// kernel/contrib.js) into the kernel's 'prompt section' collector; this
-// plugin owns only the assembly policy, so reloading it never drops the
-// registered sections. The loop assembles the prompt at request time (the
-// PoC hardcoded the prompt inside the loop; this is the fix).
-import { onUnmounted, getCurrentInstance } from 'vue';
-import { getCollector } from '../kernel/collector';
-import { provideService } from '../kernel/services';
-import { log } from '../kernel/log';
-import type { PromptSectionDefinition } from '../shared/runtime';
+import { Service, type Context } from '@deepseek-ai/cordis';
+import { shallowReactive } from 'vue';
+import { capabilityIsActive, recordCapabilityContribution } from '@/kernel/capabilities';
+import type { PromptSectionDefinition } from '@/shared/runtime';
 
-const sections = getCollector<Omit<PromptSectionDefinition, 'name'>>('prompt section');
+interface PromptEntry {
+  definition: Omit<PromptSectionDefinition, 'name'>;
+  owner: string;
+  token: object;
+}
+
+/** Ordered prompt contribution registry, called as ctx.prompt.register(). */
+export class PromptRuntime extends Service {
+  readonly sections = shallowReactive(new Map<string, PromptEntry>());
+
+  constructor(ctx: Context) {
+    super(ctx, 'prompt');
+  }
+
+  register(definition: PromptSectionDefinition): () => Promise<void> {
+    const { name, order = 50, text } = definition;
+    if (!name?.trim()) throw new Error('a prompt contribution needs a string name');
+    if (typeof text !== 'string' && typeof text !== 'function') {
+      throw new Error(`prompt section "${name}" needs string or function text`);
+    }
+
+    const owner = this.ctx.fiber.name;
+    const previous = this.sections.get(name);
+    if (previous && previous.owner !== owner) {
+      throw new Error(`duplicate prompt section "${name}": already contributed by plugin [${previous.owner}]`);
+    }
+    const token = {};
+    const entry: PromptEntry = { definition: { order, text }, owner, token };
+
+    return this.ctx.effect(() => {
+      this.sections.set(name, entry);
+      const disposeContribution = recordCapabilityContribution(owner, 'prompts', name);
+      return () => {
+        if (this.sections.get(name)?.token === token) this.sections.delete(name);
+        disposeContribution();
+      };
+    }, `prompt.register(${JSON.stringify(name)})`);
+  }
+
+  assemble(): string {
+    return [...this.sections]
+      .filter(([, entry]) => capabilityIsActive(entry.owner))
+      .map(([name, entry]) => ({ name, order: entry.definition.order ?? 50, text: entry.definition.text }))
+      .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+      .map(section => typeof section.text === 'function' ? section.text() : section.text)
+      .filter(text => text && String(text).trim())
+      .join('\n\n');
+  }
+}
 
 export const promptPlugin = {
   name: 'prompt',
-  setup() {
-    provideService('prompt', {
-      sections: sections.entries,
-      // ctx is handed to function-typed sections (e.g. { fileList }).
-      assemble() {
-        const sorted = [...sections.entries.entries()]
-          .map(([name, t]) => ({ name, order: t.def.order ?? 50, ...t.def }))
-          .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
-        return sorted
-          .map(s => (typeof s.text === 'function' ? s.text() : s.text))
-          .filter(t => t && String(t).trim())
-          .join('\n\n');
-      },
-    });
-    if (getCurrentInstance()) onUnmounted(() => log('prompt plugin unmounted', 'warn'));
-    return () => null;
+  apply(ctx: Context) {
+    new PromptRuntime(ctx);
   },
 };
 

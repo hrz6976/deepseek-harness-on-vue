@@ -17,7 +17,7 @@ browserWindow.setInterval = (() => 0) as typeof browserWindow.setInterval;
 
 for (const key of [
   'window', 'document', 'location', 'navigator', 'Element', 'HTMLElement', 'HTMLInputElement',
-  'Node', 'MutationObserver', 'CSS', 'DocumentFragment', 'getComputedStyle',
+  'HTMLTextAreaElement', 'InputEvent', 'Event', 'Node', 'MutationObserver', 'CSS', 'DocumentFragment', 'getComputedStyle',
 ] as const) {
   Object.defineProperty(globalThis, key, { configurable: true, value: key === 'window' ? browserWindow : browserWindow[key] });
 }
@@ -63,6 +63,46 @@ test('content runtime snapshots and queries framework-neutral DOM references', a
   assert.equal(refs.length, 1);
   assert.equal(refs[0]?.fingerprint.tag, 'a');
   assert.equal(refs[0]?.selector, '#action');
+  assert.ok(refs[0]?.documentId);
+  assert.equal(refs[0]?.generation, 0);
+
+  const stale = await command({
+    type: 'page/click',
+    target: { ...refs[0]!, generation: refs[0]!.generation! + 1 },
+  });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.match(stale.error, /lease expired/);
+});
+
+test('page capability paginates queries and performs approved-style interactions', async () => {
+  const form = browserWindow.document.createElement('div');
+  form.innerHTML = '<input id="agent-input"><button class="bulk">One</button><button class="bulk">Two</button><button class="bulk">Three</button>';
+  browserWindow.document.body.append(form);
+  const input = form.querySelector<HTMLInputElement>('#agent-input')!;
+  let inputEvents = 0;
+  let clicks = 0;
+  input.addEventListener('input', () => inputEvents++);
+  form.querySelector('button')!.addEventListener('click', () => clicks++);
+
+  const inputQuery = await command({ type: 'page/query', selector: '#agent-input' });
+  const inputTarget = inputQuery.ok ? (inputQuery.value as ElementRef[])[0]! : null;
+  assert.ok(inputTarget);
+  assert.equal((await command({ type: 'page/type', target: inputTarget!, value: 'Harness' })).ok, true);
+  assert.equal(input.value, 'Harness');
+  assert.equal(inputEvents, 1);
+
+  const buttonQuery = await command({ type: 'page/query', selector: '.bulk' });
+  const buttonTarget = buttonQuery.ok ? (buttonQuery.value as ElementRef[])[0]! : null;
+  assert.ok(buttonTarget);
+  assert.equal((await command({ type: 'page/click', target: buttonTarget! })).ok, true);
+  assert.equal(clicks, 1);
+
+  const page = await command({ type: 'page/query-page', selector: '.bulk', offset: 1, limit: 1 });
+  assert.equal(page.ok, true);
+  if (page.ok) assert.deepEqual({ total: (page.value as { total: number }).total, nextOffset: (page.value as { nextOffset?: number }).nextOffset }, { total: 3, nextOffset: 2 });
+  assert.equal((await command({ type: 'page/wait', selector: '#agent-input', state: 'attached', timeoutMs: 100 })).ok, true);
+  assert.equal((await command({ type: 'page/settle', quietMs: 0, timeoutMs: 100 })).ok, true);
+  form.remove();
 });
 
 test('content runtime applies, verifies, and reverts one DOM transaction', async () => {
@@ -155,6 +195,52 @@ test('content runtime sanitizes HTML and rolls back a rejected patch', async () 
   assert.equal(rejected.ok, false);
   assert.equal(browserWindow.document.querySelector('#action')?.textContent, 'Open');
   assert.ok(emitted.length >= 2, 'content runtime should publish lifecycle and patch events');
+});
+
+test('declarative live rules apply to future matching nodes and can be stopped', async () => {
+  const rules = [{
+    id: 'ready-card',
+    selector: '.dynamic-card',
+    predicate: { attributes: [{ name: 'data-state', equals: 'ready' }] },
+    actions: [
+      { kind: 'add-class' as const, value: 'harness-ready' },
+      { kind: 'set-style' as const, property: 'border-color', value: 'rgb(49, 94, 231)' },
+    ],
+  }];
+  const preview = await command({ type: 'page/live-rules-preview', rules });
+  assert.equal(preview.ok, true);
+  if (preview.ok) assert.equal((preview.value as { totalMatches: number }).totalMatches, 0);
+
+  const installed = await command({ type: 'page/live-rules-install', id: 'dynamic-cards', label: 'dynamic cards', rules });
+  assert.equal(installed.ok, true);
+  const first = browserWindow.document.createElement('article');
+  first.className = 'dynamic-card';
+  first.setAttribute('data-state', 'ready');
+  browserWindow.document.body.append(first);
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(first.classList.contains('harness-ready'), true);
+  assert.equal(first.style.getPropertyValue('border-color'), 'rgb(49, 94, 231)');
+
+  assert.equal((await command({ type: 'page/live-rules-remove', id: 'dynamic-cards' })).ok, true);
+  const second = browserWindow.document.createElement('article');
+  second.className = 'dynamic-card';
+  second.setAttribute('data-state', 'ready');
+  browserWindow.document.body.append(second);
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(second.classList.contains('harness-ready'), false);
+  first.remove();
+  second.remove();
+});
+
+test('page observation publishes mutation events independently from live rules', async () => {
+  const before = emitted.length;
+  assert.equal((await command({ type: 'page/observe', enabled: true })).ok, true);
+  const node = browserWindow.document.createElement('aside');
+  browserWindow.document.body.append(node);
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.ok(emitted.slice(before).some(value => (value as { event?: { type?: string } }).event?.type === 'page/mutation'));
+  assert.equal((await command({ type: 'page/observe', enabled: false })).ok, true);
+  node.remove();
 });
 
 test('React hosts support DOM patches but reconciliation remains authoritative', async () => {

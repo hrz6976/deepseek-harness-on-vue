@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { crx } from '@crxjs/vite-plugin';
 import { defineConfig, transformWithOxc, type Plugin } from 'vite';
 import manifest from './src/extension/manifest.ts';
+import { systemPluginNames } from './src/kernel/system-plugin-names.ts';
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 const pluginRoots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
@@ -30,7 +31,7 @@ function pluginDefaults(): Plugin {
           const absoluteRoot = resolve(projectRoot, root);
           const entries = await readdir(absoluteRoot, { withFileTypes: true });
           return entries
-            .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && entry.name !== 'fs.ts')
+            .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && !systemPluginNames.has(basename(entry.name, '.ts')))
             .map(entry => join(absoluteRoot, entry.name));
         }))
       ).flat();
@@ -73,6 +74,7 @@ export default defineConfig(({ mode }) => {
     ],
     resolve: {
       alias: {
+        '@': resolve(projectRoot, 'src'),
         vue: 'vue/dist/vue.esm-bundler.js',
       },
     },

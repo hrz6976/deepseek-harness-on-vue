@@ -2,21 +2,25 @@
 // Zero browser, zero DOM — kernel functions return explicit disposers, and
 // the onUnmounted wiring on top of them is one trusted line each.
 // Run: npm test
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bus } from '../src/kernel/bus';
-import { createCollector, getCollector } from '../src/kernel/collector';
-import { services, provideService } from '../src/kernel/services';
 import { translateESM, normalizePluginDef, rewriteImports } from '../src/kernel/compile';
-import { makeExposeCapture, exposedStates } from '../src/kernel/host';
+import { makeExposeCapture, exposedStates } from '../src/kernel/ui';
 import { serializeState } from '../src/plugins/state';
+import { toolsPlugin, type ToolsRuntime } from '../src/plugins/tools';
+import { cordis } from '../src/kernel/cordis';
+import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 import { ref, proxyRefs } from 'vue';
+import { z } from 'zod';
+
+afterEach(async () => { await cleanupTestRuntime(); });
 
 test('waterfall: runs in order, value threads through', async () => {
   const seen = [];
-  const off1 = bus.on('wf/order', (v, next) => { seen.push('a'); return next(v + 1); });
-  const off2 = bus.on('wf/order', (v, next) => { seen.push('b'); return next(v * 10); });
-  assert.equal(await bus.waterfall('wf/order', 1), 20);
+  const off1 = bus.on('wf/order', (v, next) => { seen.push('a'); return next({ value: v.value + 1 }); });
+  const off2 = bus.on('wf/order', (v, next) => { seen.push('b'); return next({ value: v.value * 10 }); });
+  assert.deepEqual(await bus.waterfall('wf/order', { value: 1 }), { value: 20 });
   assert.deepEqual(seen, ['a', 'b']);
   off1(); off2();
 });
@@ -40,48 +44,112 @@ test('waterfall: double next() is detected and the second call is inert', async 
   off1(); off2();
 });
 
-test('collector: cross-plugin duplicate name throws, same-plugin remount replaces', () => {
-  const c = createCollector('tool');
-  c.add('dice', { v: 1 }, 'plugin-a');
-  assert.throws(() => c.add('dice', { v: 2 }, 'plugin-b'), /duplicate tool "dice"/);
-  c.add('dice', { v: 3 }, 'plugin-a'); // HMR remount: legal replace
-  assert.equal(c.get('dice').v, 3);
+test('Cordis tool contributions are Fiber-owned, duplicate-safe, and snapshot-stable', async () => {
+  await applyTestPlugin(toolsPlugin);
+  const first = await applyTestPlugin({
+    name: 'plugin-a', inject: ['tools'],
+    apply(ctx) {
+      ctx.tools.register({ name: 'dice', description: 'old', parameters: z.object({}), run: () => 1 });
+      ctx.tools.register({ name: 'dice', description: 'new', parameters: z.object({}), run: () => 3 });
+    },
+  });
+  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  const snapshot = tools.snapshot();
+  assert.equal(await snapshot.call('dice', {}), 3);
+
+  const duplicate = cordis.plugin({
+    name: 'plugin-b', inject: ['tools'],
+    apply(ctx) { ctx.tools.register({ name: 'dice', description: '', parameters: z.object({}), run: () => 2 }); },
+  });
+  await assert.rejects(() => duplicate.await(), /duplicate tool "dice"/);
+  await duplicate.dispose();
+
+  await first.dispose();
+  assert.deepEqual(tools.schemas(), []);
+  assert.equal(await snapshot.call('dice', {}), 3);
 });
 
-test('collector: disposal is token-guarded (old unmount cannot delete the replacement)', () => {
-  const c = createCollector('tool');
-  const disposeOld = c.add('t', { v: 'old' }, 'p');
-  c.add('t', { v: 'new' }, 'p');   // replacement mounts BEFORE the old instance unmounts
-  disposeOld();                     // late unmount of the old instance
-  assert.equal(c.get('t').v, 'new'); // replacement survives
+test('tool parameters derive JSON Schema and validate before run', async () => {
+  await applyTestPlugin(toolsPlugin);
+  let calls = 0;
+  await applyTestPlugin({
+    name: 'validated-tool', inject: ['tools'],
+    apply(ctx) {
+      ctx.tools.register({
+        name: 'greet',
+        description: 'greet someone',
+        parameters: z.object({ name: z.string().min(1).describe('Person to greet.') }),
+        run: ({ name }) => { calls++; return `hello ${name}`; },
+      });
+    },
+  });
+  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  assert.deepEqual(tools.schemas()[0]?.parameters, {
+    type: 'object',
+    properties: { name: { type: 'string', minLength: 1, description: 'Person to greet.' } },
+    required: ['name'],
+    additionalProperties: false,
+  });
+  assert.match(String(await tools.call('greet', {})), /invalid arguments/);
+  assert.equal(calls, 0);
+  assert.equal(await tools.call('greet', { name: 'Yuri' }), 'hello Yuri');
+  assert.equal(calls, 1);
 });
 
-test('collector: snapshot is frozen against later changes', () => {
-  const c = createCollector('tool');
-  const dispose = c.add('a', { v: 1 }, 'p');
-  const snap = c.snapshot();
-  dispose();
-  c.add('b', { v: 2 }, 'p');
-  assert.deepEqual([...snap.keys()], ['a']); // per-request snapshot semantics
-  assert.deepEqual(c.names(), ['b']);
+test('remote tools keep native JSON Schema and validate it with Ajv', async () => {
+  await applyTestPlugin(toolsPlugin);
+  let calls = 0;
+  await applyTestPlugin({
+    name: 'schema-tool', inject: ['tools'],
+    apply(ctx) {
+      ctx.tools.registerSchema({
+        name: 'remote_search',
+        description: 'remote schema',
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string' }, limit: { type: 'integer' } },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        run: ({ query }) => { calls++; return query; },
+      });
+    },
+  });
+  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  assert.deepEqual(tools.schemas()[0]?.parameters.required, ['query']);
+  assert.match(String(await tools.call('remote_search', { limit: 1 })), /must have required property 'query'/);
+  assert.equal(calls, 0);
+  assert.equal(await tools.call('remote_search', { query: 'yuri', limit: 5 }), 'yuri');
+  assert.equal(calls, 1);
 });
 
-test('getCollector: kind-keyed singleton — contributions survive a module reload', () => {
-  // Simulates what happens when a plugin file reloads from OPFS: the new
-  // module instance calls getCollector again and MUST see the same map.
-  const first = getCollector('test-kind');
-  first.add('survivor', { v: 1 }, 'other-plugin');
-  const second = getCollector('test-kind'); // "reloaded module" asks again
-  assert.equal(second, first);
-  assert.equal(second.get('survivor').v, 1);
+test('loadable tool groups stay out of snapshots until loaded for the active task', async () => {
+  await applyTestPlugin(toolsPlugin);
+  await provideTestService('task', { activeTaskId: ref('task-1') });
+  await applyTestPlugin({
+    name: 'loadable-tool', inject: ['tools'],
+    apply(ctx) {
+      ctx.tools.register({
+        name: 'deep_search', description: 'deep search', parameters: z.object({}),
+        availability: { id: 'search.deep', title: 'Deep search', description: 'Optional search tools.', scope: 'task' },
+        run: () => 'found',
+      });
+    },
+  });
+  const tools = cordis.reflect.get('tools') as ToolsRuntime;
+  assert.equal(tools.schemas().some(tool => tool.name === 'deep_search'), false);
+  assert.deepEqual(tools.catalog()[0]?.tools, ['deep_search']);
+  assert.equal(tools.load('search.deep'), true);
+  assert.equal(await tools.call('deep_search', {}), 'found');
+  assert.equal(tools.unload('search.deep'), true);
+  assert.equal(tools.schemas().some(tool => tool.name === 'deep_search'), false);
 });
 
-test('services: cleanup is token-guarded too', () => {
-  const disposeOld = provideService('svc-x', { who: 'old' });
-  provideService('svc-x', { who: 'new' }); // replacement provided before old disposes
-  disposeOld();
-  assert.equal(services.get('svc-x').value.who, 'new');
-  services.delete('svc-x');
+test('Cordis services reject simultaneous providers and disappear with their Fiber', async () => {
+  const old = await provideTestService('svc-x', { who: 'old' });
+  await assert.rejects(() => provideTestService('svc-x', { who: 'new' }), /has been registered/);
+  await old.dispose();
+  assert.equal(cordis.reflect.get('svc-x'), undefined);
 });
 
 test('translateESM: the pinned dialect survives the new Function fallback', () => {
@@ -92,8 +160,10 @@ test('translateESM: the pinned dialect survives the new Function fallback', () =
   `;
   const mod = { exports: {} };
   new Function('module', 'exports', translateESM(src))(mod, mod.exports);
-  const def = normalizePluginDef({ default: mod.exports }, 'p');
-  assert.equal(def.setup().n, 42);
+  const module = mod.exports as { default: { setup(): { n: number } } };
+  assert.equal(module.default.setup().n, 42);
+  const plugin = normalizePluginDef(module, 'p');
+  assert.equal(typeof (plugin as { apply?: unknown }).apply, 'function');
 });
 
 test('rewriteImports: named/aliased, namespace, and default forms hit the registry', () => {
@@ -102,30 +172,29 @@ test('rewriteImports: named/aliased, namespace, and default forms hit the regist
     ``,
     `import { ref, watch as w } from 'vue';`,
     `import * as pi from '@earendil-works/pi-ai';`,
-    `import services from '../kernel/services';`,
+    `import sdk from '@/sdk';`,
     `export default { setup() {} };`,
   ].join('\n'));
   const M = `globalThis.__harness.modules`;
   assert.ok(out.includes(`const { ref, watch: w } = ${M}["vue"];`));
   assert.ok(out.includes(`const pi = ${M}["@earendil-works/pi-ai"];`));
-  assert.ok(out.includes(`= ${M}["kernel/services"].default ?? ${M}["kernel/services"];`));
+  assert.ok(out.includes(`= ${M}["@harness/sdk"].default ?? ${M}["@harness/sdk"];`));
   assert.ok(out.includes(`export default { setup() {} };`)); // body untouched
 });
 
-test('rewriteImports: kernel and shared paths normalize from any depth', () => {
-  const a = rewriteImports(`import { log } from '../kernel/log';\n`);
-  const b = rewriteImports(`import { log } from '../../kernel/log';\n`);
-  assert.equal(a, b);
-  assert.ok(a.includes(`["kernel/log"]`));
-
-  const sharedA = rewriteImports(`import { errorMessage } from '../shared/runtime';\n`);
-  const sharedB = rewriteImports(`import { errorMessage } from '../../shared/runtime';\n`);
-  assert.equal(sharedA, sharedB);
-  assert.ok(sharedA.includes(`["shared/runtime"]`));
+test('rewriteImports: the src alias resolves only the public SDK membrane', () => {
+  const aliasSdk = rewriteImports(`import { log } from '@/sdk';\n`);
+  const packageSdk = rewriteImports(`import { log } from '@harness/sdk';\n`);
+  assert.equal(aliasSdk, packageSdk);
+  assert.ok(aliasSdk.includes(`["@harness/sdk"]`));
+  assert.throws(() => rewriteImports(`import { log } from '@/kernel/log';\n`), /unknown import/);
+  assert.throws(() => rewriteImports(`import { errorMessage } from '@/shared/runtime';\n`), /unknown import/);
+  const cordis = rewriteImports(`import { Context } from '@deepseek-ai/cordis';\n`);
+  assert.ok(cordis.includes(`["@deepseek-ai/cordis"]`));
 });
 
 test('rewriteImports: unknown and cross-plugin specifiers fail loud, listing the registry', () => {
-  assert.throws(() => rewriteImports(`import { x } from './other-plugin';\n`), /unknown import.*plugins may import only.*kernel\/services/s);
+  assert.throws(() => rewriteImports(`import { x } from './other-plugin';\n`), /unknown import.*plugins may import only.*@harness\/sdk/s);
   assert.throws(() => rewriteImports(`import 'side-effect';\n`), /unsupported import/);
   assert.throws(() => rewriteImports(`import { a,\n b } from 'vue';\n`), /unsupported import/); // multi-line pinned out
 });
@@ -169,9 +238,11 @@ test('serializeState: circular state degrades to an error string, oversized stat
   assert.ok(out.length < 80 && /truncated, 108 chars/.test(out)); // {"s":"…"} = 108 chars
 });
 
-test('normalizePluginDef: rejects non-components, accepts bare setup functions', () => {
-  assert.throws(() => normalizePluginDef({ default: { foo: 1 } }, 'x'), /export default a component/);
-  const def = normalizePluginDef({ default: () => () => null }, 'x');
-  assert.equal(typeof def.setup, 'function');
-  assert.equal(def.name, 'x');
+test('normalizePluginDef: accepts Cordis plugins and wraps Vue objects as UI only', () => {
+  assert.throws(() => normalizePluginDef({ default: { foo: 1 } }, 'x'), /Cordis/);
+  const fn = normalizePluginDef({ default: () => undefined }, 'logic');
+  assert.equal(typeof fn, 'function');
+  const ui = normalizePluginDef({ default: { setup: () => () => null } }, 'panel') as { apply?: unknown; inject?: string[] };
+  assert.equal(typeof ui.apply, 'function');
+  assert.deepEqual(ui.inject, ['ui']);
 });

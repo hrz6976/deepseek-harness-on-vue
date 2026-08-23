@@ -1,17 +1,16 @@
 // chat UI plugin: streaming conversation panel — text blocks, collapsible
 // thinking, tool cards forming during the stream, stop button.
-import { ref, computed, watch, nextTick } from 'vue';
-import { useService } from '../../kernel/services';
-import { useLayoutTarget } from '../../kernel/contrib';
-import type { JsonObject } from '../../shared/runtime';
+import type { Context } from '@deepseek-ai/cordis';
+import { defineComponent, ref, computed, watch, nextTick } from 'vue';
+import { useService } from '@/sdk';
+import type { JsonObject } from '@/shared/runtime';
 
 function tryParse(source: string): JsonObject { try { return JSON.parse(source) as JsonObject; } catch { return {}; } }
 
-export const chatPlugin = {
-  name: 'chat',
+const ChatPanel = defineComponent({
+  name: 'ChatPanel',
   template: `
-  <Teleport v-if="target" :to="target">
-    <div class="panel">
+  <div class="panel">
       <h2>Conversation <span v-if="engineName" class="badge">{{ engineName }}</span><span v-if="ctxInfo" class="badge">{{ ctxInfo }}</span></h2>
       <div id="chat" ref="chatEl">
         <template v-for="(m, i) in visible" :key="i">
@@ -29,10 +28,6 @@ export const chatPlugin = {
               <div v-if="tc.result != null" class="result">{{ truncate(tc.result) }}</div>
             </div>
           </div>
-          <details v-else-if="m.role === 'summary'" class="msg summary">
-            <summary>📦 context compacted — checkpoint summary ({{ m.text.length }} chars<template v-if="m.tokensBefore">, was ~{{ Math.round(m.tokensBefore / 1000) }}k tokens</template>)</summary>
-            <div class="body">{{ m.text }}</div>
-          </details>
           <div v-else class="msg note">{{ m.text }}</div>
         </template>
       </div>
@@ -43,10 +38,8 @@ export const chatPlugin = {
       <button @click="resetSession" :disabled="running">Clear session & files</button>
       <button v-if="compaction" @click="compactNow" :disabled="running || compacting || !visible.length"
         title="Summarize older messages into a checkpoint to free context">{{ compacting ? 'Compacting…' : 'Compact' }}</button>
-    </div>
-  </Teleport>`,
+  </div>`,
   setup() {
-    const target = useLayoutTarget('main');
     const loopSvc = useService('loop');
     const llmSvc = useService('llm');
     const fsSvc = useService('fs');
@@ -54,7 +47,7 @@ export const chatPlugin = {
     const goal = ref('');
     const chatEl = ref<HTMLElement | null>(null);
 
-    const visible = computed(() => loopSvc.value?.messages ?? []);
+    const visible = computed(() => (loopSvc.value?.messages ?? []).filter(message => message.role !== 'summary'));
     const running = computed(() => loopSvc.value?.running?.value ?? false);
     const connected = computed(() => !!llmSvc.value);
     const engineName = computed(() => llmSvc.value?.engineName?.value ?? '');
@@ -103,9 +96,15 @@ export const chatPlugin = {
               assistant?.toolCalls.map(tool => (tool.status || '') + (tool.result?.length || 0)).join('|')];
     }, () => nextTick(() => { if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight; }));
 
-    return { target, goal, chatEl, visible, running, connected, engineName, run, stop, resetSession, summarizeArgs, truncate,
+    return { goal, chatEl, visible, running, connected, engineName, run, stop, resetSession, summarizeArgs, truncate,
              compaction, compacting, ctxInfo, compactNow };
   },
+});
+
+export const chatPlugin = {
+  name: 'chat',
+  inject: ['ui'],
+  apply(ctx: Context) { ctx.ui.register({ name: 'chat', region: 'main', order: 10, component: ChatPanel }); },
 };
 
 export default chatPlugin;

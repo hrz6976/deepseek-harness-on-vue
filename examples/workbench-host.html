@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Harness Workbench fixture</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #e9e9e6; }
+      body { display: grid; place-items: center; font-family: system-ui, sans-serif; }
+      #reload-panel { position: fixed; top: 12px; right: 12px; border: 0; border-radius: 8px; padding: 8px 10px; color: #555; background: #fff; cursor: pointer; }
+      iframe { width: 420px; height: min(820px, 96vh); border: 0; border-radius: 14px; background: #fff; box-shadow: 0 24px 80px rgb(20 20 20 / 20%); }
+    </style>
+  </head>
+  <body>
+    <button id="reload-panel" type="button">Reload panel</button>
+    <!-- allow-same-origin is fixture-only so the test runner can inspect the
+         frame; the real extension side panel keeps the stricter sandbox. -->
+    <iframe id="fixture" src="/src/extension/sandbox.html" sandbox="allow-scripts allow-same-origin" title="Harness Workbench"></iframe>
+    <script type="module">
+      const frame = document.querySelector('#fixture');
+      document.querySelector('#reload-panel').addEventListener('click', () => frame.contentWindow.location.reload());
+      const demoCapability = `import { defineComponent, ref } from 'vue';
+import { z } from 'zod';
+
+export const name = 'demo-ui';
+export const inject = ['tools', 'ui'];
+
+export function apply(ctx) {
+  const runs = ref(0);
+  ctx.tools.register({
+    name: 'compare_brief',
+    description: 'Compare the attached brief',
+    parameters: z.object({}),
+    run: () => String(++runs.value),
+  });
+  ctx.ui.register({
+    name: 'brief-comparator',
+    component: defineComponent({
+      template: '<section class="demo-capability"><strong>Brief comparator</strong><button type="button" @click="runs++">Compare locally</button><span>{{ runs }} runs</span></section>',
+      setup() { return { runs }; },
+    }),
+  });
+}`;
+      const files = new Map([
+        ['brief.md', '# Launch brief\n\nCompare the product page with this brief.'],
+        ['.plugins/demo-ui.js', demoCapability],
+      ]);
+      const now = Date.now();
+      const snapshot = {
+        scope: { tabId: 7, frameId: 0, documentId: 'fixture', url: 'https://example.test/product', origin: 'https://example.test' },
+        title: 'Example product', capturedAt: now, truncated: false,
+        nodes: [{ nodeRef: 'fixture-root', selector: 'main', fingerprint: { tag: 'main', classes: [], attributes: {} }, children: [] }],
+      };
+
+      window.addEventListener('message', event => {
+        if (event.source !== frame.contentWindow || event.data?.channel !== 'harness-broker-v1' || !event.data.payload) return;
+        const { requestId, payload } = event.data;
+        let value = null;
+        if (payload.provider === 'workspace') {
+          if (payload.action === 'list') value = Object.fromEntries(files);
+          if (payload.action === 'write') files.set(payload.input.path, payload.input.content);
+          if (payload.action === 'remove') files.delete(payload.input.path);
+          if (payload.action === 'clear') files.clear();
+        } else if (payload.provider === 'page' && payload.action === 'command') {
+          value = { ok: true, value: payload.input.command.type === 'page/snapshot' ? snapshot : null };
+        } else if (payload.provider === 'site-skill' && payload.action === 'list') {
+          value = [];
+        } else if (payload.provider === 'llm' && payload.action === 'status') {
+          value = { connected: false };
+        }
+        frame.contentWindow.postMessage({ channel: 'harness-broker-v1', requestId, ok: true, value }, '*');
+      });
+    </script>
+  </body>
+</html>

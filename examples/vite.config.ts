@@ -8,6 +8,11 @@ const examplesRoot = fileURLToPath(new URL('.', import.meta.url));
 export default defineConfig({
   root: examplesRoot,
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': resolve(examplesRoot, '../src'),
+    },
+  },
   build: {
     outDir: resolve(examplesRoot, '../dist/fixtures'),
     emptyOutDir: true,

@@ -1,4 +1,4 @@
-import type { HarnessMessage, JsonObject, JsonValue, ToolSchema } from './runtime';
+import type { JsonValue } from './runtime';
 
 export type PageWorld = 'ISOLATED' | 'MAIN' | 'USER_SCRIPT';
 export type NodeRef = string;
@@ -7,6 +7,7 @@ export interface PageScope {
   tabId: number;
   frameId: number;
   documentId?: string;
+  generation?: number;
   url: string;
   origin: string;
 }
@@ -23,6 +24,8 @@ export interface ElementFingerprint {
 
 export interface ElementRef {
   nodeRef: NodeRef;
+  documentId?: string;
+  generation?: number;
   selector: string;
   fingerprint: ElementFingerprint;
   rect?: { x: number; y: number; width: number; height: number };
@@ -38,6 +41,13 @@ export interface PageSnapshot {
   capturedAt: number;
   truncated: boolean;
   nodes: SnapshotNode[];
+}
+
+export interface PageQueryPage {
+  items: ElementRef[];
+  offset: number;
+  nextOffset?: number;
+  total: number;
 }
 
 export type PatchOperation =
@@ -75,32 +85,87 @@ export interface Annotation {
   createdAt: number;
 }
 
+export type LiveRuleAction =
+  | { kind: 'set-text'; value: string }
+  | { kind: 'set-attribute'; name: string; value: string }
+  | { kind: 'remove-attribute'; name: string }
+  | { kind: 'set-style'; property: string; value: string; priority?: '' | 'important' }
+  | { kind: 'add-class'; value: string }
+  | { kind: 'remove-class'; value: string }
+  | { kind: 'hide' }
+  | { kind: 'remove' };
+
+export interface LiveRulePredicate {
+  text?: { equals?: string; includes?: string };
+  attributes?: Array<{ name: string; equals?: string; includes?: string; exists?: boolean }>;
+}
+
+/**
+ * A declarative, idempotent rule owned by the isolated content runtime. It is
+ * deliberately less expressive than host JavaScript: future matching nodes
+ * can be restyled or normalized without granting arbitrary page authority.
+ */
+export interface LiveRule {
+  id: string;
+  selector: string;
+  predicate?: LiveRulePredicate;
+  actions: LiveRuleAction[];
+}
+
 export interface SiteRecipe {
+  type?: 'recipe';
   id: string;
   name: string;
   matches: string[];
   enabled: boolean;
-  world: PageWorld;
+  world: 'ISOLATED';
   operations?: PatchOperation[];
-  source?: string;
+  liveRules?: LiveRule[];
   createdAt: number;
   updatedAt: number;
+}
+
+export interface SiteUserScript {
+  type: 'userscript';
+  id: string;
+  name: string;
+  matches: string[];
+  enabled: boolean;
+  runAt: 'document_start' | 'document_end' | 'document_idle';
+  source: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type SiteSkill = SiteRecipe | SiteUserScript;
+
+export function isSiteUserScript(skill: SiteSkill): skill is SiteUserScript {
+  return skill.type === 'userscript';
 }
 
 export type PageCommand =
   | { type: 'page/snapshot'; options?: { selector?: string; maxNodes?: number; maxDepth?: number } }
   | { type: 'page/query'; selector: string; limit?: number }
+  | { type: 'page/query-page'; selector: string; offset?: number; limit?: number }
+  | { type: 'page/click'; target: ElementRef }
+  | { type: 'page/type'; target: ElementRef; value: string; clear?: boolean }
+  | { type: 'page/scroll'; target?: ElementRef; x?: number; y?: number; behavior?: ScrollBehavior }
+  | { type: 'page/wait'; selector: string; state?: 'attached' | 'visible' | 'hidden' | 'detached'; timeoutMs?: number }
+  | { type: 'page/settle'; quietMs?: number; timeoutMs?: number }
   | { type: 'page/patch-preview'; label: string; operations: PatchOperation[] }
   | { type: 'page/patch-apply'; label: string; operations: PatchOperation[] }
   | { type: 'page/patch-revert'; transactionId: string }
   | { type: 'page/patch-verify'; transactionId: string }
   | { type: 'page/observe'; enabled: boolean }
+  | { type: 'page/live-rules-preview'; rules: LiveRule[] }
+  | { type: 'page/live-rules-install'; id: string; label: string; rules: LiveRule[] }
+  | { type: 'page/live-rules-remove'; id: string }
   | { type: 'page/picker-start' }
   | { type: 'page/picker-stop' }
   | { type: 'page/eval'; code: string; world: Exclude<PageWorld, 'ISOLATED'> };
 
 export type PageCommandResult =
-  | { ok: true; value: JsonValue | PageSnapshot | ElementRef[] | PatchTransaction | null }
+  | { ok: true; value: JsonValue | PageSnapshot | PageQueryPage | ElementRef[] | PatchTransaction | null }
   | { ok: false; error: string; code?: 'permission-required' | 'unsupported' | 'not-found' | 'invalid-request' };
 
 export type PageEvent =
@@ -113,57 +178,5 @@ export type PageEvent =
   | { type: 'patch/applied'; transaction: PatchTransaction }
   | { type: 'patch/verification-failed'; transaction: PatchTransaction }
   | { type: 'patch/reverted'; transaction: PatchTransaction }
-  | { type: 'recipe/installed'; recipe: SiteRecipe }
+  | { type: 'recipe/installed'; recipe: SiteSkill }
   | { type: 'recipe/disposed'; recipeId: string };
-
-export type BrokerRequest =
-  | { kind: 'page'; command: PageCommand }
-  | { kind: 'fs/list' }
-  | { kind: 'fs/write'; path: string; content: string }
-  | { kind: 'fs/remove'; path: string }
-  | { kind: 'fs/clear' }
-  | { kind: 'recipe/list' }
-  | { kind: 'recipe/save'; recipe: SiteRecipe }
-  | { kind: 'recipe/remove'; id: string }
-  | { kind: 'recipe/apply'; id: string }
-  | { kind: 'storage/get'; keys: string[] }
-  | { kind: 'storage/set'; values: JsonObject }
-  | { kind: 'storage/remove'; keys: string[] }
-  | { kind: 'llm/status' }
-  | { kind: 'llm/complete'; request: { systemPrompt: string; messages: HarnessMessage[]; tools: ToolSchema[] } }
-  | { kind: 'mcp/connect'; id: string; url: string; headers?: Record<string, string> }
-  | { kind: 'mcp/disconnect'; id: string }
-  | { kind: 'mcp/list-tools'; id: string }
-  | { kind: 'mcp/call-tool'; id: string; name: string; arguments?: JsonObject };
-
-export interface BrokerEnvelope<T = BrokerRequest> {
-  channel: 'harness-broker-v1';
-  requestId: string;
-  payload: T;
-}
-
-export interface BrokerResponse<T = JsonValue> {
-  channel: 'harness-broker-v1';
-  requestId: string;
-  ok: boolean;
-  value?: T;
-  error?: string;
-}
-
-export interface BrokerStreamChunk<T = JsonValue> {
-  channel: 'harness-broker-v1';
-  requestId: string;
-  stream: true;
-  done: boolean;
-  value?: T;
-  error?: string;
-}
-
-export function isBrokerEnvelope(value: unknown): value is BrokerEnvelope {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<BrokerEnvelope>;
-  return candidate.channel === 'harness-broker-v1'
-    && typeof candidate.requestId === 'string'
-    && !!candidate.payload
-    && typeof candidate.payload === 'object';
-}

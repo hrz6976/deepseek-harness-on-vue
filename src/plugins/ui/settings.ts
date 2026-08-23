@@ -1,18 +1,17 @@
 // settings UI plugin: LLM connection config. Connect = ask the manager to
-// mount the llm plugin from .plugins/llm.js with the cfg as component props;
+// mount the llm plugin from .plugins/llm.js with cfg as Cordis plugin config;
 // disconnect = unmount it, file kept (service revoked, chat disables).
 // Key lives in localStorage only — never OPFS (files are agent-readable).
-import { reactive, computed, onMounted, nextTick } from 'vue';
-import { useService } from '../../kernel/services';
-import { useLayoutTarget } from '../../kernel/contrib';
+import type { Context } from '@deepseek-ai/cordis';
+import { defineComponent, reactive, computed, onMounted, nextTick } from 'vue';
+import { useService } from '@/sdk';
 
 const LS = { baseURL: 'harness.baseURL', model: 'harness.model', apiKey: 'harness.apiKey', mock: 'harness.mock', auto: 'harness.autoconnect' };
 
-export const settingsPlugin = {
-  name: 'settings',
+const SettingsPanel = defineComponent({
+  name: 'SettingsPanel',
   template: `
-  <Teleport v-if="target" :to="target">
-    <div class="panel">
+  <div class="panel">
       <h2>Model connection</h2>
       <div class="row">
         <div><label>Base URL</label><input type="text" v-model="cfg.baseURL" :disabled="connected"></div>
@@ -26,10 +25,8 @@ export const settingsPlugin = {
       <button class="primary" @click="connect" :disabled="connected || (!cfg.apiKey && !cfg.mock && !viaProxy)">Mount LLM plugin</button>
       <button class="danger" @click="disconnect" :disabled="!connected || running">Unmount LLM plugin</button>
       <span style="font-size:12px"><span class="dot" :class="connected ? 'on' : 'off'"></span>{{ connected ? engineName : 'not connected' }}</span>
-    </div>
-  </Teleport>`,
+  </div>`,
   setup() {
-    const target = useLayoutTarget('side');
     const llmSvc = useService('llm');
     const loopSvc = useService('loop');
     const mgrSvc = useService('manager');
@@ -63,8 +60,14 @@ export const settingsPlugin = {
           && (cfg.apiKey || cfg.mock || cfg.baseURL.startsWith('/'))) connect();
     }));
 
-    return { target, cfg, connected, running, engineName, viaProxy, connect, disconnect };
+    return { cfg, connected, running, engineName, viaProxy, connect, disconnect };
   },
+});
+
+export const settingsPlugin = {
+  name: 'settings',
+  inject: ['ui'],
+  apply(ctx: Context) { ctx.ui.register({ name: 'settings', region: 'side', order: 30, component: SettingsPanel }); },
 };
 
 export default settingsPlugin;

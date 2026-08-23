@@ -9,14 +9,13 @@
 // Trust note: cfg (incl. apiKey) is closure-captured; the provided service
 // object exposes no getter to it, so plugin/tool code cannot read the key
 // through the service.
-import { ref, onUnmounted, getCurrentInstance } from 'vue';
+import type { Context as CordisContext } from '@deepseek-ai/cordis';
+import { ref } from 'vue';
 import { createProvider } from '@earendil-works/pi-ai';
-import type { AssistantMessage, Context, Message, Model, Usage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Context as PiContext, Message, Model, StopReason, Usage } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { provideService } from '../kernel/services';
-import { log } from '../kernel/log';
-import type { HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent, ToolCall } from '../shared/runtime';
-import { errorMessage } from '../shared/runtime';
+import { errorMessage, log } from '@/sdk';
+import type { HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent, ToolCall } from '@/shared/runtime';
 
 interface LlmConfig {
   mock?: boolean;
@@ -34,6 +33,13 @@ function tryParse(source: string): JsonObject {
   try { return JSON.parse(source) as JsonObject; } catch { return {}; }
 }
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+
+export function toHarnessFinishReason(reason: StopReason): Exclude<LlmStreamEvent, { type: 'error' }>['finishReason'] {
+  if (reason === 'toolUse') return 'tool_calls';
+  if (reason === 'length') return 'length';
+  if (reason === 'stop') return 'stop';
+  return 'unknown';
+}
 
 // ---- internal message log -> pi-ai Context.messages ------------------------
 // Invariants carried over from the PoC (enumerated in TESTING.md):
@@ -85,7 +91,7 @@ function makePiEngine(cfg: LlmConfig): (request: LlmRequest) => AsyncIterable<Ll
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: CONTEXT_WINDOW, maxTokens: 8192,
   };
   return async function* piStream({ systemPrompt, messages, tools, signal }: LlmRequest): AsyncIterable<LlmStreamEvent> {
-    const ctx = { systemPrompt, messages: toPiMessages(messages, model.id), tools } as unknown as Context;
+    const ctx = { systemPrompt, messages: toPiMessages(messages, model.id), tools } as unknown as PiContext;
     // retry is built into pi-ai's SDK layer; the PoC's withRetry is gone
     const stream = provider.stream(model, ctx, { apiKey, signal, fetch: cfg.fetch });
     const snapOf = (p: AssistantMessage): { text: string; thinking: string; toolCalls: ToolCall[] } => ({
@@ -96,7 +102,16 @@ function makePiEngine(cfg: LlmConfig): (request: LlmRequest) => AsyncIterable<Ll
     try {
       for await (const ev of withIdleGuard(stream, signal)) {
         const p = ev.type === 'done' ? ev.message : ev.type === 'error' ? ev.error : ev.partial;
-        if (ev.type === 'done') { yield { type: 'done', ...snapOf(p), usage: p.usage }; return; } // usage: provider-reported tokens, drives compaction
+        if (ev.type === 'done') {
+          yield {
+            type: 'done',
+            ...snapOf(p),
+            ...(p.responseId ? { responseId: p.responseId } : {}),
+            finishReason: toHarnessFinishReason(p.stopReason),
+            usage: p.usage,
+          };
+          return;
+        } // provider-reported usage drives compaction; stopReason drives loop completion
         if (ev.type === 'error') {
           if (p.stopReason === 'aborted') return; // manual stop: the loop's signal check finishes up
           yield { type: 'error', message: p.errorMessage || 'unknown LLM error' };
@@ -156,23 +171,22 @@ function makeMockEngine(): (request: LlmRequest) => AsyncIterable<LlmStreamEvent
     // fake but shape-correct usage so compaction is exercisable offline
     const input = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 4);
     const output = Math.ceil(text.length / 4);
-    yield { type: 'done', text, thinking: THINK, toolCalls,
+    yield { type: 'done', text, thinking: THINK, toolCalls, finishReason: wantTool ? 'tool_calls' : 'stop',
             usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output } };
   };
 }
 
 // ---- the plugin -------------------------------------------------------------
-function setupLlm(cfg: LlmConfig) {
+function setupLlm(ctx: CordisContext, cfg: LlmConfig): void {
   const mock = !!cfg.mock;
   const engineName = ref(mock ? 'mock engine (offline)' : `pi-ai · ${cfg.model}`);
   const engine = mock ? makeMockEngine() : makePiEngine(cfg);
-  provideService('llm', {
+  ctx.provide('llm', {
     engineName,
     contextWindow: cfg.contextWindow || CONTEXT_WINDOW,
     stream: (request: LlmRequest) => engine(request),
   });
-  if (getCurrentInstance()) onUnmounted(() => log('llm plugin unmounted', 'warn'));
-  return () => null;
+  ctx.effect(() => () => log('llm plugin unmounted', 'warn'), 'llm.log-dispose');
 }
 
 // Mounted ON DEMAND (autoMount:false in the defaults manifest): settings
@@ -182,9 +196,8 @@ function setupLlm(cfg: LlmConfig) {
 // getter to it.
 export default {
   name: 'llm',
-  props: { cfg: Object },
-  setup: (props: { cfg?: LlmConfig }) => setupLlm(props.cfg ?? { baseURL: '/proxy', model: 'deepseek-chat' }),
+  apply: (ctx: CordisContext, config: { cfg?: LlmConfig } = {}) => setupLlm(ctx, config.cfg ?? { baseURL: '/proxy', model: 'deepseek-chat' }),
 };
 
 // Test/embedding face: same plugin with the config frozen in.
-export const makeLlmPlugin = (cfg: LlmConfig) => ({ name: 'llm', setup: () => setupLlm(cfg) });
+export const makeLlmPlugin = (cfg: LlmConfig) => ({ name: 'llm', apply: (ctx: CordisContext) => setupLlm(ctx, cfg) });

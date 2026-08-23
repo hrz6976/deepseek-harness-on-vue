@@ -1,4 +1,4 @@
-import type { PageEvent } from '../shared/page-protocol';
+import type { PageEvent } from '@/shared/page-protocol';
 
 export const SIDE_PANEL_BASE_PATH = 'src/extension/sidepanel.html';
 export const SIDE_PANEL_PORT_PREFIX = 'harness-sidepanel-v2';

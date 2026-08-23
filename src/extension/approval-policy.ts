@@ -1,4 +1,4 @@
-import type { BrokerRequest } from '../shared/page-protocol';
+import type { CapabilityRequest } from '@/shared/capability-protocol';
 
 export interface ApprovalRequest {
   title: string;
@@ -7,27 +7,40 @@ export interface ApprovalRequest {
   danger?: boolean;
 }
 
-export function approvalForRequest(request: BrokerRequest): ApprovalRequest | null {
-  if (request.kind === 'page' && request.command.type === 'page/eval') {
+export function approvalForRequest(request: CapabilityRequest): ApprovalRequest | null {
+  if (request.provider === 'page' && request.action === 'command'
+    && (request.input.command.type === 'page/click' || request.input.command.type === 'page/type')) {
+    const command = request.input.command;
+    return {
+      title: command.type === 'page/click' ? '允许与页面交互？' : '允许向页面输入内容？',
+      body: `${command.target.fingerprint.name ?? command.target.fingerprint.text ?? command.target.selector}${command.type === 'page/type' ? `\n\n${command.value.slice(0, 300)}` : ''}`,
+      confirmLabel: command.type === 'page/click' ? '允许点击' : '允许输入',
+    };
+  }
+  if (request.provider === 'page' && request.action === 'command' && request.input.command.type === 'page/eval') {
     return {
       title: '允许执行页面代码？',
-      body: `${request.command.world} context\n\n${request.command.code.slice(0, 600)}`,
+      body: `${request.input.command.world} context\n\n${request.input.command.code.slice(0, 600)}`,
       confirmLabel: '允许执行',
       danger: true,
     };
   }
-  if (request.kind === 'recipe/save') {
+  if (request.provider === 'site-skill' && request.action === 'save') {
+    const script = request.input.skill.type === 'userscript' ? request.input.skill : null;
     return {
-      title: request.recipe.enabled ? '安装页面插件？' : '停用页面插件？',
-      body: `${request.recipe.name}\n${request.recipe.matches.join(', ')}`,
-      confirmLabel: request.recipe.enabled ? '安装并启用' : '停用',
+      title: request.input.skill.enabled
+        ? script ? '安装页面脚本？' : '安装页面插件？'
+        : '停用页面插件？',
+      body: `${request.input.skill.name}\n${request.input.skill.matches.join(', ')}${script ? `\n\n${script.source.slice(0, 600)}` : ''}`,
+      confirmLabel: request.input.skill.enabled ? '安装并启用' : '停用',
+      ...(script ? { danger: true } : {}),
     };
   }
-  if (request.kind === 'recipe/remove') {
+  if (request.provider === 'site-skill' && request.action === 'remove') {
     return { title: '移除页面插件？', body: '刷新页面后，插件效果将不再应用。', confirmLabel: '移除', danger: true };
   }
-  if (request.kind === 'mcp/connect') {
-    return { title: '连接 MCP？', body: request.url, confirmLabel: '允许连接', danger: true };
+  if (request.provider === 'mcp' && request.action === 'connect') {
+    return { title: '连接 MCP？', body: request.input.url, confirmLabel: '允许连接', danger: true };
   }
   return null;
 }

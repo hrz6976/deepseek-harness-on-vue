@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive } from 'vue';
-import { createBrokerEnvelope } from '../src/shared/broker-schema';
+import { assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, SiteUserScriptSchema } from '../src/shared/broker-schema';
+import { systemPrincipal } from '../src/kernel/broker';
+import { workspaceRevision } from '../src/shared/capability-protocol';
 
 test('broker envelope removes Vue proxies before the structured-clone boundary', () => {
   const messages = reactive([{ role: 'user' as const, text: 'hello' }]);
@@ -11,11 +13,37 @@ test('broker envelope removes Vue proxies before the structured-clone boundary',
     parameters: { type: 'object', properties: { selector: { type: 'string' } } },
   }]);
 
-  const envelope = createBrokerEnvelope('request-1', {
-    kind: 'llm/complete',
-    request: { systemPrompt: 'system', messages, tools },
+  const envelope = createCapabilityEnvelope('session-token-with-at-least-32-bytes', 'request-1', systemPrincipal(), {
+    provider: 'llm',
+    action: 'complete',
+    input: { request: { systemPrompt: 'system', messages, tools } },
   });
 
   assert.doesNotThrow(() => structuredClone(envelope));
-  assert.notEqual(envelope.payload.kind === 'llm/complete' ? envelope.payload.request.messages : null, messages);
+  assert.equal(envelope.principal.id, 'harness-shell');
+  assert.doesNotThrow(() => assertCapabilitySession(envelope, 'session-token-with-at-least-32-bytes'));
+  assert.throws(() => assertCapabilitySession(envelope, 'forged-session-token-with-32-bytes'), /authentication failed/);
+  assert.notEqual(envelope.payload.provider === 'llm' && envelope.payload.action === 'complete'
+    ? envelope.payload.input.request.messages
+    : null, messages);
+});
+
+test('workspace revisions distinguish absent and changed file bodies', () => {
+  assert.equal(workspaceRevision(null), 'absent');
+  assert.equal(workspaceRevision('same'), workspaceRevision('same'));
+  assert.notEqual(workspaceRevision('same'), workspaceRevision('changed'));
+});
+
+test('persisted page code has a distinct userscript schema', () => {
+  assert.equal(SiteUserScriptSchema.safeParse({
+    type: 'userscript', id: 'calendar', name: 'Calendar grouping',
+    matches: ['https://example.test/calendar*'], enabled: true,
+    runAt: 'document_idle', source: 'document.body.dataset.ready = "1"',
+    createdAt: 1, updatedAt: 1,
+  }).success, true);
+  assert.equal(SiteRecipeSchema.safeParse({
+    type: 'recipe', id: 'calendar', name: 'Calendar grouping',
+    matches: ['https://example.test/calendar*'], enabled: true, world: 'ISOLATED',
+    source: 'document.body.remove()', createdAt: 1, updatedAt: 1,
+  }).success, false);
 });

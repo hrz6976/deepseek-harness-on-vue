@@ -1,39 +1,34 @@
-// read_state tool plugin — the model's window into component state that
-// plugins exposed via ctx.expose(). Pull-based on purpose: state costs tokens
-// only when the model asks for it; discoverability comes from a function-
-// typed prompt section (re-evaluated at request time by prompt.assemble), so
-// the index is always current and vanishes entirely while nothing is exposed.
-import { getService } from '../../kernel/services';
+import type { Context } from '@deepseek-ai/cordis';
+import { z } from 'zod';
 
-export const readStatePlugin = {
-  name: 'read-state',
-  template: `
-    <AgentTool name="read_state" :description="description" :parameters="parameters" :run="run" />
-    <PromptSection name="read-state" :order="35" :text="index" />
-  `,
-  setup() {
-    const description = 'Read the live state a plugin exposed with ctx.expose(). Without arguments: list every readable plugin and its state keys. With a name: that plugin\'s current state as JSON. State is read at call time, so it reflects user interaction with the plugin UI since your last turn.';
-    const parameters = {
-      type: 'object',
-      properties: { name: { type: 'string', description: 'plugin name; omit to list all readable state' } },
-    };
-    function run({ name }: { name?: string } = {}) {
-      const state = getService('state');
-      if (!state) return 'Error: state service not ready';
-      if (!name) {
-        const all = state.list();
+export const name = 'read-state';
+export const inject = ['state', 'tools', 'prompt'];
+
+export function apply(ctx: Context): void {
+  ctx.tools.register({
+    name: 'read_state',
+    description: 'Read live state exposed by a contributed Vue UI. Without arguments, list readable UI and keys. With a name, read its current JSON state.',
+    parameters: z.object({
+      name: z.string().min(1).describe('Plugin name; omit to list all readable state.').optional(),
+    }),
+    run({ name: pluginName }) {
+      if (!pluginName) {
+        const all = ctx.state.list();
         return all.length ? JSON.stringify(all) : 'no plugin currently exposes readable state';
       }
-      return state.read(name);
-    }
-    const index = () => {
-      const all = getService('state')?.list() ?? [];
+      return ctx.state.read(pluginName);
+    },
+  });
+  ctx.prompt.register({
+    name: 'read-state',
+    order: 35,
+    text: () => {
+      const all = ctx.state.list();
       return all.length
-        ? `Plugins expose live readable state (user interaction with their UI updates it; read it with read_state): ${all.map(e => `${e.name} {${e.keys.join(', ')}}`).join('; ')}.`
+        ? `Plugins expose live readable UI state (read it with read_state): ${all.map(entry => `${entry.name} {${entry.keys.join(', ')}}`).join('; ')}.`
         : '';
-    };
-    return { description, parameters, run, index };
-  },
-};
+    },
+  });
+}
 
-export default readStatePlugin;
+export default { name, inject, apply };

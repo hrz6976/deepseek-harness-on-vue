@@ -17,14 +17,12 @@
 // each assistant message, so every top-level boundary is a valid cut) and we
 // fold the latter into the single prompt (an old checkpoint rides along in
 // the serialized transcript and the prompt says to merge it).
-import { reactive, ref, onUnmounted, getCurrentInstance } from 'vue';
+import type { Context } from '@deepseek-ai/cordis';
+import { reactive, ref } from 'vue';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { getService, provideService } from '../kernel/services';
-import { useBusOn } from '../kernel/bus';
-import { log } from '../kernel/log';
+import { errorMessage, log } from '@/sdk';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { HarnessMessage, LlmRequest, LlmService } from '../shared/runtime';
-import { errorMessage } from '../shared/runtime';
+import type { HarnessMessage, LlmRequest, LlmService } from '@/shared/runtime';
 
 export interface CompactionSettings { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
 interface TurnStartRequest { messages: HarnessMessage[]; signal: AbortSignal }
@@ -160,17 +158,24 @@ export async function runCompaction(
   }
   if (!summary.trim()) throw new Error('summarizer returned empty text');
   messages.splice(0, cut, { role: 'summary', text: summary, tokensBefore });
+  // Provider usage on retained assistant turns was measured against the
+  // pre-compaction transcript. Keeping it would make the compacted log appear
+  // just as large as before and retrigger compaction on every following turn.
+  // The next real model response will establish a fresh provider baseline.
+  for (const message of messages) {
+    if (message.role === 'assistant') delete message.usage;
+  }
   return true;
 }
 
 // ---- the plugin -------------------------------------------------------------
 
-export const compactionPlugin = {
-  name: 'compaction',
-  setup() {
+export const name = 'compaction';
+
+export function apply(ctx: Context): void {
     const settings = reactive({ ...DEFAULT_SETTINGS });
     const compacting = ref(false);
-    const getLlm = () => getService('llm');
+    const getLlm = () => ctx.reflect.get('llm') as LlmService | undefined;
     const note = (messages: HarnessMessage[], text: string): void => { messages.push({ role: 'note', text }); };
 
     async function compact(messages: HarnessMessage[], signal = new AbortController().signal): Promise<boolean> {
@@ -182,7 +187,7 @@ export const compactionPlugin = {
         const did = await runCompaction(messages, { llm, settings, signal });
         if (did) {
           const after = estimateContextTokens(messages);
-          note(messages, `context compacted: ~${Math.round(before / 1000)}k → ~${Math.round(after / 1000)}k tokens`);
+          note(messages, `上下文已压缩：约 ${Math.round(before / 1000)}k → ${Math.round(after / 1000)}k tokens`);
           log(`compaction: ~${before} → ~${after} est. tokens`);
         }
         return did;
@@ -192,12 +197,12 @@ export const compactionPlugin = {
     // Auto-trigger between turns, before the loop assembles the next request.
     // Failure falls through uncompacted — worst case the request overflows,
     // which the loop/llm-error hook below then catches.
-    useBusOn('loop/turn-start', async (arg: TurnStartRequest, next: (value: TurnStartRequest) => unknown) => {
+    ctx.on('loop/turn-start', async (arg: TurnStartRequest, next: (value: TurnStartRequest) => unknown) => {
       const llm = getLlm();
       if (settings.enabled && llm) {
         const window = llm.contextWindow ?? 131072;
         if (estimateContextTokens(arg.messages) > window - settings.reserveTokens) {
-          note(arg.messages, 'context near the window limit — compacting…');
+          note(arg.messages, '上下文接近上限，正在压缩…');
           try { await compact(arg.messages, arg.signal); }
           catch (error: unknown) { note(arg.messages, `compaction failed: ${errorMessage(error)} — continuing uncompacted`); }
         }
@@ -207,30 +212,35 @@ export const compactionPlugin = {
 
     // Provider rejected the request as too long (estimate was off, or another
     // plugin inflated the request): compact and ask the loop for its one retry.
-    useBusOn('loop/llm-error', async (arg: LlmErrorRequest, next: (value: LlmErrorRequest) => unknown) => {
+    ctx.on('loop/llm-error', async (arg: LlmErrorRequest, next: (value: LlmErrorRequest) => unknown) => {
       const overflowMessage = { role: 'assistant', stopReason: 'error', errorMessage: arg.message } as unknown as AssistantMessage;
       if (settings.enabled && isContextOverflow(overflowMessage)) {
-        try { if (await compact(arg.messages, arg.signal)) return next({ ...arg, retry: true }); }
+        try {
+          if (await compact(arg.messages, arg.signal)) {
+            arg.retry = true;
+            return next(arg);
+          }
+        }
         catch (error: unknown) { log(`compaction after overflow failed: ${errorMessage(error)}`, 'err'); }
       }
       return next(arg);
     });
 
-    provideService('compaction', {
+    ctx.provide('compaction', {
       settings, compacting,
       contextTokens: estimateContextTokens,
       contextWindow: () => getLlm()?.contextWindow ?? 131072,
       // manual "Compact" from the UI; loop must be idle (the button enforces it)
       async compact() {
-        const loop = getService('loop');
+        const loop = ctx.reflect.get('loop') as import('../shared/runtime').LoopService | undefined;
         if (!loop || !getLlm()) return false;
         try { return await compact(loop.messages); }
         catch (error: unknown) { note(loop.messages, `compaction failed: ${errorMessage(error)}`); return false; }
       },
     });
-    if (getCurrentInstance()) onUnmounted(() => log('compaction plugin unmounted', 'warn'));
-    return () => null;
-  },
-};
+    ctx.effect(() => () => log('compaction plugin unmounted', 'warn'), 'compaction.log-dispose');
+}
+
+export const compactionPlugin = { name, apply };
 
 export default compactionPlugin;

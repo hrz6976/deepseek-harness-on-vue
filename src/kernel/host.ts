@@ -1,78 +1,127 @@
-// Plugin host: the reactive plugin list + mount/unmount + the PluginHost
-// error boundary. Component instance = plugin instance; removing a plugin
-// from the array unmounts its component, and Vue reclaims every effect it
-// registered (services, bus listeners, contributions, watchers, timers).
-import { defineComponent, reactive, markRaw, h, provide, onErrorCaptured } from 'vue';
-import type { Component, ComponentPublicInstance } from 'vue';
-import { bus } from './bus';
+import type { Fiber, Plugin } from '@deepseek-ai/cordis';
+import { defineComponent, h, shallowReactive } from 'vue';
+import { cordis } from './cordis';
 import { log } from './log';
-import type { PluginEntry } from '../shared/runtime';
+import { normalizePlugin } from './plugin-runtime';
+import { UiContributionHost, uiContributions } from './ui';
+import type { PluginEntry } from '@/shared/runtime';
+import type { CapabilityManifest } from '@/shared/capability-protocol';
+import {
+  emptyContributionInventory,
+  capabilityIsActive,
+  legacyCapabilityManifest,
+  registerCapability,
+  unregisterCapability,
+  validateCapabilityManifest,
+} from './capabilities';
 
-export const plugins = reactive<PluginEntry[]>([]);
+export const plugins = shallowReactive<PluginEntry[]>([]);
 
-// Agent-readable state, via Vue's own primitive: a plugin that calls
-// ctx.expose({...}) in setup() gets its exposed proxy captured here (keyed by
-// plugin name — the host already guarantees uniqueness). Plain Map, NOT
-// reactive: every reader is pull-based (read_state tool, request-time prompt
-// assembly), and the values are instance proxies that must not be re-proxied.
-export const exposedStates = new Map<string, ComponentPublicInstance>();
-
-// Vnode-ref callback for one PluginHost. `val.$.exposed` distinguishes an
-// exposed proxy (expose() was called) from the default public instance —
-// only explicit expose() opts a plugin's state in. Deletion is token-guarded
-// like every other registry here: an HMR remount may mount the replacement
-// before the old instance's ref(null) fires, and the late cleanup must not
-// take out the fresh capture.
-export function makeExposeCapture(name: string) {
-  let captured: ComponentPublicInstance | null = null;
-  return (val: ComponentPublicInstance | null): void => {
-    const internal = val?.$ as { exposed?: object | null } | undefined;
-    if (val && internal?.exposed) { captured = val; exposedStates.set(name, val); }
-    else if (captured && exposedStates.get(name) === captured) { exposedStates.delete(name); captured = null; }
-  };
+function statusOf(state: number): PluginEntry['status'] {
+  switch (state) {
+    case 0: return 'pending';
+    case 1: return 'loading';
+    case 2: return 'active';
+    case 3: return 'failed';
+    case 4: return 'disposed';
+    case 5: return 'unloading';
+    default: return 'pending';
+  }
 }
 
-export function mountPlugin(
+cordis.on('internal/status', (fiber) => {
+  const entry = plugins.find(plugin => plugin.fiber === fiber);
+  if (!entry) return;
+  entry.status = statusOf(fiber.state);
+  if (entry.status === 'failed') {
+    void fiber.await().catch((error: unknown) => {
+      entry.error = error instanceof Error ? error.message : String(error);
+      log(`plugin [${entry.name}] runtime error: ${entry.error}`, 'err');
+    });
+  }
+});
+
+export async function mountPlugin(
   name: string,
-  def: Component,
-  { builtin = false, config = null }: { builtin?: boolean; config?: Record<string, unknown> | null } = {},
-): void {
-  const i = plugins.findIndex(p => p.name === name);
-  if (i >= 0) plugins.splice(i, 1);
-  plugins.push({ name, def: markRaw(def), version: 0, status: 'active', error: '', hmrError: '', builtin, config });
-  log(`plugin [${name}] mounted`, 'ok');
-  bus.emit('plugin/mounted', name);
+  definition: Plugin | unknown,
+  {
+    builtin = false,
+    config = null,
+    manifest,
+    manifestSource,
+  }: { builtin?: boolean; config?: Record<string, unknown> | null; manifest?: CapabilityManifest; manifestSource?: 'generated' | 'declared' } = {},
+): Promise<PluginEntry> {
+  const previous = plugins.find(plugin => plugin.name === name);
+  if (previous) await unmountPlugin(name);
+
+  const generated = manifest == null;
+  const plugin = normalizePlugin({ default: definition }, name);
+  const entry: PluginEntry = {
+    name,
+    manifest: validateCapabilityManifest(manifest ?? legacyCapabilityManifest(name, builtin), name),
+    manifestSource: manifestSource ?? (generated ? 'generated' : 'declared'),
+    contributions: emptyContributionInventory(),
+    plugin,
+    fiber: null,
+    version: 0,
+    status: 'pending',
+    error: '',
+    hmrError: '',
+    builtin,
+    config,
+  };
+
+  registerCapability(entry);
+  plugins.push(entry);
+  try {
+    const handle = cordis.plugin(plugin as Plugin, config ?? undefined) as Fiber & PromiseLike<Fiber>;
+    // Cordis returns a thenable facade whose prototype is the real Fiber.
+    // Lifecycle events carry that real Fiber, so store it for stable identity.
+    const fiber = Object.getPrototypeOf(handle) as Fiber;
+    entry.fiber = fiber;
+    entry.status = statusOf(fiber.state);
+    void fiber.await().catch((error: unknown) => {
+      entry.status = 'failed';
+      entry.error = error instanceof Error ? error.message : String(error);
+      log(`plugin [${name}] failed: ${entry.error}`, 'err');
+    });
+  } catch (error) {
+    plugins.splice(plugins.indexOf(entry), 1);
+    unregisterCapability(entry);
+    throw error;
+  }
+
+  log(`plugin [${name}] mounted as Cordis fiber`, 'ok');
+  cordis.emit('plugin/mounted', name);
+  return entry;
 }
 
-export function unmountPlugin(name: string): boolean {
-  const i = plugins.findIndex(p => p.name === name);
-  if (i < 0) return false;
-  plugins.splice(i, 1);
-  log(`plugin [${name}] unmounted, all effects reclaimed`, 'warn');
-  bus.emit('plugin/unmounted', name);
+export async function unmountPlugin(name: string): Promise<boolean> {
+  const index = plugins.findIndex(plugin => plugin.name === name);
+  if (index < 0) return false;
+  const entry = plugins[index]!;
+  if (entry.fiber) await entry.fiber.dispose();
+  plugins.splice(index, 1);
+  unregisterCapability(entry);
+  log(`plugin [${name}] unmounted; Cordis reclaimed its effects`, 'warn');
+  cordis.emit('plugin/unmounted', name);
   return true;
 }
 
-// Error boundary per plugin instance (cordis fault isolation). Also provides
-// 'pluginName' so contributions and bus listeners can attribute themselves.
+/**
+ * Compatibility renderer for the existing shells. It renders only UI records
+ * contributed by this plugin; plugin execution itself no longer happens in
+ * Vue and therefore does not depend on this component being visible.
+ */
 export const PluginHost = defineComponent({
-  name: 'PluginHost',
+  name: 'PluginUiHost',
   props: { plugin: { type: Object, required: true } },
   setup(props: { plugin: PluginEntry }) {
-    provide('pluginName', props.plugin.name);
-    onErrorCaptured((err: unknown) => {
-      props.plugin.status = 'failed';
-      props.plugin.error = err instanceof Error ? err.message : String(err);
-      log(`plugin [${props.plugin.name}] runtime error: ${props.plugin.error}`, 'err');
-      return false; // stop propagation: one bad plugin must not take down the app
-    });
-    const retry = () => { props.plugin.status = 'active'; props.plugin.error = ''; props.plugin.version++; };
-    const capture = makeExposeCapture(props.plugin.name);
-    return () => props.plugin.status === 'failed'
-      ? h('div', { class: 'plugin-error' }, [
-          h('div', `plugin ${props.plugin.name} crashed: ${props.plugin.error}`),
-          h('button', { onClick: retry }, 'retry (remount)'),
-        ])
-      : h(props.plugin.def, { ...(props.plugin.config || {}), ref: capture });
+    return () => [...uiContributions.values()]
+      .filter(contribution => contribution.owner === props.plugin.name && capabilityIsActive(props.plugin))
+      .map(contribution => h(UiContributionHost, {
+        key: `${contribution.id}:${contribution.version}`,
+        contribution,
+      }));
   },
 });

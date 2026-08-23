@@ -1,5 +1,5 @@
-import type { Annotation } from '../shared/page-protocol';
-import type { LlmRequest } from '../shared/runtime';
+import type { Annotation } from '@/shared/page-protocol';
+import type { LlmRequest } from '@/shared/runtime';
 
 const MAX_ANNOTATIONS = 20;
 

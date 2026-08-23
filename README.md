@@ -31,21 +31,27 @@ Chrome 135+ 才支持当前使用的 `chrome.userScripts.execute`。`page/eval` 
 ## 架构
 
 - **Trusted extension shell**：service worker、按 tab 独立挂载的 side panel 和 options page。持有 `chrome.*`、LLM key、MCP 连接和扩展 OPFS。
-- **Sandboxed agent runtime**：运行原有 kernel、loop、compaction 和可自修改 builtin/user plugins；没有 `chrome.*`，只能发送经过 Zod 校验的 capability request。
+- **Sandboxed Cordis runtime**：浏览器内运行 `@deepseek-ai/cordis`，管理 Plugin/Fiber、服务注入、事件、中间件、effect 与异步销毁；Vue 只渲染 `ctx.ui.register()` 注册的真实 UI。它没有 `chrome.*`，只能发送经过 Zod 校验的 capability request。
+- **Public plugin SDK**：动态源码只能导入 Vue、Cordis、Zod、模型 SDK 与 `@harness/sdk`；root Context、mount/unmount、compiler、boot 和持久化仓库不进入动态模块表。fs、tools、prompt、manager、task runtime、state、loop 等框架服务作为不可编辑的 system Fibers 装配。
+- **Principal-bound broker**：Cordis `Service` tracing 把每次 provider 调用绑定到发起调用的 capability Fiber；trusted shell 校验 manifest 中声明的 provider、permission、scope 和 active task id 后才分派请求。中间的 workspace/LLM adapter 继续传递调用者身份。
 - **Host-page content runtime**：框架无关的 DOM ABI，提供 snapshot/query/observe/picker 与事务补丁；补丁有 preview/apply/verify/revert 生命周期。
 - **MAIN / USER_SCRIPT execution**：仅由 trusted broker 通过 Chrome User Scripts API 执行，不把任意 `eval` 权限交给 content script。
 
-动态插件源码仍以 JavaScript 存放在 OPFS 的 `.plugins/` 下，但 builtin 的仓库源码统一用 TypeScript 编写，构建时由 Vite/Oxc 去除类型后作为 factory source 嵌入。首次启动 write-if-missing，用户修改不会被新版 bundle 静默覆盖。
+动态 capability 源码仍以 JavaScript 存放在 OPFS 的 `.plugins/` 下，但 builtin capability 的仓库源码统一用 TypeScript 编写，构建时由 Vite/Oxc 去除类型后作为 factory source 嵌入。插件使用 Cordis 的 function/class/`{ apply }` 类型，推荐导出 `name`、`inject`、`apply(ctx)` 并在函数里显式注册 tool、prompt、service、event 与 UI。首次启动 write-if-missing，用户修改不会被新版 bundle 静默覆盖；保留的系统 Fiber 名称不能从 workspace 覆盖。
+
+`.plugins/<id>.js` 是可编辑 working draft，`.harness/capabilities/<id>/index.js` 是最后成功激活的 revision。编译或 apply 失败不会替换正在运行的 Fiber；刷新后也会从最后 active revision 恢复，同时保留坏 draft 供继续修复。
 
 MCP 使用官方 `@modelcontextprotocol/sdk` 的 Streamable HTTP transport；浏览器扩展不伪装支持本地 stdio，后者需要 Native Messaging 或本地 bridge。
 
-详细设计、信任边界和 React/Vue 支持范围见 [扩展架构](docs/extension-architecture.md)。原 harness 的 Cordis→Vue 映射见 [docs/cordis-to-vue.md](docs/cordis-to-vue.md)，验证清单见 [docs/TESTING.md](docs/TESTING.md)。
+详细设计、信任边界和 React/Vue 支持范围见 [扩展架构](docs/extension-architecture.md)。浏览器 Cordis 内核与插件格式见 [docs/cordis-to-vue.md](docs/cordis-to-vue.md)，验证清单见 [docs/TESTING.md](docs/TESTING.md)。
 
 ## 框架支持边界
 
 DOM 是稳定主路径，因此古老服务端页面、Vue、React 和其他前端框架都能被修改。对 React/Vue 页面直接改 DOM 不会更新其业务 state，后续重渲染也可能覆盖补丁；recipe 会在路由/刷新后重新应用，但涉及业务逻辑或持久状态时应生成站点 adapter，而不是冒充修改了组件源码。
 
 每个 `http(s)` 标签页使用 Chrome tab-specific side panel：对话、批注、页面引用和 MCP 会话不会串到其他 tab；OPFS 插件、LLM 设置和 recipe 仍是扩展级共享状态。`chrome://`、扩展页等受限页面会直接禁用该面板。
+
+共享 OPFS 写入使用浏览器锁与文件 revision 做冲突检测，并通过跨 panel change feed 刷新缓存。两个标签页同时编辑同一文件时，后到的旧 revision 写入会明确报冲突，而不是覆盖较新的内容。
 
 Vue 的组件树可作为可选诊断 adapter；React production build 没有稳定公共组件树 API，因此只承诺 DOM 级修改。需要真正修改 React 源码时，应把批注和 DOM 定位信息交给外部 coding agent/compiler 工作流。
 

@@ -1,148 +1,156 @@
-import { getService } from '../../kernel/services';
-import type { PageCommand, PatchOperation, SiteRecipe } from '../../shared/page-protocol';
+import type { Context } from '@deepseek-ai/cordis';
+import { z } from 'zod';
+import { ElementRefSchema, LiveRuleSchema, PatchOperationSchema } from '@/sdk';
+import type { PageCommand, SiteRecipe, SiteSkill, SiteUserScript } from '@/shared/page-protocol';
 
-interface SnapshotArgs { selector?: string; maxNodes?: number; maxDepth?: number }
-interface QueryArgs { selector: string; limit?: number }
-interface PatchArgs { label: string; operations: PatchOperation[] }
-interface RecipeArgs { id?: string; name: string; matches: string[]; operations: PatchOperation[]; enabled?: boolean }
-
-async function request(command: PageCommand): Promise<string> {
-  const broker = getService('broker');
-  if (!broker) return 'Error: the page broker is not available in this runtime';
-  const result = await broker.request({ kind: 'page', command });
+async function request(ctx: Context, command: PageCommand): Promise<string> {
+  const result = await ctx.broker.request({ provider: 'page', action: 'command', input: { command } });
   return JSON.stringify(result);
 }
 
-export const pageToolsPlugin = {
-  name: 'page',
-  template: `
-    <AgentTool name="page_snapshot" :description="snapshotDescription" :parameters="snapshotParameters" :run="snapshot" />
-    <AgentTool name="page_query" :description="queryDescription" :parameters="queryParameters" :run="query" />
-    <AgentTool name="page_patch_preview" :description="previewDescription" :parameters="patchParameters" :run="preview" />
-    <AgentTool name="page_patch_apply" :description="applyDescription" :parameters="patchParameters" :run="apply" />
-    <AgentTool name="page_patch_revert" :description="revertDescription" :parameters="revertParameters" :run="revert" />
-    <AgentTool name="page_recipe_save" :description="recipeDescription" :parameters="recipeParameters" :run="saveRecipe" />
-    <AgentTool name="page_recipe_list" description="List persisted site recipes and whether they are enabled." :parameters="emptyParameters" :run="listRecipes" />
-    <AgentTool name="page_recipe_remove" description="Remove a persisted site recipe by id." :parameters="idParameters" :run="removeRecipe" />
-    <AgentTool name="page_picker_start" description="Open the visual element picker so the user can click a page element and attach an annotation." :parameters="emptyParameters" :run="picker" />
-    <PromptSection name="page-tools" :order="10" :text="pagePrompt" />
-  `,
-  setup() {
-    const targetSchema = {
-      type: 'object',
-      properties: {
-        nodeRef: { type: 'string' },
-        selector: { type: 'string' },
-        fingerprint: { type: 'object' },
-      },
-      required: ['nodeRef', 'selector', 'fingerprint'],
-    };
-    const operationSchema = {
-      type: 'object',
-      description: 'A transactional DOM operation. Use targets returned by page_snapshot or page_query unchanged.',
-      properties: {
-        kind: { type: 'string', enum: ['set-text', 'set-attribute', 'remove-attribute', 'set-style', 'add-class', 'remove-class', 'hide', 'remove', 'insert-html'] },
-        target: targetSchema,
-        value: { type: 'string' },
-        name: { type: 'string' },
-        property: { type: 'string' },
-        priority: { type: 'string', enum: ['', 'important'] },
-        position: { type: 'string', enum: ['beforebegin', 'afterbegin', 'beforeend', 'afterend'] },
-        html: { type: 'string' },
-      },
-      required: ['kind', 'target'],
-    };
-    const snapshotParameters = {
-      type: 'object',
-      properties: {
-        selector: { type: 'string', description: 'Optional CSS selector used as the snapshot root.' },
-        maxNodes: { type: 'number', description: 'Maximum compressed nodes, default 600.' },
-        maxDepth: { type: 'number', description: 'Maximum tree depth, default 10.' },
-      },
-    };
-    const queryParameters = {
-      type: 'object',
-      properties: { selector: { type: 'string' }, limit: { type: 'number' } },
-      required: ['selector'],
-    };
-    const patchParameters = {
-      type: 'object',
-      properties: {
-        label: { type: 'string' },
-        operations: { type: 'array', items: operationSchema },
-      },
-      required: ['label', 'operations'],
-    };
-    const revertParameters = {
-      type: 'object',
-      properties: { transactionId: { type: 'string' } },
-      required: ['transactionId'],
-    };
-    const recipeParameters = {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'Existing recipe id when updating; omit to create.' },
-        name: { type: 'string' },
-        matches: { type: 'array', items: { type: 'string' }, description: 'URL patterns such as https://example.com/*.' },
-        operations: { type: 'array', items: operationSchema },
-        enabled: { type: 'boolean' },
-      },
-      required: ['name', 'matches', 'operations'],
-    };
-    const idParameters = {
-      type: 'object',
-      properties: { id: { type: 'string' } },
-      required: ['id'],
-    };
-    const emptyParameters = { type: 'object', properties: {} };
+export const name = 'page';
+export const inject = ['tools', 'prompt', 'broker'];
 
-    return {
-      snapshotDescription: 'Read a compressed, framework-neutral DOM snapshot of the active page. Returns stable element references for later patches.',
-      queryDescription: 'Find elements in the active page with a CSS selector and return stable references and fingerprints.',
-      previewDescription: 'Validate a transactional DOM patch without changing the page. Always preview a non-trivial patch before applying it.',
-      applyDescription: 'Apply and verify a previously discussed DOM patch as one undoable transaction. Use only after the user has clearly approved the change.',
-      revertDescription: 'Undo an applied page patch by transaction id.',
-      recipeDescription: 'Install an approved DOM patch as an enabled page plugin so it reapplies after reload and navigation. The declarative recipe is its internal storage format.',
-      pagePrompt: 'The host page is controlled only through these framework-neutral page_* DOM tools. Plugins and run_js do not run in the host DOM. Treat element references as capabilities: get them from page_snapshot/page_query, preserve their fingerprints, batch related changes, preview non-trivial patches, and never apply a patch without explicit user approval. Applied changes are temporary by default: let the user inspect and refine them, then ask whether to install the final result as a page plugin. Use page_recipe_save only after explicit approval to persist.',
-      snapshotParameters,
-      queryParameters,
-      patchParameters,
-      revertParameters,
-      recipeParameters,
-      idParameters,
-      emptyParameters,
-      snapshot: ({ selector, maxNodes, maxDepth }: SnapshotArgs = {}) => request({ type: 'page/snapshot', options: { selector, maxNodes, maxDepth } }),
-      query: ({ selector, limit }: QueryArgs) => request({ type: 'page/query', selector, limit }),
-      preview: ({ label, operations }: PatchArgs) => request({ type: 'page/patch-preview', label, operations }),
-      apply: ({ label, operations }: PatchArgs) => request({ type: 'page/patch-apply', label, operations }),
-      revert: ({ transactionId }: { transactionId: string }) => request({ type: 'page/patch-revert', transactionId }),
-      picker: () => request({ type: 'page/picker-start' }),
-      async saveRecipe({ id, name, matches, operations, enabled = true }: RecipeArgs) {
-        const broker = getService('broker');
-        if (!broker) return 'Error: the page broker is not available in this runtime';
-        const now = Date.now();
-        const recipe: SiteRecipe = {
-          id: id ?? crypto.randomUUID(),
-          name,
-          matches,
-          operations,
-          enabled,
-          world: 'ISOLATED',
-          createdAt: now,
-          updatedAt: now,
-        };
-        return JSON.stringify(await broker.request({ kind: 'recipe/save', recipe }));
-      },
-      async listRecipes() {
-        const broker = getService('broker');
-        return broker ? JSON.stringify(await broker.request({ kind: 'recipe/list' })) : 'Error: broker unavailable';
-      },
-      async removeRecipe({ id }: { id: string }) {
-        const broker = getService('broker');
-        return broker ? JSON.stringify(await broker.request({ kind: 'recipe/remove', id })) : 'Error: broker unavailable';
-      },
-    };
-  },
-};
+const operationSchema = PatchOperationSchema.describe(
+  'A transactional DOM operation. Use targets returned by page_snapshot or page_query unchanged.',
+);
+const snapshotParameters = z.object({
+  selector: z.string().describe('Optional CSS selector used as the snapshot root.').optional(),
+  maxNodes: z.number().int().positive().max(10_000).describe('Maximum compressed nodes, default 600.').optional(),
+  maxDepth: z.number().int().nonnegative().max(100).describe('Maximum tree depth, default 10.').optional(),
+});
+const queryParameters = z.object({
+  selector: z.string().min(1),
+  limit: z.number().int().positive().max(1_000).optional(),
+});
+const queryPageParameters = z.object({
+  selector: z.string().min(1),
+  offset: z.number().int().nonnegative().max(1_000_000).optional(),
+  limit: z.number().int().positive().max(500).optional(),
+});
+const targetParameters = z.object({ target: ElementRefSchema });
+const typeParameters = z.object({
+  target: ElementRefSchema,
+  value: z.string().max(1_000_000),
+  clear: z.boolean().default(true),
+});
+const scrollParameters = z.object({
+  target: ElementRefSchema.optional(),
+  x: z.number().finite().optional(),
+  y: z.number().finite().optional(),
+  behavior: z.enum(['auto', 'smooth']).optional(),
+});
+const waitParameters = z.object({
+  selector: z.string().min(1),
+  state: z.enum(['attached', 'visible', 'hidden', 'detached']).optional(),
+  timeoutMs: z.number().int().positive().max(30_000).optional(),
+});
+const settleParameters = z.object({
+  quietMs: z.number().int().nonnegative().max(5_000).optional(),
+  timeoutMs: z.number().int().positive().max(30_000).optional(),
+});
+const patchParameters = z.object({
+  label: z.string().min(1),
+  operations: z.array(operationSchema).max(1_000),
+});
+const revertParameters = z.object({ transactionId: z.string().min(1) });
+const liveRulesParameters = z.object({ rules: z.array(LiveRuleSchema).min(1).max(500) });
+const liveRulesInstallParameters = liveRulesParameters.extend({
+  id: z.string().min(1).max(200).describe('Stable rule-set id used to replace or remove this temporary set.'),
+  label: z.string().min(1).max(500),
+});
+const recipeParameters = z.object({
+  type: z.enum(['recipe', 'userscript']).default('recipe'),
+  id: z.string().min(1).describe('Existing recipe id when updating; omit to create.').optional(),
+  name: z.string().min(1).max(200),
+  matches: z.array(z.string().min(1)).min(1).max(100).describe('URL patterns such as https://example.com/*.'),
+  operations: z.array(operationSchema).max(1_000).default([]),
+  liveRules: z.array(LiveRuleSchema).max(500).default([]),
+  source: z.string().min(1).max(1_000_000).optional(),
+  runAt: z.enum(['document_start', 'document_end', 'document_idle']).default('document_idle'),
+  enabled: z.boolean().default(true),
+}).superRefine((value, context) => {
+  if (value.type === 'userscript' && !value.source) {
+    context.addIssue({ code: 'custom', path: ['source'], message: 'A userscript needs source.' });
+  }
+  if (value.type === 'recipe' && !value.operations.length && !value.liveRules.length) {
+    context.addIssue({ code: 'custom', path: ['operations'], message: 'A recipe needs at least one operation or live rule.' });
+  }
+  if (value.type === 'recipe' && value.source) {
+    context.addIssue({ code: 'custom', path: ['source'], message: 'Recipe source must use type userscript.' });
+  }
+});
+const idParameters = z.object({ id: z.string().min(1) });
+const emptyParameters = z.object({});
+const scriptParameters = z.object({
+  code: z.string().min(1).max(1_000_000),
+  world: z.enum(['MAIN', 'USER_SCRIPT']).default('USER_SCRIPT'),
+});
+const PAGE_DYNAMIC_GROUP = {
+  id: 'page.dynamic',
+  title: 'Dynamic Page Rules',
+  description: 'Observe DOM changes, keep declarative rules active for future nodes, or use explicitly approved expert page code.',
+  scope: 'task',
+  tags: ['page', 'dom', 'mutation', 'live-rule'],
+} as const;
 
-export default pageToolsPlugin;
+export function apply(ctx: Context): void {
+
+  const snapshotDescription = 'Read a compressed, framework-neutral DOM snapshot of the active page. Returns stable element references for later patches.';
+  const queryDescription = 'Find elements in the active page with a CSS selector and return stable references and fingerprints.';
+  const previewDescription = 'Validate a transactional DOM patch without changing the page. Always preview a non-trivial patch before applying it.';
+  const applyDescription = 'Apply and verify a DOM adjustment as one undoable temporary transaction. Ordinary reversible patches need no separate confirmation; persistence still requires explicit approval.';
+  const revertDescription = 'Undo an applied page patch by transaction id.';
+  const recipeDescription = 'Install an approved page plugin. Use type recipe for declarative DOM changes or type userscript for persistent USER_SCRIPT code. Both reapply after matching navigations.';
+
+  ctx.tools.register({ name: 'page_snapshot', description: snapshotDescription, parameters: snapshotParameters, run: ({ selector, maxNodes, maxDepth }) => request(ctx, { type: 'page/snapshot', options: { selector, maxNodes, maxDepth } }) });
+  ctx.tools.register({ name: 'page_query', description: queryDescription, parameters: queryParameters, run: ({ selector, limit }) => request(ctx, { type: 'page/query', selector, limit }) });
+  ctx.tools.register({ name: 'page_query_page', description: 'Query a large matching set one bounded page at a time.', parameters: queryPageParameters, run: ({ selector, offset, limit }) => request(ctx, { type: 'page/query-page', selector, offset, limit }) });
+  ctx.tools.register({ name: 'page_click', description: 'Click a referenced page element through the trusted Page provider. Requires user approval.', parameters: targetParameters, run: ({ target }) => request(ctx, { type: 'page/click', target }) });
+  ctx.tools.register({ name: 'page_type', description: 'Enter text into a referenced input or editable element through the trusted Page provider. Requires user approval.', parameters: typeParameters, run: ({ target, value, clear }) => request(ctx, { type: 'page/type', target, value, clear }) });
+  ctx.tools.register({ name: 'page_scroll', description: 'Scroll the page or bring a referenced element into view.', parameters: scrollParameters, run: ({ target, x, y, behavior }) => request(ctx, { type: 'page/scroll', target, x, y, behavior }) });
+  ctx.tools.register({ name: 'page_wait', description: 'Wait until a selector is attached, visible, hidden, or detached.', parameters: waitParameters, run: ({ selector, state, timeoutMs }) => request(ctx, { type: 'page/wait', selector, state, timeoutMs }) });
+  ctx.tools.register({ name: 'page_settle', description: 'Wait for a quiet DOM interval after navigation or interaction.', parameters: settleParameters, run: ({ quietMs, timeoutMs }) => request(ctx, { type: 'page/settle', quietMs, timeoutMs }) });
+  ctx.tools.register({ name: 'page_patch_preview', description: previewDescription, parameters: patchParameters, run: ({ label, operations }) => request(ctx, { type: 'page/patch-preview', label, operations }) });
+  ctx.tools.register({ name: 'page_patch_apply', description: applyDescription, parameters: patchParameters, run: ({ label, operations }) => request(ctx, { type: 'page/patch-apply', label, operations }) });
+  ctx.tools.register({ name: 'page_patch_revert', description: revertDescription, parameters: revertParameters, run: ({ transactionId }) => request(ctx, { type: 'page/patch-revert', transactionId }) });
+  ctx.tools.register({ name: 'page_observe_start', description: 'Start publishing debounced DOM mutation events for the attached page.', parameters: emptyParameters, availability: PAGE_DYNAMIC_GROUP, run: () => request(ctx, { type: 'page/observe', enabled: true }) });
+  ctx.tools.register({ name: 'page_observe_stop', description: 'Stop publishing page mutation events. Installed live rules remain active.', parameters: emptyParameters, availability: PAGE_DYNAMIC_GROUP, run: () => request(ctx, { type: 'page/observe', enabled: false }) });
+  ctx.tools.register({ name: 'page_live_rules_preview', description: 'Validate declarative dynamic-page rules and report how many current elements match, without changing the page.', parameters: liveRulesParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ rules }) => request(ctx, { type: 'page/live-rules-preview', rules }) });
+  ctx.tools.register({ name: 'page_live_rules_apply', description: 'Install or replace one temporary declarative rule set. The trusted content runtime reapplies idempotent actions to current and future matching nodes.', parameters: liveRulesInstallParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ id, label, rules }) => request(ctx, { type: 'page/live-rules-install', id, label, rules }) });
+  ctx.tools.register({ name: 'page_live_rules_remove', description: 'Stop a temporary declarative live-rule set by id. Existing DOM changes are not reverted.', parameters: idParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ id }) => request(ctx, { type: 'page/live-rules-remove', id }) });
+  ctx.tools.register({ name: 'page_picker_start', description: 'Open the visual element picker so the user can click a page element and attach an annotation.', parameters: emptyParameters, run: () => request(ctx, { type: 'page/picker-start' }) });
+  ctx.tools.register({ name: 'page_script_run', description: 'Expert-only: execute JavaScript in the trusted MAIN or USER_SCRIPT page world. Always requires explicit user approval; prefer snapshots, patches, and live rules.', parameters: scriptParameters, availability: PAGE_DYNAMIC_GROUP, run: ({ code, world }) => request(ctx, { type: 'page/eval', code, world }) });
+  ctx.tools.register({
+    name: 'page_recipe_save', description: recipeDescription, parameters: recipeParameters,
+    async run({ type, id, name: recipeName, matches, operations, liveRules, source, runAt, enabled }) {
+      const now = Date.now();
+      const common = { id: id ?? crypto.randomUUID(), name: recipeName, matches, enabled, createdAt: now, updatedAt: now };
+      const skill: SiteSkill = type === 'userscript'
+        ? {
+            ...common,
+            type: 'userscript',
+            runAt,
+            source: source!,
+          } satisfies SiteUserScript
+        : {
+            ...common,
+            type: 'recipe',
+            world: 'ISOLATED',
+            ...(operations.length ? { operations } : {}),
+            ...(liveRules.length ? { liveRules } : {}),
+          } satisfies SiteRecipe;
+      return JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'save', input: { skill } }));
+    },
+  });
+  ctx.tools.register({ name: 'page_recipe_list', description: 'List persisted page plugins, including declarative recipes and userscripts.', parameters: emptyParameters, run: async () => JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'list', input: {} })) });
+  ctx.tools.register({ name: 'page_recipe_remove', description: 'Remove a persisted page plugin by id.', parameters: idParameters, run: async ({ id }) => JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'remove', input: { id } })) });
+
+  ctx.prompt.register({
+    name: 'page-tools',
+    order: 10,
+    text: 'The host page is controlled only through framework-neutral page_* tools. Plugins and run_js never run in host DOM. Treat element references as capabilities: obtain and preserve them from snapshots/queries. Use page_query_page for large sets. After click/type, wait for an expected state and page_settle before reading again. Click/type cross the trusted approval boundary. Preview non-trivial patches. For DOM that is created or reconciled later, load the page.dynamic tool group with capability_load. Use live rules for simple declarative changes. When actual page behavior or arbitrary DOM logic is required, preview with page_script_run and, after explicit approval, persist the same idempotent source through page_recipe_save with type userscript. Userscripts always use the browser USER_SCRIPT world. If Chrome reports that User Scripts are disabled, explain how to enable them once and do not retry with MAIN.',
+  });
+}
+
+export default { name, inject, apply };

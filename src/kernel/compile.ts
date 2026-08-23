@@ -1,12 +1,14 @@
-// Dynamic plugin loading: ESM source string -> component definition.
+// Dynamic plugin loading: ESM source string -> Cordis Plugin.
 // Primary path: Blob URL import (real ESM). Fallback: new Function, for
 // Safari quirks / stricter contexts where blob: import is unavailable.
 //
-// THE PLUGIN DIALECT (v2) IS PINNED so both paths accept the same source:
-//   - exactly one `export default { ... }` (component object); named
-//     `export const/function` allowed (ignored at load, useful for tests)
+// THE PLUGIN SOURCE DIALECT is deliberately small so both paths accept the
+// same source:
+//   - Cordis default function/class/{ apply } exports, or named
+//     `name` / `inject` / `Config` / `apply` exports
+//   - Vue component objects remain a UI-only compatibility form
 //   - imports: SINGLE-LINE static forms only, at the top of the file, from
-//     registry specifiers only (see kernel/modules.js): named
+//     public registry specifiers only (see kernel/modules.js): named
 //     `import { a, b as c } from 'x'`, namespace `import * as ns from 'x'`,
 //     default `import d from 'x'`. Side-effect imports, multi-line imports,
 //     `export { ... }` lists, and cross-plugin specifiers are all rejected.
@@ -16,15 +18,13 @@
 // can reach nothing else. Only the leading block of the file (imports,
 // comments, blank lines) is scanned, so `import` text inside template
 // literals further down is never touched.
-import { markRaw } from 'vue';
-import type { Component } from 'vue';
+import type { Plugin } from '@deepseek-ai/cordis';
 import { modules } from './modules';
+import { normalizePlugin } from './plugin-runtime';
 
 function normalizeSpecifier(raw: string): string {
-  const kernel = raw.match(/(?:^|\/)kernel\/([\w-]+)(?:\.js)?$/);
-  if (kernel) return `kernel/${kernel[1]}`;
-  const shared = raw.match(/(?:^|\/)shared\/([\w-]+)(?:\.js)?$/);
-  return shared ? `shared/${shared[1]}` : raw;
+  if (raw === '@/sdk' || raw === '@/sdk/index' || raw === '@/sdk/index.js') return '@harness/sdk';
+  return raw;
 }
 
 interface ImportForm { re: RegExp; emit(match: RegExpMatchArray, ref: string): string }
@@ -58,12 +58,15 @@ export function rewriteImports(source: string): string {
 }
 
 export function translateESM(source: string): string {
-  return source
-    .replace(/export\s+default\s/, 'module.exports = ')
-    .replace(/export\s+(const|let|var|function|async function)/g, '$1');
+  const names = [...source.matchAll(/export\s+(?:const|let|var|function|async\s+function|class)\s+([A-Za-z_$][\w$]*)/g)]
+    .map(match => match[1]!);
+  const translated = source
+    .replace(/export\s+default\s/, 'module.exports.default = ')
+    .replace(/export\s+(const|let|var|function|async\s+function|class)/g, '$1');
+  return `${translated}\nObject.assign(module.exports, { ${names.join(', ')} });`;
 }
 
-export async function importPluginSource(source: string): Promise<{ default?: unknown }> {
+export async function importPluginSource(source: string): Promise<Record<string, unknown>> {
   try {
     const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
     try { return await import(/* @vite-ignore */ url); }
@@ -72,29 +75,17 @@ export async function importPluginSource(source: string): Promise<{ default?: un
     if (e instanceof SyntaxError) throw e; // real parse error: same source won't fare better below
     const mod = { exports: {} };
     new Function('module', 'exports', translateESM(source))(mod, mod.exports);
-    return { default: mod.exports };
+    return mod.exports as Record<string, unknown>;
   }
 }
 
-export function normalizePluginDef(raw: unknown, name: string): Component {
-  const moduleValue = raw as { default?: unknown } | null;
-  let candidate: unknown = moduleValue?.default ?? raw;
-  if (typeof candidate === 'function') candidate = { setup: candidate }; // bare setup function form
-  if (!candidate || typeof candidate !== 'object')
-    throw new Error('a plugin must export default a component object (with setup / template / render)');
-  const def = candidate as Component & { name?: string; setup?: unknown; render?: unknown; template?: unknown };
-  if (typeof def.setup !== 'function' && !def.render && !def.template)
-    throw new Error('a plugin must export default a component object (with setup / template / render)');
-  def.name = def.name || name;
-  return def;
-}
+export const normalizePluginDef = normalizePlugin;
 
 // Compile-probe: module top-level errors throw HERE, which is what lets
-// create/HMR roll back before touching the running instance. setup-time
-// errors cannot be probed; PluginHost's onErrorCaptured catches those at
-// mount and shows the failed card instead. The sourceURL keeps DevTools
+// create/HMR roll back before touching the running instance. apply-time
+// errors become Fiber failures at mount. The sourceURL keeps DevTools
 // stack frames named (plugins have no esbuild sourcemap).
-export async function compilePlugin(name: string, source: string): Promise<Component> {
+export async function compilePlugin(name: string, source: string): Promise<Plugin> {
   const translated = rewriteImports(source) + `\n//# sourceURL=harness-plugin://${name}`;
-  return markRaw(normalizePluginDef(await importPluginSource(translated), name));
+  return normalizePluginDef(await importPluginSource(translated), name);
 }

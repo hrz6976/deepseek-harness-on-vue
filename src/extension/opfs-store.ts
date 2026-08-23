@@ -1,5 +1,5 @@
-import type { BrokerRequest } from '../shared/page-protocol';
-import type { JsonValue } from '../shared/runtime';
+import { workspaceRevision, type WorkspaceCapabilityRequest } from '@/shared/capability-protocol';
+import type { JsonValue } from '@/shared/runtime';
 
 type IterableDirectoryHandle = FileSystemDirectoryHandle & {
   entries(): AsyncIterableIterator<[string, FileSystemDirectoryHandle | FileSystemFileHandle]>;
@@ -7,38 +7,66 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 
 export class OpfsStore {
   #rootPromise: Promise<IterableDirectoryHandle> | null = null;
+  #channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('harness-workspace-v1');
+  #listeners = new Set<() => void>();
 
-  async handle(request: Extract<BrokerRequest, { kind: `fs/${string}` }>): Promise<JsonValue> {
-    switch (request.kind) {
-      case 'fs/list': return await this.list();
-      case 'fs/write': await this.write(request.path, request.content); return null;
-      case 'fs/remove': await this.remove(request.path); return null;
-      case 'fs/clear': await this.clear(); return null;
+  constructor() {
+    if (this.#channel) this.#channel.onmessage = () => {
+      for (const listener of this.#listeners) listener();
+    };
+  }
+
+  onChange(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  async handle(request: WorkspaceCapabilityRequest): Promise<JsonValue> {
+    switch (request.action) {
+      case 'list': return await this.list();
+      case 'write': await this.write(request.input.path, request.input.content, request.input.expectedRevision); return null;
+      case 'remove': await this.remove(request.input.path, request.input.expectedRevision); return null;
+      case 'clear': await this.clear(); return null;
     }
   }
 
   async list(): Promise<Record<string, string>> {
-    const files: Record<string, string> = {};
-    await this.walk(await this.root(), '', files);
-    return files;
+    return await this.withLock('shared', async () => {
+      const files: Record<string, string> = {};
+      await this.walk(await this.root(), '', files);
+      return files;
+    });
   }
 
-  async write(path: string, content: string): Promise<void> {
-    const { directory, name } = await this.resolve(path, true);
-    const handle = await directory.getFileHandle(name, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(content);
-    await writable.close();
+  async write(path: string, content: string, expectedRevision?: string | null): Promise<void> {
+    await this.withLock('exclusive', async () => {
+      const current = await this.read(path);
+      this.assertRevision(path, current, expectedRevision);
+      const { directory, name } = await this.resolve(path, true);
+      const handle = await directory.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(content);
+      await writable.close();
+    });
+    this.#channel?.postMessage({ type: 'write', path });
   }
 
-  async remove(path: string): Promise<void> {
-    const { directory, name } = await this.resolve(path, false);
-    await directory.removeEntry(name, { recursive: true });
+  async remove(path: string, expectedRevision?: string | null): Promise<void> {
+    await this.withLock('exclusive', async () => {
+      const current = await this.read(path);
+      this.assertRevision(path, current, expectedRevision);
+      const { directory, name } = await this.resolve(path, false);
+      await directory.removeEntry(name, { recursive: true });
+    });
+    this.#channel?.postMessage({ type: 'remove', path });
   }
 
   async clear(): Promise<void> {
-    const root = await this.root();
-    for await (const [name] of root.entries()) await root.removeEntry(name, { recursive: true });
+    await this.withLock('exclusive', async () => {
+      const root = await this.root();
+      for await (const [name] of root.entries()) await root.removeEntry(name, { recursive: true });
+    });
+    this.#channel?.postMessage({ type: 'clear' });
   }
 
   private async root(): Promise<IterableDirectoryHandle> {
@@ -64,6 +92,30 @@ export class OpfsStore {
       directory = await directory.getDirectoryHandle(segment, { create });
     }
     return { directory, name: segments.at(-1)! };
+  }
+
+  private async read(path: string): Promise<string | null> {
+    try {
+      const { directory, name } = await this.resolve(path, false);
+      return await (await directory.getFileHandle(name)).getFile().then(file => file.text());
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'NotFoundError') return null;
+      throw error;
+    }
+  }
+
+  private assertRevision(path: string, current: string | null, expected: string | null | undefined): void {
+    if (expected === undefined) return;
+    const actual = workspaceRevision(current);
+    const normalizedExpected = expected ?? 'absent';
+    if (actual !== normalizedExpected) {
+      throw new Error(`Workspace conflict for "${path}": expected revision ${normalizedExpected}, found ${actual}. Refresh and retry.`);
+    }
+  }
+
+  private async withLock<T>(mode: 'shared' | 'exclusive', operation: () => Promise<T>): Promise<T> {
+    if (!navigator.locks) return await operation();
+    return await navigator.locks.request('harness-workspace-opfs', { mode }, operation);
   }
 }
 

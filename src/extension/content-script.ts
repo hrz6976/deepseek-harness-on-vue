@@ -2,6 +2,8 @@ import type {
   Annotation,
   ElementFingerprint,
   ElementRef,
+  LiveRule,
+  LiveRuleAction,
   PageCommand,
   PageCommandResult,
   PageEvent,
@@ -10,11 +12,13 @@ import type {
   PatchOperation,
   PatchTransaction,
   SnapshotNode,
-} from '../shared/page-protocol';
+} from '@/shared/page-protocol';
+import type { JsonValue } from '@/shared/runtime';
 
 interface ContentMessage { channel: 'harness-page-v1'; command: PageCommand }
 interface UndoEntry { undo(): void; verify(): { ok: boolean; message: string } }
-interface LiveTransaction { record: PatchTransaction; undoEntries: UndoEntry[] }
+interface LiveTransaction { record: PatchTransaction; undoEntries: UndoEntry[]; lastUsedAt: number }
+interface NodeLease { ref: WeakRef<Element>; lastUsedAt: number }
 
 const runtimeGlobal = globalThis as typeof globalThis & { __harnessContentRuntimeV1?: boolean };
 
@@ -25,17 +29,26 @@ if (!runtimeGlobal.__harnessContentRuntimeV1) {
 
 function installContentRuntime(): void {
   const nodeIds = new WeakMap<Element, string>();
-  const nodes = new Map<string, Element>();
+  const nodes = new Map<string, NodeLease>();
   const transactions = new Map<string, LiveTransaction>();
+  const documentId = crypto.randomUUID();
+  let generation = 0;
   let nodeSequence = 0;
   let transactionSequence = 0;
   let observer: MutationObserver | null = null;
   let mutationTimer: number | null = null;
+  let liveRuleTimer: number | null = null;
+  let observationEnabled = false;
+  const liveRuleSets = new Map<string, { label: string; rules: LiveRule[] }>();
   let lastUrl = location.href;
+  const NODE_LEASE_TTL = 5 * 60_000;
+  const TRANSACTION_TTL = 2 * 60 * 60_000;
 
   const scope = (): PageScope => ({
     tabId: -1,
     frameId: 0,
+    documentId,
+    generation,
     url: location.href,
     origin: location.origin,
   });
@@ -46,10 +59,16 @@ function installContentRuntime(): void {
 
   function nodeRef(element: Element): string {
     const existing = nodeIds.get(element);
-    if (existing) return existing;
+    if (existing) {
+      const lease = nodes.get(existing);
+      if (lease) lease.lastUsedAt = Date.now();
+      else nodes.set(existing, { ref: new WeakRef(element), lastUsedAt: Date.now() });
+      return existing;
+    }
     const id = `n_${++nodeSequence}`;
     nodeIds.set(element, id);
-    nodes.set(id, element);
+    nodes.set(id, { ref: new WeakRef(element), lastUsedAt: Date.now() });
+    if (nodes.size > 5_000) pruneLeases();
     return id;
   }
 
@@ -107,6 +126,8 @@ function installContentRuntime(): void {
     const rect = element.getBoundingClientRect();
     return {
       nodeRef: nodeRef(element),
+      documentId,
+      generation,
       selector: selectorFor(element),
       fingerprint: fingerprint(element),
       ...(includeRect ? { rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } } : {}),
@@ -114,8 +135,15 @@ function installContentRuntime(): void {
   }
 
   function resolveTarget(target: ElementRef): Element {
-    const byRef = nodes.get(target.nodeRef);
-    if (byRef?.isConnected) return byRef;
+    if (target.documentId && target.documentId !== documentId) throw new Error('target belongs to a different page document');
+    if (target.generation !== undefined && target.generation !== generation) throw new Error('target lease expired after page navigation');
+    const lease = nodes.get(target.nodeRef);
+    const byRef = lease?.ref.deref();
+    if (byRef?.isConnected) {
+      lease!.lastUsedAt = Date.now();
+      return byRef;
+    }
+    if (lease) nodes.delete(target.nodeRef);
     let element: Element | null = null;
     try { element = document.querySelector(target.selector); }
     catch { throw new Error(`invalid selector: ${target.selector}`); }
@@ -169,6 +197,111 @@ function installContentRuntime(): void {
     } catch {
       throw new Error(`invalid selector: ${selector}`);
     }
+  }
+
+  function queryPage(selector: string, offset = 0, limit = 50) {
+    try {
+      const all = [...document.querySelectorAll(selector)];
+      const safeOffset = Math.min(Math.max(offset, 0), all.length);
+      const safeLimit = Math.min(Math.max(limit, 1), 500);
+      const items = all.slice(safeOffset, safeOffset + safeLimit).map(element => describe(element));
+      const nextOffset = safeOffset + items.length;
+      return { items, offset: safeOffset, ...(nextOffset < all.length ? { nextOffset } : {}), total: all.length };
+    } catch { throw new Error(`invalid selector: ${selector}`); }
+  }
+
+  function click(target: ElementRef): JsonValue {
+    const element = resolveTarget(target);
+    if (!(element instanceof HTMLElement)) throw new Error(`target is not clickable: ${target.selector}`);
+    element.focus({ preventScroll: true });
+    element.click();
+    return asJson({ target: describe(element, false), clickedAt: Date.now() });
+  }
+
+  function typeInto(target: ElementRef, value: string, clear = true): JsonValue {
+    const element = resolveTarget(target);
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      if (element.disabled || element.readOnly) throw new Error(`target is not editable: ${target.selector}`);
+      element.focus({ preventScroll: true });
+      const next = clear ? value : `${element.value}${value}`;
+      const prototype = element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (setter) setter.call(element, next);
+      else element.value = next;
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: clear ? 'insertReplacementText' : 'insertText', data: value }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      return asJson({ target: describe(element, false), valueLength: next.length });
+    }
+    if (element instanceof HTMLElement && element.isContentEditable) {
+      element.focus({ preventScroll: true });
+      element.textContent = clear ? value : `${element.textContent ?? ''}${value}`;
+      element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      return asJson({ target: describe(element, false), valueLength: element.textContent.length });
+    }
+    throw new Error(`target is not an input or editable element: ${target.selector}`);
+  }
+
+  function scrollPage(target: ElementRef | undefined, x = 0, y = 0, behavior: ScrollBehavior = 'auto'): JsonValue {
+    if (target) {
+      const element = resolveTarget(target);
+      element.scrollIntoView({ behavior, block: 'center', inline: 'nearest' });
+      return asJson({ target: describe(element, false), behavior });
+    }
+    window.scrollBy({ left: x, top: y, behavior });
+    return { x: window.scrollX, y: window.scrollY };
+  }
+
+  async function waitFor(selector: string, state: 'attached' | 'visible' | 'hidden' | 'detached' = 'attached', timeoutMs = 5_000): Promise<JsonValue> {
+    const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), 30_000);
+    while (true) {
+      let element: Element | null;
+      try { element = document.querySelector(selector); }
+      catch { throw new Error(`invalid selector: ${selector}`); }
+      const visible = !!element && isVisible(element);
+      const matched = state === 'attached' ? !!element
+        : state === 'detached' ? !element
+        : state === 'visible' ? visible
+        : !visible;
+      if (matched) return asJson({ state, elapsed: Math.max(0, timeoutMs - (deadline - Date.now())), ...(element ? { target: describe(element, false) } : {}) });
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${selector} to become ${state}`);
+      await new Promise(resolve => window.setTimeout(resolve, 50));
+    }
+  }
+
+  function settle(quietMs = 250, timeoutMs = 5_000): Promise<JsonValue> {
+    const quiet = Math.min(Math.max(quietMs, 0), 5_000);
+    const timeout = Math.min(Math.max(timeoutMs, 1), 30_000);
+    return new Promise((resolve, reject) => {
+      let changes = 0;
+      let quietTimer = 0;
+      let timeoutTimer = 0;
+      const startedAt = Date.now();
+      const done = () => {
+        observer0.disconnect();
+        window.clearTimeout(quietTimer);
+        window.clearTimeout(timeoutTimer);
+        resolve({ quietMs: quiet, elapsed: Date.now() - startedAt, mutations: changes });
+      };
+      const arm = () => { window.clearTimeout(quietTimer); quietTimer = window.setTimeout(done, quiet); };
+      const observer0 = new MutationObserver(records => { changes += records.length; arm(); });
+      observer0.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+      timeoutTimer = window.setTimeout(() => {
+        observer0.disconnect();
+        window.clearTimeout(quietTimer);
+        reject(new Error(`page did not settle within ${timeout}ms`));
+      }, timeout);
+      arm();
+    });
+  }
+
+  function isVisible(element: Element): boolean {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0 && (rect.width > 0 || rect.height > 0);
+  }
+
+  function asJson(value: unknown): JsonValue {
+    return JSON.parse(JSON.stringify(value)) as JsonValue;
   }
 
   function safeAttribute(name: string, value: string): void {
@@ -337,7 +470,7 @@ function installContentRuntime(): void {
       verification: undoEntries.map((entry, operation) => ({ operation, ...entry.verify() })),
     };
     if (record.verification.some(item => !item.ok)) record.status = 'verification-failed';
-    transactions.set(record.id, { record, undoEntries });
+    transactions.set(record.id, { record, undoEntries, lastUsedAt: Date.now() });
     emit(record.status === 'applied' ? { type: 'patch/applied', transaction: record } : { type: 'patch/verification-failed', transaction: record });
     return record;
   }
@@ -356,6 +489,7 @@ function installContentRuntime(): void {
   function verify(transactionId: string): PatchTransaction {
     const transaction = transactions.get(transactionId);
     if (!transaction) throw new Error(`transaction not found: ${transactionId}`);
+    transaction.lastUsedAt = Date.now();
     transaction.record.verification = transaction.undoEntries.map((entry, operation) => ({ operation, ...entry.verify() }));
     transaction.record.status = transaction.record.verification.every(item => item.ok) ? 'applied' : 'verification-failed';
     if (transaction.record.status === 'verification-failed') emit({ type: 'patch/verification-failed', transaction: transaction.record });
@@ -363,19 +497,146 @@ function installContentRuntime(): void {
   }
 
   function setObservation(enabled: boolean): void {
+    observationEnabled = enabled;
+    refreshObserver();
+  }
+
+  function refreshObserver(): void {
     observer?.disconnect();
     observer = null;
-    if (!enabled) return;
+    if (!observationEnabled && !liveRuleSets.size) return;
     observer = new MutationObserver(records => {
       const relevant = records.filter(record => !(record.target instanceof Node && pickerUi.contains(record.target)));
       if (!relevant.length) return;
-      if (mutationTimer != null) clearTimeout(mutationTimer);
-      mutationTimer = window.setTimeout(() => {
-        emit({ type: 'page/mutation', scope: scope(), count: relevant.length });
-        mutationTimer = null;
-      }, 120);
+      if (liveRuleSets.size) {
+        if (liveRuleTimer != null) clearTimeout(liveRuleTimer);
+        liveRuleTimer = window.setTimeout(() => {
+          applyLiveRules();
+          liveRuleTimer = null;
+        }, 80);
+      }
+      if (observationEnabled) {
+        if (mutationTimer != null) clearTimeout(mutationTimer);
+        mutationTimer = window.setTimeout(() => {
+          emit({ type: 'page/mutation', scope: scope(), count: relevant.length });
+          mutationTimer = null;
+        }, 120);
+      }
     });
     observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+  }
+
+  function validateLiveRule(rule: LiveRule): number {
+    let elements: Element[];
+    try { elements = [...document.querySelectorAll(rule.selector)]; }
+    catch { throw new Error(`invalid live rule selector: ${rule.selector}`); }
+    for (const action of rule.actions) validateLiveRuleAction(action);
+    return elements.filter(element => liveRuleMatches(element, rule)).length;
+  }
+
+  function validateLiveRuleAction(action: LiveRuleAction): void {
+    if (action.kind === 'set-attribute') safeAttribute(action.name, action.value);
+    if (action.kind === 'set-style') safeStyle(action.property, action.value);
+    if ((action.kind === 'add-class' || action.kind === 'remove-class') && /\s/u.test(action.value)) {
+      throw new Error('a live-rule class action accepts exactly one token');
+    }
+  }
+
+  function liveRuleMatches(element: Element, rule: LiveRule): boolean {
+    const text = element.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    if (rule.predicate?.text?.equals !== undefined && text !== rule.predicate.text.equals) return false;
+    if (rule.predicate?.text?.includes !== undefined && !text.includes(rule.predicate.text.includes)) return false;
+    for (const predicate of rule.predicate?.attributes ?? []) {
+      const present = element.hasAttribute(predicate.name);
+      if (predicate.exists !== undefined && present !== predicate.exists) return false;
+      const value = element.getAttribute(predicate.name) ?? '';
+      if (predicate.equals !== undefined && value !== predicate.equals) return false;
+      if (predicate.includes !== undefined && !value.includes(predicate.includes)) return false;
+    }
+    return true;
+  }
+
+  function applyLiveRuleAction(element: Element, action: LiveRuleAction): boolean {
+    switch (action.kind) {
+      case 'set-text':
+        if (element.textContent === action.value) return false;
+        element.textContent = action.value;
+        return true;
+      case 'set-attribute':
+        safeAttribute(action.name, action.value);
+        if (element.getAttribute(action.name) === action.value) return false;
+        element.setAttribute(action.name, action.value);
+        return true;
+      case 'remove-attribute':
+        if (!element.hasAttribute(action.name)) return false;
+        element.removeAttribute(action.name);
+        return true;
+      case 'set-style': {
+        safeStyle(action.property, action.value);
+        const target = element as HTMLElement;
+        if (target.style.getPropertyValue(action.property) === action.value
+          && target.style.getPropertyPriority(action.property) === (action.priority ?? '')) return false;
+        target.style.setProperty(action.property, action.value, action.priority ?? '');
+        return true;
+      }
+      case 'add-class':
+        if (element.classList.contains(action.value)) return false;
+        element.classList.add(action.value);
+        return true;
+      case 'remove-class':
+        if (!element.classList.contains(action.value)) return false;
+        element.classList.remove(action.value);
+        return true;
+      case 'hide': {
+        const target = element as HTMLElement;
+        if (target.style.display === 'none') return false;
+        target.style.display = 'none';
+        return true;
+      }
+      case 'remove':
+        if (!element.isConnected) return false;
+        element.remove();
+        return true;
+    }
+  }
+
+  function applyLiveRules(): { matched: number; changed: number } {
+    let matched = 0;
+    let changed = 0;
+    for (const { rules } of liveRuleSets.values()) {
+      for (const rule of rules) {
+        let elements: Element[];
+        try { elements = [...document.querySelectorAll(rule.selector)]; }
+        catch { continue; }
+        for (const element of elements) {
+          if (!liveRuleMatches(element, rule)) continue;
+          matched++;
+          for (const action of rule.actions) {
+            if (!element.isConnected && action.kind !== 'remove') break;
+            if (applyLiveRuleAction(element, action)) changed++;
+          }
+        }
+      }
+    }
+    return { matched, changed };
+  }
+
+  function previewLiveRules(rules: LiveRule[]): JsonValue {
+    const results = rules.map(rule => ({ id: rule.id, matched: validateLiveRule(rule) }));
+    return asJson({ scope: scope(), rules: results, totalMatches: results.reduce((sum, result) => sum + result.matched, 0) });
+  }
+
+  function installLiveRules(id: string, label: string, rules: LiveRule[]): JsonValue {
+    for (const rule of rules) validateLiveRule(rule);
+    liveRuleSets.set(id, { label, rules });
+    refreshObserver();
+    return asJson({ id, label, ruleCount: rules.length, ...applyLiveRules() });
+  }
+
+  function removeLiveRules(id: string): JsonValue {
+    const removed = liveRuleSets.delete(id);
+    refreshObserver();
+    return { id, removed };
   }
 
   const pickerUi = createPickerUi(describe, scope, emit);
@@ -385,11 +646,20 @@ function installContentRuntime(): void {
       switch (command.type) {
         case 'page/snapshot': return { ok: true, value: snapshot(command.options) };
         case 'page/query': return { ok: true, value: query(command.selector, command.limit) };
+        case 'page/query-page': return { ok: true, value: queryPage(command.selector, command.offset, command.limit) };
+        case 'page/click': return { ok: true, value: click(command.target) };
+        case 'page/type': return { ok: true, value: typeInto(command.target, command.value, command.clear) };
+        case 'page/scroll': return { ok: true, value: scrollPage(command.target, command.x, command.y, command.behavior) };
+        case 'page/wait': return { ok: true, value: await waitFor(command.selector, command.state, command.timeoutMs) };
+        case 'page/settle': return { ok: true, value: await settle(command.quietMs, command.timeoutMs) };
         case 'page/patch-preview': return { ok: true, value: preview(command.label, command.operations) };
         case 'page/patch-apply': return { ok: true, value: apply(command.label, command.operations) };
         case 'page/patch-revert': return { ok: true, value: revert(command.transactionId) };
         case 'page/patch-verify': return { ok: true, value: verify(command.transactionId) };
         case 'page/observe': setObservation(command.enabled); return { ok: true, value: null };
+        case 'page/live-rules-preview': return { ok: true, value: previewLiveRules(command.rules) };
+        case 'page/live-rules-install': return { ok: true, value: installLiveRules(command.id, command.label, command.rules) };
+        case 'page/live-rules-remove': return { ok: true, value: removeLiveRules(command.id) };
         case 'page/picker-start': pickerUi.start(); return { ok: true, value: null };
         case 'page/picker-stop': pickerUi.stop(); return { ok: true, value: null };
         case 'page/eval': return { ok: false, code: 'unsupported', error: 'page/eval must be executed by the trusted broker through chrome.userScripts' };
@@ -410,8 +680,27 @@ function installContentRuntime(): void {
     if (lastUrl === location.href) return;
     const previousUrl = lastUrl;
     lastUrl = location.href;
+    generation++;
+    nodes.clear();
+    transactions.clear();
+    liveRuleSets.clear();
+    refreshObserver();
     emit({ type: 'page/route-changed', scope: scope(), previousUrl });
   }, 500);
+
+  window.setInterval(pruneLeases, 60_000);
+
+  function pruneLeases(): void {
+    const now = Date.now();
+    for (const [id, lease] of nodes) {
+      if (!lease.ref.deref()?.isConnected || now - lease.lastUsedAt > NODE_LEASE_TTL) nodes.delete(id);
+    }
+    // Expiry commits the current DOM state and releases retained node/undo
+    // closures; persisted Site Skills remain managed by the trusted provider.
+    for (const [id, transaction] of transactions) {
+      if (now - transaction.lastUsedAt > TRANSACTION_TTL) transactions.delete(id);
+    }
+  }
 
   emit({ type: 'page/connected', scope: scope() });
   if (document.readyState === 'loading') {
