@@ -18,7 +18,7 @@ npm run check
 6. Ask for a patch. Expect preview before apply, per-operation verification, and a transaction id that can be reverted.
 7. Save the approved operations as a recipe, click **授权本站**, refresh or navigate through an SPA route, and expect the recipe to reapply.
 8. Automated Happy DOM coverage exercises snapshot/query/style inspection, apply/verify/revert, node-identity-preserving undo, sanitization, rollback, and real React reconciliation (`tests/extension-content.test.ts`).
-9. Keep the panel open, switch between two HTTP tabs, and expect distinct fresh conversations. Switching back restores that tab's panel instance. On `chrome://newtab`, the Harness panel should be unavailable rather than retaining another tab's errors.
+9. Keep the panel open, switch between two HTTP tabs, and expect distinct live panel instances. Switching back restores that tab's panel. On `chrome://newtab`, expect the inert “Harness 等待网页” fallback with no previous conversation or errors; navigating that tab to HTTP(S) must boot a panel bound to the new tab id.
 
 ## Setup
 

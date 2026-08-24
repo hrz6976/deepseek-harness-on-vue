@@ -6,7 +6,9 @@ import {
   pageEventTabId,
   parseSidePanelPortName,
   parseSidePanelTabId,
+  sidePanelFallbackPath,
   sidePanelPath,
+  sidePanelPathForUrl,
   sidePanelPortName,
 } from '@/extension/tab-scope';
 
@@ -27,7 +29,11 @@ test('tab scope accepts web pages and rejects privileged or malformed URLs', () 
 
 test('side panel path and port carry one validated tab id', () => {
   assert.equal(sidePanelPath(42), 'src/extension/sidepanel.html?tabId=42');
+  assert.equal(sidePanelFallbackPath(42), 'src/extension/sidepanel-fallback.html?tabId=42');
+  assert.equal(sidePanelPathForUrl(42, 'https://example.test/'), sidePanelPath(42));
+  assert.equal(sidePanelPathForUrl(42, 'chrome://newtab/'), sidePanelFallbackPath(42));
   assert.equal(parseSidePanelTabId(`chrome-extension://id/${sidePanelPath(42)}`), 42);
+  assert.equal(parseSidePanelTabId(`chrome-extension://id/${sidePanelFallbackPath(42)}`), 42);
   assert.equal(parseSidePanelTabId('chrome-extension://id/sidepanel.html?tabId=-1'), null);
   assert.equal(parseSidePanelPortName(sidePanelPortName(42)), 42);
   assert.equal(parseSidePanelPortName('harness-sidepanel-v1:42'), null);

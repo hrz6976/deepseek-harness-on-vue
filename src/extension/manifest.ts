@@ -24,7 +24,7 @@ export default defineManifest({
     type: 'module',
   },
   side_panel: {
-    default_path: 'src/extension/sidepanel.html',
+    default_path: 'src/extension/sidepanel-fallback.html',
   },
   options_page: 'src/extension/options.html',
   permissions: [

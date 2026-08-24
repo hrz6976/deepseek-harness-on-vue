@@ -19,12 +19,13 @@ const approvalTitle = requiredElement<HTMLElement>('#approval-title');
 const approvalBody = requiredElement<HTMLElement>('#approval-body');
 const approvalConfirm = requiredElement<HTMLButtonElement>('#approval-confirm');
 
-const boundTabId = await resolveBoundTabId().catch(error => {
+const binding = await resolveBinding().catch(error => {
   reportStartupFailure(error);
   return suspendStartup();
 });
+const boundTabId = binding.tabId;
 frame.dataset.tabId = String(boundTabId);
-let boundHost = await resolveBoundHost(boundTabId);
+const boundHost = binding.host;
 frame.dataset.host = boundHost;
 let boundOrigin = '';
 let boundOriginPattern = '';
@@ -202,69 +203,18 @@ function flushAuthorizedRead(): void {
   }, '*');
 }
 
-async function resolveBoundTabId(): Promise<number> {
-  const fromPath = parseSidePanelTabId(location.href);
-  if (fromPath != null) return fromPath;
-  // A side-panel extension page is not a normal tab, so `currentWindow` can
-  // be ambiguous during startup. The last focused browser window is the one
-  // whose side panel the user opened.
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tab?.id != null && isInspectableUrl(tab.url)) return tab.id;
-
-  showWaitingForInspectableTab();
-  const tabId = await waitForInspectableTab();
-  sandboxStatus.querySelector('strong')!.textContent = 'Harness 正在启动';
-  sandboxStatus.querySelector('span')!.textContent = '正在加载隔离运行时…';
-  sandboxStatus.classList.remove('failed');
-  return tabId;
-}
-
-async function resolveBoundHost(tabId: number): Promise<string> {
+async function resolveBinding(): Promise<{ tabId: number; host: string }> {
+  const tabId = parseSidePanelTabId(location.href);
+  if (tabId == null) throw new Error('Harness side panel is not bound to a tab.');
   const tab = await chrome.tabs.get(tabId);
   const host = hostFromUrl(tab.url);
   if (!host) throw new Error('当前标签页没有可用的网页 host。');
-  return host;
+  return { tabId, host };
 }
 
 function hostFromUrl(value: string | undefined): string | null {
   if (!isInspectableUrl(value)) return null;
   return new URL(value).host;
-}
-
-function waitForInspectableTab(): Promise<number> {
-  return new Promise(resolve => {
-    let settled = false;
-    const finish = (tab: chrome.tabs.Tab | undefined) => {
-      if (settled || tab?.id == null || !isInspectableUrl(tab.url)) return;
-      settled = true;
-      chrome.tabs.onActivated.removeListener(onActivated);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.windows.onFocusChanged.removeListener(onWindowFocused);
-      resolve(tab.id);
-    };
-    const inspect = (tabId: number) => {
-      void chrome.tabs.get(tabId).then(finish, () => undefined);
-    };
-    const onActivated = ({ tabId }: chrome.tabs.OnActivatedInfo) => inspect(tabId);
-    const onUpdated = (_tabId: number, change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
-      if (change.url || change.status === 'complete') finish(tab);
-    };
-    const onWindowFocused = (windowId: number) => {
-      if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-      void chrome.tabs.query({ active: true, windowId }).then(tabs => finish(tabs[0]), () => undefined);
-    };
-    chrome.tabs.onActivated.addListener(onActivated);
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.windows.onFocusChanged.addListener(onWindowFocused);
-  });
-}
-
-function showWaitingForInspectableTab(): void {
-  sandboxStatus.querySelector('strong')!.textContent = 'Harness 等待网页';
-  sandboxStatus.querySelector('span')!.textContent = '切换到普通 http(s) 网页后将自动继续。';
-  sandboxStatus.classList.remove('failed');
-  sandboxStatus.hidden = false;
-  frame.hidden = true;
 }
 
 async function refreshSiteAccess(): Promise<void> {

@@ -5,8 +5,13 @@ import { resolve } from 'node:path';
 const outputRoot = resolve('dist/extension');
 const manifest = JSON.parse(await readFile(resolve(outputRoot, 'manifest.json'), 'utf8'));
 const sandboxPage = manifest.sandbox?.pages?.[0];
+const fallbackPage = manifest.side_panel?.default_path;
 
 assert.equal(typeof sandboxPage, 'string', 'manifest must declare a sandbox page');
+assert.equal(fallbackPage, 'src/extension/sidepanel-fallback.html', 'manifest must default to the inert side-panel fallback');
+await access(resolve(outputRoot, 'src/extension/sidepanel.html'));
+const fallbackHtml = await readFile(resolve(outputRoot, fallbackPage), 'utf8');
+assert.doesNotMatch(fallbackHtml, /harness-sandbox|<script/iu, 'fallback page must not boot or retain an agent runtime');
 const sandboxHtml = await readFile(resolve(outputRoot, sandboxPage), 'utf8');
 assert.match(sandboxHtml, /<script\s+src="\/sandbox-loader\.js"><\/script>/u,
   'sandbox page must install its startup-error relay before the app entry');

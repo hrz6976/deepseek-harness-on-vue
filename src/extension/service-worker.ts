@@ -15,7 +15,7 @@ import {
   isInspectableUrl,
   pageEventTabId,
   parseSidePanelPortName,
-  sidePanelPath,
+  sidePanelPathForUrl,
 } from './tab-scope';
 import { TrustedCapabilityHost } from './capability-host';
 import { openWebPageInBackground, searchWebInBackground } from './web-browser';
@@ -82,7 +82,7 @@ capabilityHost.register('web', {
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
-void initializeTabPanels().catch(error => console.warn('[harness] could not initialize tab panels', error));
+void configureExistingTabs().catch(error => console.warn('[harness] could not initialize tab panels', error));
 void siteSkills.restoreUserScripts().catch(error => console.warn('[harness] could not restore user scripts', error));
 
 chrome.runtime.onConnect.addListener(port => {
@@ -146,28 +146,14 @@ async function configureExistingTabs(): Promise<void> {
     : [configureTabPanel(tab.id, tab.pendingUrl ?? tab.url)]));
 }
 
-async function initializeTabPanels(): Promise<void> {
-  // Prevent the manifest default panel from opening before its tab-specific
-  // path has been assigned. `configureTabPanel()` re-enables valid tabs.
-  await chrome.action.disable();
-  await configureExistingTabs();
-}
-
 async function configureTabPanel(tabId: number, url: string | undefined): Promise<void> {
   try {
-    if (isInspectableUrl(url)) {
-      await chrome.sidePanel.setOptions({
-        tabId,
-        path: sidePanelPath(tabId),
-        enabled: true,
-      });
-      await chrome.action.enable(tabId);
-    } else {
-      await Promise.all([
-        chrome.sidePanel.setOptions({ tabId, enabled: false }),
-        chrome.action.disable(tabId),
-      ]);
-    }
+    await chrome.sidePanel.setOptions({
+      tabId,
+      path: sidePanelPathForUrl(tabId, url),
+      enabled: true,
+    });
+    await chrome.action.enable(tabId);
   } catch (error) {
     await chrome.action.disable(tabId).catch(() => undefined);
     console.warn(`[harness] could not configure side panel for tab ${tabId}`, error);

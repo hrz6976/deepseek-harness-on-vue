@@ -67,6 +67,11 @@ function pluginDefaults(): Plugin {
 
 export default defineConfig(({ mode }) => {
   const extensionBuild = mode === 'extension';
+  const htmlInput: Record<string, string> = extensionBuild
+    // The manifest owns the fallback entry. The real agent panel is selected
+    // dynamically, so keep it as an explicit HTML entry as well.
+    ? { sidepanel: resolve(projectRoot, 'src/extension/sidepanel.html') }
+    : { standalone: resolve(projectRoot, 'index.html') };
   return {
     plugins: [
       pluginDefaults(),
@@ -88,13 +93,7 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
       sourcemap: true,
       target: 'es2022',
-      ...(!extensionBuild ? {
-        rollupOptions: {
-          input: {
-            standalone: resolve(projectRoot, 'index.html'),
-          },
-        },
-      } : {}),
+      rollupOptions: { input: htmlInput },
     },
   };
 });

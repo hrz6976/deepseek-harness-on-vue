@@ -1,6 +1,7 @@
 import type { PageEvent } from '@/shared/page-protocol';
 
 const SIDE_PANEL_BASE_PATH = 'src/extension/sidepanel.html';
+const SIDE_PANEL_FALLBACK_BASE_PATH = 'src/extension/sidepanel-fallback.html';
 const SIDE_PANEL_PORT_PREFIX = 'harness-sidepanel-v2';
 
 export function isInspectableUrl(value: string | undefined): value is string {
@@ -16,6 +17,15 @@ export function isInspectableUrl(value: string | undefined): value is string {
 export function sidePanelPath(tabId: number): string {
   assertTabId(tabId);
   return `${SIDE_PANEL_BASE_PATH}?tabId=${tabId}`;
+}
+
+export function sidePanelFallbackPath(tabId: number): string {
+  assertTabId(tabId);
+  return `${SIDE_PANEL_FALLBACK_BASE_PATH}?tabId=${tabId}`;
+}
+
+export function sidePanelPathForUrl(tabId: number, url: string | undefined): string {
+  return isInspectableUrl(url) ? sidePanelPath(tabId) : sidePanelFallbackPath(tabId);
 }
 
 export function sidePanelPortName(tabId: number): string {
