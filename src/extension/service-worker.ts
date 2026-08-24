@@ -29,6 +29,7 @@ type DeepSeekThinkingParams = {
 const LLM_CONFIG_KEY = 'secrets.llm';
 
 const ports = new Map<chrome.runtime.Port, number>();
+const activeLlmStreams = new Map<string, AbortController>();
 const mcpHost = new McpHost();
 const capabilityHost = new TrustedCapabilityHost();
 const siteSkills = createSiteSkillRuntime(executePageCommand, emitPageEvent);
@@ -61,8 +62,12 @@ capabilityHost.register('storage', {
   },
 });
 capabilityHost.register('llm', {
-  request: async request => {
+  request: async (request, context) => {
     if (request.action === 'complete') throw new Error('LLM completion requests use the streaming provider path.');
+    if (request.action === 'cancel') {
+      cancelLlmStream(context.tabId, request.input.requestId);
+      return null;
+    }
     const config = await readLlmConfig();
     return toJsonValue(config ? {
       configured: true,
@@ -70,7 +75,7 @@ capabilityHost.register('llm', {
       ...(config.model ? { legacyDefaultModel: config.model } : {}),
     } : { configured: false });
   },
-  stream: request => streamLlmCapability(request),
+  stream: (request, context) => streamLlmCapability(request, context.signal),
 });
 capabilityHost.register('mcp', {
   request: (request, context) => mcpHost.request(request, context.tabId),
@@ -90,7 +95,12 @@ chrome.runtime.onConnect.addListener(port => {
   const tabId = parseSidePanelPortName(port.name);
   if (tabId == null) return;
   ports.set(port, tabId);
-  port.onDisconnect.addListener(() => ports.delete(port));
+  port.onDisconnect.addListener(() => {
+    ports.delete(port);
+    for (const [key, controller] of activeLlmStreams) {
+      if (key.startsWith(`${tabId}:`)) controller.abort();
+    }
+  });
   port.onMessage.addListener(message => {
     void replyToPort(port, tabId, message);
   });
@@ -194,6 +204,9 @@ async function replyToPort(port: chrome.runtime.Port, tabId: number, value: unkn
   }
 
   if (envelope.payload.provider === 'llm' && envelope.payload.action === 'complete') {
+    const controller = new AbortController();
+    const streamKey = llmStreamKey(tabId, envelope.requestId);
+    activeLlmStreams.set(streamKey, controller);
     // Confirm that the envelope crossed the side-panel/service-worker boundary.
     // This is transport acknowledgement only; it is not a model stream event.
     port.postMessage({
@@ -204,7 +217,9 @@ async function replyToPort(port: chrome.runtime.Port, tabId: number, value: unkn
     } satisfies CapabilityStreamChunk);
     let receivedModelEvent = false;
     try {
-      for await (const value of capabilityHost.stream(envelope.payload, { tabId, principal: envelope.principal })) {
+      for await (const value of capabilityHost.stream(envelope.payload, {
+        tabId, principal: envelope.principal, signal: controller.signal,
+      })) {
         receivedModelEvent = true;
         const event = value as unknown as LlmStreamEvent;
         const terminal = event.type === 'done' || event.type === 'error';
@@ -219,6 +234,12 @@ async function replyToPort(port: chrome.runtime.Port, tabId: number, value: unkn
       }
       port.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, stream: true, done: true } satisfies CapabilityStreamChunk);
     } catch (error) {
+      if (controller.signal.aborted) {
+        port.postMessage({
+          channel: 'harness-broker-v1', requestId: envelope.requestId, stream: true, done: true,
+        } satisfies CapabilityStreamChunk);
+        return;
+      }
       port.postMessage({
         channel: 'harness-broker-v1',
         requestId: envelope.requestId,
@@ -226,6 +247,8 @@ async function replyToPort(port: chrome.runtime.Port, tabId: number, value: unkn
         done: true,
         error: `${receivedModelEvent ? 'LLM stream failed' : 'LLM request failed before the first response chunk'}: ${formatError(error)}`,
       } satisfies CapabilityStreamChunk);
+    } finally {
+      if (activeLlmStreams.get(streamKey) === controller) activeLlmStreams.delete(streamKey);
     }
     return;
   }
@@ -247,14 +270,19 @@ function emitPageEvent(event: PageEvent): void {
   }
 }
 
-async function* streamLlmCapability(request: Extract<CapabilityRequest, { provider: 'llm' }>): AsyncIterable<JsonValue> {
+async function* streamLlmCapability(
+  request: Extract<CapabilityRequest, { provider: 'llm' }>,
+  signal?: AbortSignal,
+): AsyncIterable<JsonValue> {
   if (request.action !== 'complete') throw new Error(`LLM action "${request.action}" is not streamable.`);
-  for await (const event of streamLlm(request.input.request)) yield toJsonValue(event);
+  for await (const event of streamLlm(request.input.request, signal)) yield toJsonValue(event);
 }
 
 async function* streamLlm(
   request: Extract<CapabilityRequest, { provider: 'llm'; action: 'complete' }>['input']['request'],
+  signal?: AbortSignal,
 ): AsyncIterable<LlmStreamEvent> {
+  if (signal?.aborted) return;
   const config = await readLlmConfig();
   if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key。');
   const client = new OpenAI({
@@ -318,13 +346,19 @@ async function* streamLlm(
     stream: true,
     stream_options: { include_usage: true },
   };
-  const completion = await client.chat.completions.create(completionRequest);
+  const completion = await client.chat.completions.create(completionRequest, { signal });
   const accumulator = new OpenAiStreamAccumulator();
   for await (const chunk of completion) {
     yield accumulator.ingest(chunk as unknown as OpenAiStreamChunk);
   }
   yield accumulator.done();
 }
+
+function cancelLlmStream(tabId: number, requestId: string): void {
+  activeLlmStreams.get(llmStreamKey(tabId, requestId))?.abort();
+}
+
+const llmStreamKey = (tabId: number, requestId: string) => `${tabId}:${requestId}`;
 
 async function readLlmConfig(): Promise<StoredLlmConfig | null> {
   const value = (await chrome.storage.local.get(LLM_CONFIG_KEY))[LLM_CONFIG_KEY] as StoredLlmConfig | undefined;

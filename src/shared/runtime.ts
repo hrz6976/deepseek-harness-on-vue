@@ -250,7 +250,7 @@ export interface TaskRuntimeService {
 
 export interface BrokerService {
   request(request: CapabilityRequest): Promise<JsonValue>;
-  stream(request: CapabilityRequest): AsyncIterable<JsonValue>;
+  stream(request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue>;
 }
 
 export interface ServiceTypes {

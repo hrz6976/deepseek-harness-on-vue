@@ -24,12 +24,13 @@ class BrokerLlmRuntime extends Service implements LlmService {
           tools: request.tools,
           sessionConfig: request.sessionConfig,
         } },
-      })) {
+      }, request.signal)) {
         const event = value as unknown as LlmStreamEvent;
         if (event.type === 'done' || event.type === 'update' || event.type === 'error') yield event;
         else yield { type: 'error', message: 'Trusted LLM broker returned an invalid stream event.' };
       }
     } catch (error) {
+      if (request.signal.aborted) return;
       yield { type: 'error', message: error instanceof Error ? error.message : String(error) };
     }
   }

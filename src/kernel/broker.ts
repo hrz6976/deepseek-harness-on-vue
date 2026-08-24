@@ -10,7 +10,7 @@ import type { BrokerService, JsonValue, TaskRuntimeService } from '@/shared/runt
 
 export interface BrokerTransport {
   request(principal: CapabilityPrincipal, request: CapabilityRequest): Promise<JsonValue>;
-  stream(principal: CapabilityPrincipal, request: CapabilityRequest): AsyncIterable<JsonValue>;
+  stream(principal: CapabilityPrincipal, request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue>;
 }
 
 const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
@@ -84,8 +84,8 @@ class BrokerRuntime extends Service implements BrokerService {
     return this.transport.request(principalForContext(this.ctx), request);
   }
 
-  stream(request: CapabilityRequest): AsyncIterable<JsonValue> {
-    return this.transport.stream(principalForContext(this.ctx), request);
+  stream(request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue> {
+    return this.transport.stream(principalForContext(this.ctx), request, signal);
   }
 }
 

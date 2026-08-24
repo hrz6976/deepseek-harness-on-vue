@@ -5,6 +5,7 @@ import type { JsonValue } from '@/shared/runtime';
 interface CapabilityHostContext {
   tabId: number;
   principal: CapabilityPrincipal;
+  signal?: AbortSignal;
 }
 
 type ProviderRequest<P extends CapabilityProvider> = Extract<CapabilityRequest, { provider: P }>;

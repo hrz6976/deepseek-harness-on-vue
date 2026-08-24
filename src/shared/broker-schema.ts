@@ -198,6 +198,7 @@ const CapabilityRequestSchema = z.union([
   z.object({ provider: z.literal('storage'), action: z.literal('remove'), contextId: ContextIdSchema, input: z.object({ keys: z.array(z.string()).max(1_000) }) }),
 
   z.object({ provider: z.literal('llm'), action: z.literal('status'), contextId: ContextIdSchema, input: EmptyInputSchema }),
+  z.object({ provider: z.literal('llm'), action: z.literal('cancel'), contextId: ContextIdSchema, input: z.object({ requestId: z.string().min(1) }) }),
   z.object({
     provider: z.literal('llm'),
     action: z.literal('complete'),
