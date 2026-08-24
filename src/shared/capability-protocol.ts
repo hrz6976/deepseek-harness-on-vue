@@ -74,6 +74,7 @@ export type WorkspaceCapabilityRequest =
 
 export type SiteSkillCapabilityRequest =
   | { provider: 'site-skill'; action: 'list'; contextId?: string; input: Record<string, never> }
+  | { provider: 'site-skill'; action: 'inspect'; contextId?: string; input: { id: string } }
   | { provider: 'site-skill'; action: 'save'; contextId?: string; input: { skill: SiteSkill } }
   | { provider: 'site-skill'; action: 'remove'; contextId?: string; input: { id: string } }
   | { provider: 'site-skill'; action: 'apply'; contextId?: string; input: { id: string } };

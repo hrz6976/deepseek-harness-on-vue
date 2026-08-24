@@ -68,12 +68,13 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   const names = tools.schemas().map(tool => tool.name);
 
   assert.equal(entry.status, 'active');
-  assert.equal(names.length, 18, 'only dynamic observation and live-rule tools stay out of the prompt until loaded');
+  assert.equal(names.length, 19, 'only dynamic observation and live-rule tools stay out of the prompt until loaded');
   assert.ok(names.includes('page_snapshot'));
   assert.ok(names.includes('page_style_inspect'));
   assert.ok(names.includes('page_script_run'));
   assert.ok(names.includes('page_recipe_save'));
   assert.ok(names.includes('page_recipe_get'));
+  assert.ok(names.includes('page_recipe_debug'));
   assert.equal(names.includes('page_live_rules_apply'), false);
   const dynamic = tools.catalog().find(group => group.id === 'page.dynamic');
   assert.ok(dynamic?.tools.includes('page_observe_start'));
@@ -97,7 +98,7 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   assert.match(prompt.assemble(), /same agent run/);
   assert.match(prompt.assemble(), /share DOM but not JavaScript globals/);
   assert.match(prompt.assemble(), /missing from MAIN is expected/);
-  assert.match(prompt.assemble(), /page_recipe_list and page_recipe_get as strictly read-only/);
+  assert.match(prompt.assemble(), /page_recipe_list, page_recipe_get, and page_recipe_debug as strictly read-only/);
   assert.match(prompt.assemble(), /never save, remove, disable, replace, stub, duplicate/);
 
   assert.equal(await unmountPlugin('page'), true);
@@ -140,6 +141,27 @@ test('page_recipe_get reads persisted userscript source in bounded chunks', asyn
 
   const missing = String(await tools.call('page_recipe_get', { id: 'missing', offset: 0, limit: 6_000 }));
   assert.equal(missing, 'Error: page plugin "missing" does not exist');
+});
+
+test('page_recipe_debug reads Chrome registration evidence without mutating the recipe', async () => {
+  await applyTestPlugin(toolsPlugin);
+  await applyTestPlugin(promptPlugin);
+  const requests: unknown[] = [];
+  await provideTestService('broker', {
+    async request(request: unknown) {
+      requests.push(request);
+      return { recipeId: 'nga-hover', registrationCount: 1, registrations: [{ matchesStoredSource: true }] };
+    },
+    async *stream() {},
+  });
+
+  const entry = await mountPlugin('page', pagePlugin, { builtin: true });
+  await entry.fiber?.await();
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
+  const result = String(await tools.call('page_recipe_debug', { id: 'nga-hover' }));
+
+  assert.deepEqual(requests, [{ provider: 'site-skill', action: 'inspect', input: { id: 'nga-hover' } }]);
+  assert.match(result, /"matchesStoredSource": true/);
 });
 
 test('capability discovery prioritizes loadable groups and capability loading activates them', async () => {

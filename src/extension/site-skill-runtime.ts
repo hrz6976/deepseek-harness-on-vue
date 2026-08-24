@@ -19,6 +19,14 @@ export function createSiteSkillRuntime(
   execute: (command: PageCommand, tabId: number) => Promise<JsonValue>,
   emit: (event: PageEvent) => void,
 ) {
+  let userScriptMutationQueue = Promise.resolve();
+
+  function queueUserScriptMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = userScriptMutationQueue.catch(() => undefined).then(operation);
+    userScriptMutationQueue = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+
   async function list(): Promise<SiteSkill[]> {
     const stored = (await chrome.storage.local.get(STORAGE_KEY))[STORAGE_KEY] as SiteSkill[] | undefined;
     return Array.isArray(stored)
@@ -27,36 +35,44 @@ export function createSiteSkillRuntime(
   }
 
   async function save(skill: SiteSkill): Promise<SiteSkill> {
-    const skills = await list();
-    const existing = skills.find(item => item.id === skill.id);
-    const saved: SiteSkill = isSiteUserScript(skill)
-      ? { ...skill, createdAt: existing?.createdAt ?? skill.createdAt, updatedAt: Date.now() }
-      : {
-          ...skill,
-          type: 'recipe',
-          ...(skill.operations ? { operations: skill.operations.map((operation, index) => persistentOperation(skill.id, index, operation)) } : {}),
-          createdAt: existing?.createdAt ?? skill.createdAt,
-          updatedAt: Date.now(),
-        };
+    return queueUserScriptMutation(async () => {
+      const skills = await list();
+      const existing = skills.find(item => item.id === skill.id);
+      const saved: SiteSkill = isSiteUserScript(skill)
+        ? { ...skill, createdAt: existing?.createdAt ?? skill.createdAt, updatedAt: Date.now() }
+        : {
+            ...skill,
+            type: 'recipe',
+            ...(skill.operations ? { operations: skill.operations.map((operation, index) => persistentOperation(skill.id, index, operation)) } : {}),
+            createdAt: existing?.createdAt ?? skill.createdAt,
+            updatedAt: Date.now(),
+          };
+      const nextSkills = [...skills.filter(item => item.id !== saved.id), saved];
 
-    if (existing && isSiteUserScript(existing) && !isSiteUserScript(saved)) await unregisterUserScript(existing.id);
-    if (isSiteUserScript(saved)) {
-      if (saved.enabled) await upsertUserScript(saved);
-      else await unregisterUserScript(saved.id);
-    }
-    await chrome.storage.local.set({ [STORAGE_KEY]: [...skills.filter(item => item.id !== saved.id), saved] });
-    emit({ type: 'recipe/installed', recipe: saved });
-    return saved;
+      if (existing && isSiteUserScript(existing) && !isSiteUserScript(saved)) await unregisterUserScript(existing.id);
+      if (isSiteUserScript(saved)) {
+        if (saved.enabled) await upsertUserScript(saved);
+        else await unregisterUserScript(saved.id);
+      }
+      await unregisterStaleUserScripts(nextSkills);
+      await chrome.storage.local.set({ [STORAGE_KEY]: nextSkills });
+      emit({ type: 'recipe/installed', recipe: saved });
+      return saved;
+    });
   }
 
   async function remove(id: string, tabId: number): Promise<null> {
-    const skills = await list();
-    const existing = skills.find(skill => skill.id === id);
-    if (existing && isSiteUserScript(existing)) await unregisterUserScript(existing.id);
-    await chrome.storage.local.set({ [STORAGE_KEY]: skills.filter(skill => skill.id !== id) });
-    await removeLiveRules(id, tabId);
-    emit({ type: 'recipe/disposed', recipeId: id });
-    return null;
+    return queueUserScriptMutation(async () => {
+      const skills = await list();
+      const existing = skills.find(skill => skill.id === id);
+      const nextSkills = skills.filter(skill => skill.id !== id);
+      if (existing && isSiteUserScript(existing)) await unregisterUserScript(existing.id);
+      await unregisterStaleUserScripts(nextSkills);
+      await chrome.storage.local.set({ [STORAGE_KEY]: nextSkills });
+      await removeLiveRules(id, tabId);
+      emit({ type: 'recipe/disposed', recipeId: id });
+      return null;
+    });
   }
 
   async function apply(id: string, tabId: number): Promise<JsonValue> {
@@ -84,6 +100,7 @@ export function createSiteSkillRuntime(
   async function request(request: SiteSkillRequest, tabId: number): Promise<JsonValue> {
     switch (request.action) {
       case 'list': return toJsonValue(await list());
+      case 'inspect': return inspectUserScriptRegistration(request.input.id);
       case 'save': {
         const saved = await save(request.input.skill);
         if (isSiteUserScript(saved) || !saved.enabled) await removeLiveRules(saved.id, tabId);
@@ -128,20 +145,22 @@ export function createSiteSkillRuntime(
   }
 
   async function restoreUserScripts(): Promise<void> {
-    const api = await userScriptsApi();
-    if (!api) return;
-    const scripts = (await list()).filter(isSiteUserScript);
-    const enabled = new Map(scripts.filter(script => script.enabled)
-      .map(script => [registrationId(script.id), script]));
-    const registered = (await api.getScripts()).filter(script => script.id.startsWith(USER_SCRIPT_PREFIX));
-    const stale = registered.filter(script => !enabled.has(script.id)).map(script => script.id);
-    if (stale.length) await api.unregister({ ids: stale });
-    const registeredIds = new Set(registered.map(script => script.id));
-    for (const [id, script] of enabled) {
-      const definition = registeredUserScript(script);
-      if (registeredIds.has(id)) await api.update([definition]);
-      else await api.register([definition]);
-    }
+    return queueUserScriptMutation(async () => {
+      const api = await userScriptsApi();
+      if (!api) return;
+      const scripts = (await list()).filter(isSiteUserScript);
+      const enabled = new Map(scripts.filter(script => script.enabled)
+        .map(script => [registrationId(script.id), script]));
+      const registered = (await api.getScripts()).filter(script => script.id.startsWith(USER_SCRIPT_PREFIX));
+      const stale = registered.filter(script => !enabled.has(script.id)).map(script => script.id);
+      if (stale.length) await api.unregister({ ids: stale });
+      const registeredIds = new Set(registered.map(script => script.id));
+      for (const [id, script] of enabled) {
+        const definition = registeredUserScript(script);
+        if (registeredIds.has(id)) await api.update([definition]);
+        else await api.register([definition]);
+      }
+    });
   }
 
   function persistentOperation(skillId: string, index: number, operation: PatchOperation): PatchOperation {
@@ -193,6 +212,80 @@ export function createSiteSkillRuntime(
     if (!api) return;
     const scriptId = registrationId(id);
     if ((await api.getScripts({ ids: [scriptId] })).length) await api.unregister({ ids: [scriptId] });
+  }
+
+  async function unregisterStaleUserScripts(skills: SiteSkill[]): Promise<void> {
+    const api = await userScriptsApi();
+    if (!api) return;
+    const enabledIds = new Set(skills.filter(isSiteUserScript)
+      .filter(script => script.enabled)
+      .map(script => registrationId(script.id)));
+    const stale = (await api.getScripts())
+      .filter(script => script.id.startsWith(USER_SCRIPT_PREFIX) && !enabledIds.has(script.id))
+      .map(script => script.id);
+    if (stale.length) await api.unregister({ ids: stale });
+  }
+
+  async function inspectUserScriptRegistration(id: string): Promise<JsonValue> {
+    const skills = await list();
+    const skill = skills.find(candidate => candidate.id === id);
+    const expectedId = registrationId(id);
+    let registered: chrome.userScripts.RegisteredUserScript[] = [];
+    let apiError: string | null = null;
+    try { registered = await chrome.userScripts.getScripts(); }
+    catch (error) { apiError = error instanceof Error ? error.message : String(error); }
+
+    const harnessRegistrations = registered.filter(script => script.id.startsWith(USER_SCRIPT_PREFIX));
+    const matching = harnessRegistrations.filter(script => script.id === expectedId);
+    const expected = skill && isSiteUserScript(skill) && skill.enabled ? registeredUserScript(skill) : null;
+    const expectedSource = expected ? registeredSource(expected) : null;
+    const enabledIds = new Set(skills.filter(isSiteUserScript)
+      .filter(candidate => candidate.enabled)
+      .map(candidate => registrationId(candidate.id)));
+    const inspected = await Promise.all(matching.map(async script => {
+      const source = registeredSource(script);
+      return {
+        id: script.id,
+        matches: script.matches ?? [],
+        runAt: script.runAt ?? 'document_idle',
+        world: script.world ?? 'USER_SCRIPT',
+        sourceCharacters: source.length,
+        sourceSha256: await sha256(source),
+        matchesStoredSource: expectedSource != null && source === expectedSource,
+      };
+    }));
+
+    return toJsonValue({
+      recipeId: id,
+      apiAvailable: apiError == null,
+      apiError,
+      stored: skill ? {
+        type: skill.type,
+        enabled: skill.enabled,
+        updatedAt: skill.updatedAt,
+        ...(isSiteUserScript(skill) ? {
+          registrationId: expectedId,
+          sourceCharacters: skill.source.length,
+          sourceSha256: await sha256(skill.source),
+          expectedRegisteredSourceSha256: await sha256(registeredSource(registeredUserScript(skill))),
+        } : {}),
+      } : null,
+      registrationCount: inspected.length,
+      registrations: inspected,
+      harnessRegistrationIds: harnessRegistrations.map(script => script.id),
+      staleRegistrationIds: harnessRegistrations
+        .filter(script => !enabledIds.has(script.id))
+        .map(script => script.id),
+    });
+  }
+
+  function registeredSource(script: chrome.userScripts.RegisteredUserScript): string {
+    return (script.js ?? []).map(source => source.code ?? `[file:${source.file}]`).join('\n');
+  }
+
+  async function sha256(value: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   }
 
   function originPattern(origin: string): string {

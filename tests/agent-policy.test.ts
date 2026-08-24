@@ -8,7 +8,8 @@ test('page-agent policy separates host DOM changes from sandbox plugins', () => 
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /explicit approval/i);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /MAIN.*USER_SCRIPT share the page DOM but have separate JavaScript globals/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /Never use a MAIN-world global lookup/);
-  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /page_recipe_list and page_recipe_get requests as strictly read-only/);
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /page_recipe_list, page_recipe_get, and page_recipe_debug requests as strictly read-only/);
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /compare persisted and Chrome-registered source hashes/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /Never change a recipe id or create a second copy/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /create_plugin creates a sandbox capability/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /mcp_connect connects the built-in client/);

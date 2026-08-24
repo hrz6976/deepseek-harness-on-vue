@@ -189,6 +189,7 @@ const CapabilityRequestSchema = z.union([
   z.object({ provider: z.literal('workspace'), action: z.literal('remove'), contextId: ContextIdSchema, input: z.object({ path: z.string().min(1).max(1_000), expectedRevision: z.string().nullable().optional() }) }),
 
   z.object({ provider: z.literal('site-skill'), action: z.literal('list'), contextId: ContextIdSchema, input: EmptyInputSchema }),
+  z.object({ provider: z.literal('site-skill'), action: z.literal('inspect'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1) }) }),
   z.object({ provider: z.literal('site-skill'), action: z.literal('save'), contextId: ContextIdSchema, input: z.object({ skill: SiteSkillSchema }) }),
   z.object({ provider: z.literal('site-skill'), action: z.literal('remove'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1) }) }),
   z.object({ provider: z.literal('site-skill'), action: z.literal('apply'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1) }) }),
