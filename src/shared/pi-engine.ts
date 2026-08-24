@@ -59,14 +59,13 @@ export function toPiMessages(messages: HarnessMessage[], modelId: string): Messa
 }
 
 export function createPiStream(cfg: PiEngineConfig): (request: LlmRequest) => AsyncIterable<LlmStreamEvent> {
-  // Relative baseURL ("/proxy") -> absolute: the SDK underneath pi-ai joins
-  // URLs and rejects relative bases. Empty key -> "pi-local" placeholder: the
-  // dev proxy replaces that token with the local pi credential server-side,
-  // so the real key never enters the page.
+  // The SDK underneath pi-ai joins endpoint URLs and requires an absolute
+  // base. An empty key uses a harmless placeholder; local Bridge authenticates
+  // upstream from its own environment, so provider keys never enter the page.
   const baseURL = typeof location !== 'undefined' ? new URL(cfg.baseURL, location.origin).href.replace(/\/+$/, '') : cfg.baseURL;
   const apiKey = cfg.apiKey || 'pi-local';
   // provider id "deepseek" keeps pi-ai's compat auto-detect on the DeepSeek
-  // path (thinking format, max_tokens field) even behind a proxy baseURL.
+  // path (thinking format, max_tokens field) even behind a Bridge base URL.
   const provider = createProvider<'openai-completions'>({
     id: 'deepseek',
     name: 'DeepSeek (custom endpoint)',
@@ -117,7 +116,7 @@ async function* withIdleGuard<T>(stream: AsyncIterable<T>, signal?: AbortSignal)
     catch (error: unknown) {
       if (error instanceof Error && error.message === 'IDLE_TIMEOUT' && !signal?.aborted) {
         await it.return?.();
-        throw new Error(`stream silent for ${IDLE_MS / 1000}s, treating as dropped (gateway/proxy cut)`);
+        throw new Error(`stream silent for ${IDLE_MS / 1000}s, treating as dropped (gateway/Bridge cut)`);
       }
       throw error;
     } finally { clearTimeout(timer); }

@@ -24,12 +24,12 @@ npm run check
 ```bash
 npm install
 npm run build          # or: npm run watch
-node serve.mjs 7100    # dist/ + /proxy → https://api.deepseek.com (override: LLM_PROXY_TARGET)
-# then open http://localhost:7100
+npm run bridge         # local AI gateway on http://localhost:8787
+npm run serve          # static dist/standalone on http://localhost:4000
 ```
 
-- **Real engine**: Base URL `/proxy`, model e.g. `deepseek-v4-flash`, paste an API key, Mount LLM plugin. (Direct `https://api.deepseek.com` fails CORS in browsers by design — that's what /proxy is for. Explicit gateway override: `LLM_PROXY_TARGET=... node serve.mjs`.)
-- **Local pi credentials (keyless)**: if `~/.pi/agent/auth.json` exists, serve.mjs picks an api_key credential (`PI_AUTH_PROVIDER` to force one; else deepseek, then opencode-go), auto-targets the matching gateway, and injects the Bearer token server-side whenever the page sends no key (the page uses a `pi-local` placeholder). Leave the API key field EMPTY, Base URL `/proxy`, Mount. The key never enters the browser.
+- **Real engine**: Base URL `http://localhost:8787/v1`, model e.g. `deepseek-v4-flash`, and leave the page API key empty. Bridge reads provider credentials from its git-ignored `.env` and explicitly allows the standalone origins on port 4000.
+- **Kimi coding through opencode**: use `kimi-k2.7-code` or `kimi-k3` with the same Bridge URL. Direct third-party API calls remain subject to the upstream's browser CORS policy.
 - **Mock engine**: tick "mock engine", Mount. No key, no network; drives a canned `run_js` round + streamed text through the entire real pipeline.
 - Automated coverage: `npm test` (kernel logic); scenarios marked ✅ below were also verified by Playwright smoke runs on 2026-08-20 (fresh Chrome, mock engine + `__harness` API).
 
@@ -44,8 +44,8 @@ node serve.mjs 7100    # dist/ + /proxy → https://api.deepseek.com (override: 
 7. **`remove_plugin`.** Expect: panel, tools, prompt section, listeners all gone; no DOM residue; `.plugins/<name>.js` deleted. ✅
 8. **Waterfall veto.** Create a guard plugin, e.g. setup calling `__harness.useToolGuard(req => req.name === 'run_js' ? 'run_js is disabled by policy' : null)`. Expect: next `run_js` call blocked with "vetoed by a plugin: …" as its result; unmounting the guard re-enables. (~10-line approval plugin = the demoable trust-model guard for `create_plugin`/`run_js`.)
 9. **Conditional contribution.** Plugin with `<AgentTool v-if="enabled" …>` and a panel toggle. Expect: toggling removes/adds the tool (and its prompt section) from the NEXT request — inspect the proxied request body's `tools` array.
-10. **Kill the proxy.** Stop serve.mjs mid-session, run a goal. Expect: LLM error lands as a note (with CORS/proxy hint when relevant); harness stays fully usable; restarting the proxy recovers.
-11. **Mock engine end-to-end.** No key, no proxy: mock drives a canned tool round (a REAL `run_js` Worker execution returning `42`) + streamed text. ✅
+10. **Kill Bridge.** Stop `npm run bridge` mid-session, run a goal. Expect: LLM error lands as a note (with the Bridge/CORS hint when relevant); harness stays fully usable; restarting Bridge recovers.
+11. **Mock engine end-to-end.** No key, no Bridge: mock drives a canned tool round (a REAL `run_js` Worker execution returning `42`) + streamed text. ✅
 12. **Duplicate name.** Second plugin declaring tool `x` while another owns it: creation fails loudly (PluginHost error card: `duplicate tool "x"`), no silent shadowing. Same-plugin HMR remount does NOT count as a duplicate. ✅
 13. **Forced `new Function` path.** Simulate Blob-import failure (e.g. DevTools overrides blocking `blob:`, or temporarily patch `URL.createObjectURL` to throw) and load a canonical-dialect plugin. Expect: it still loads via `translateESM` + `new Function`. The *dialect subset* itself is covered by `npm test`; note the fallback deliberately re-throws real `SyntaxError`s.
 14. **Mid-turn removal race (snapshot).** While the model is streaming a turn that will call tool `t`, remove the plugin owning `t`. Expect: the in-flight turn still executes `t` against the request snapshot; `t` is absent from the *next* request.

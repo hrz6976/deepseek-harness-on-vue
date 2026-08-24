@@ -10,8 +10,12 @@
     "build:fixtures": "vite build --config examples/vite.config.ts",
     "dev:fixtures": "vite --config examples/vite.config.ts",
     "watch": "node scripts/watch-extension.mjs",
+    "bridge": "npm --prefix bridge start",
+    "bridge:dev": "npm --prefix bridge run dev",
     "serve": "node serve.mjs",
-    "dev": "npm run watch",
+    "dev": "npm run dev:ext",
+    "dev:web": "vite --mode standalone",
+    "dev:ext": "vite --mode extension",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build && npm run build:standalone && npm run build:fixtures"

@@ -75,7 +75,7 @@ function setupLlm(cfg: LlmConfig) {
 export default {
   name: 'llm',
   props: { cfg: Object },
-  setup: (props: { cfg?: LlmConfig }) => setupLlm(props.cfg ?? { baseURL: '/proxy', model: 'deepseek-chat' }),
+  setup: (props: { cfg?: LlmConfig }) => setupLlm(props.cfg ?? { baseURL: 'http://localhost:8787/v1', model: 'deepseek-v4-flash' }),
 };
 
 // Test/embedding face: same plugin with the config frozen in.

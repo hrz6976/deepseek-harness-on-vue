@@ -103,7 +103,7 @@ export const loopPlugin = {
               // context-overflow errors) by setting retry — one grant per run.
               const rec = await bus.waterfall('loop/llm-error', { message: errMsg, messages, signal: controller.signal, retry: false });
               if (rec.retry && !recovered && !controller.signal.aborted) { recovered = true; turn--; note('retrying after recovery'); continue; }
-              const hint = /fetch/i.test(errMsg) ? ' (network/CORS? browsers block direct third-party API calls — use the /proxy route, see serve.mjs)' : '';
+              const hint = /fetch/i.test(errMsg) ? ' (network/CORS? start Bridge with npm run bridge and use http://localhost:8787/v1)' : '';
               note(`LLM call failed: ${errMsg}${hint}`);
               return;
             }

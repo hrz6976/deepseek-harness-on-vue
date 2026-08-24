@@ -249,7 +249,7 @@ function emitPageEvent(event: PageEvent): void {
 
 async function* streamLlm(request: Extract<BrokerRequest, { kind: 'llm/complete' }>['request']): AsyncIterable<LlmStreamEvent> {
   const config = await readLlmConfig();
-  if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key，或启用本地 proxy。');
+  if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key，或启用本地 Bridge。');
   // Same engine as the sandbox llm plugin — one implementation, no extra SDK.
   // The wire format carries no AbortSignal; each stream gets its own.
   yield* createPiStream(config)({ ...request, signal: new AbortController().signal });
@@ -258,8 +258,8 @@ async function* streamLlm(request: Extract<BrokerRequest, { kind: 'llm/complete'
 async function readLlmConfig(): Promise<StoredLlmConfig | null> {
   const value = (await chrome.storage.local.get(LLM_CONFIG_KEY))[LLM_CONFIG_KEY] as StoredLlmConfig | undefined;
   if (!value?.baseURL || !value.model || (!value.apiKey && !value.localProxy)) return null;
-  // A local-proxy config may retain an old direct API key so switching back is
-  // convenient, but it must never win over the proxy's ~/.pi credential.
+  // A local-Bridge config may retain an old direct API key so switching back is
+  // convenient, but it must never be sent to Bridge instead of its own key.
   return value.localProxy ? { ...value, apiKey: undefined } : value;
 }
 

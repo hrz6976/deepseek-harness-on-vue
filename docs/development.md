@@ -4,21 +4,22 @@ Three processes make up the interactive dev loop for the Chrome extension:
 
 | Command | Port | Purpose |
 |---|---|---|
-| `npm run dev` | 5173 | CRXJS + Vite dev server: HMR for side panel / options / sandbox / service worker |
-| `npm run serve` | 7100 | Static standalone server + LLM proxy (`/proxy/*` → DeepSeek or a local pi credential; injects `~/.pi/agent/auth.json` keys for keyless requests) |
+| `npm run dev` / `npm run web:ext` | 5173 | CRXJS + Vite dev server: HMR for side panel / options / sandbox / service worker |
+| `npm run dev:web` | 4000 | Standalone Vue web app with HMR |
+| `npm run bridge` | 8787 | Local multi-provider AI Bridge; reads git-ignored credentials from `bridge/.env` |
+| `npm run serve` | 4000 | Built standalone web app only; run `npm run build:standalone` first |
 | `npm run dev:fixtures` | 5174 | Test host pages: `/legacy-host/` (static) and `/react-host/` (React 19 reconciliation demo) |
 
 ## Setup
 
-1. Start all three (each in its own terminal, or backgrounded).
+1. Start `npm run dev`, `npm run bridge`, and `npm run dev:fixtures` (each in its own terminal, or backgrounded).
 2. `chrome://extensions` → Developer mode → **Load unpacked** → select `dist/extension`
    (CRXJS writes a dev manifest there pointing pages at `localhost:5173`).
 3. Extension **Options** → LLM config:
-   - Base URL `http://localhost:7100/proxy` — must be ABSOLUTE. In dev mode the
-     extension pages are served from `localhost:5173`, so a relative `/proxy`
-     resolves against Vite and 404s.
-   - API key may stay empty if `serve.mjs` found a pi credential (see its startup log).
-   - Model must exist on whichever endpoint the proxy targets.
+   - Base URL `http://localhost:8787/v1`.
+   - Leave the API key empty in local Bridge mode; provider keys stay in `bridge/.env`.
+   - `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2.7-code`, and `kimi-k3`
+     route through the configured `opencode-go` provider.
 4. Open a fixture tab → click the extension icon → **Authorize & read** → snapshot /
    patch / verify / revert.
 5. For `page/eval` only: enable "Allow user scripts" in the extension's details page.

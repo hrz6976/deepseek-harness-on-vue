@@ -9,7 +9,7 @@ export const syslogPlugin = {
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
-      <h2>Runtime log (mount / unmount / HMR)</h2>
+      <h2>Activity</h2>
       <div id="syslog" ref="el"><div v-for="(l, i) in entries" :key="i" :class="l.level">· {{ l.text }}</div></div>
     </div>
   </Teleport>`,

@@ -8,8 +8,8 @@ export const previewPlugin = {
   template: `
   <Teleport v-if="target && html" :to="target">
     <div class="panel">
-      <h2>Preview (iframe sandbox)</h2>
-      <button class="primary" @click="show = !show">{{ show ? 'Close preview' : 'Preview index.html' }}</button>
+      <h2>Preview</h2>
+      <button class="primary" @click="show = !show">{{ show ? 'Close preview' : 'Open preview' }}</button>
       <iframe v-if="show" sandbox="allow-scripts" :srcdoc="html"></iframe>
     </div>
   </Teleport>`,

@@ -7,26 +7,33 @@ import { useService } from '../../kernel/services';
 import { useLayoutTarget } from '../../kernel/contrib';
 
 const LS = { baseURL: 'harness.baseURL', model: 'harness.model', apiKey: 'harness.apiKey', mock: 'harness.mock', auto: 'harness.autoconnect' };
+const BRIDGE_BASE_URL = 'http://localhost:8787/v1';
+
+function savedBaseURL(): string {
+  const saved = localStorage.getItem(LS.baseURL);
+  if (!saved || saved === '/proxy' || saved === 'http://localhost:7100/proxy') return BRIDGE_BASE_URL;
+  return saved;
+}
 
 export const settingsPlugin = {
   name: 'settings',
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
-      <h2>Model connection</h2>
+      <h2>Model</h2>
       <div class="row">
         <div><label>Base URL</label><input type="text" v-model="cfg.baseURL" :disabled="connected"></div>
         <div><label>Model</label><input type="text" v-model="cfg.model" :disabled="connected"></div>
       </div>
-      <label>API key (localStorage only; leave empty on a local proxy to use local pi credentials)</label>
-      <input type="password" v-model="cfg.apiKey" :disabled="connected" placeholder="sk-... or empty for pi auth">
-      <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-        <input type="checkbox" v-model="cfg.mock" :disabled="connected" style="width:auto;margin:0"> mock engine (offline, no key needed)
+      <label>API key</label>
+      <input type="password" v-model="cfg.apiKey" :disabled="connected" placeholder="Optional when using local Bridge">
+      <label class="checkbox-row">
+        <input type="checkbox" v-model="cfg.mock" :disabled="connected"> Use mock model
       </label>
-      <button class="primary" @click="connect" :disabled="connected || (!cfg.apiKey && !cfg.mock && !viaProxy)">Mount LLM plugin</button>
-      <button class="danger" @click="disconnect" :disabled="!connected || running">Unmount LLM plugin</button>
-      <span style="font-size:12px"><span class="dot" :class="connected ? 'on' : 'off'"></span>{{ connected ? engineName : 'not connected' }}</span>
-      <div v-if="connectionMessage" style="font-size:12px;margin-top:8px" :style="{ color: connectionError ? '#b42318' : '#28704b' }">{{ connectionMessage }}</div>
+      <button class="primary" @click="connect" :disabled="connected || (!cfg.apiKey && !cfg.mock && !viaProxy)">Connect</button>
+      <button class="danger" @click="disconnect" :disabled="!connected || running">Disconnect</button>
+      <span class="connection-status"><span class="dot" :class="connected ? 'on' : 'off'"></span>{{ connected ? engineName : 'Not connected' }}</span>
+      <div v-if="connectionMessage" class="connection-message" :class="{ error: connectionError }">{{ connectionMessage }}</div>
     </div>
   </Teleport>`,
   setup() {
@@ -35,7 +42,7 @@ export const settingsPlugin = {
     const loopSvc = useService('loop');
     const mgrSvc = useService('manager');
     const cfg = reactive({
-      baseURL: localStorage.getItem(LS.baseURL) || '/proxy',
+      baseURL: savedBaseURL(),
       model: localStorage.getItem(LS.model) || 'deepseek-v4-flash',
       apiKey: localStorage.getItem(LS.apiKey) || '',
       mock: localStorage.getItem(LS.mock) === '1',
@@ -45,8 +52,8 @@ export const settingsPlugin = {
     const engineName = computed(() => llmSvc.value?.engineName?.value ?? '');
     const connectionMessage = ref('');
     const connectionError = computed(() => connectionMessage.value.startsWith('Error:'));
-    // Same-origin or localhost proxy = serve.mjs can inject the local pi
-    // credential. Absolute localhost URLs are useful from the extension.
+    // Bridge keeps provider credentials outside the browser, so its loopback
+    // endpoint does not require an API key in the page.
     const viaProxy = computed(() => isLocalProxy(cfg.baseURL) || cfg.baseURL.startsWith('/'));
 
     const connect = async () => {

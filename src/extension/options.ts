@@ -23,15 +23,20 @@ form.addEventListener('submit', event => {
 
 localProxyInput.addEventListener('change', () => {
   if (localProxyInput.checked && !isLocalProxyUrl(baseUrlInput.value)) {
-    baseUrlInput.value = 'http://localhost:7100/proxy';
+    baseUrlInput.value = 'http://localhost:8787/v1';
   }
   syncAuthMode();
 });
 
 async function restore(): Promise<void> {
   const stored = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
-  if (!stored) return;
-  baseUrlInput.value = stored.baseURL;
+  if (!stored) {
+    syncAuthMode();
+    return;
+  }
+  baseUrlInput.value = stored.localProxy && (stored.baseURL === '/proxy' || stored.baseURL === 'http://localhost:7100/proxy')
+    ? 'http://localhost:8787/v1'
+    : stored.baseURL;
   modelInput.value = stored.model;
   localProxyInput.checked = stored.localProxy === true || stored.apiKey === 'pi-local';
   syncAuthMode();
@@ -43,7 +48,7 @@ async function save(): Promise<void> {
   try {
     const endpoint = new URL(baseUrlInput.value);
     if (localProxyInput.checked && !isLocalProxyUrl(endpoint.href)) {
-      throw new Error('本地 proxy 必须使用 localhost、127.0.0.1 或 ::1 地址。');
+      throw new Error('本地 Bridge 必须使用 localhost、127.0.0.1 或 ::1 地址。');
     }
     const baseURL = endpoint.href.replace(/\/$/u, '');
     const pattern = `${endpoint.origin}/*`;
@@ -53,7 +58,7 @@ async function save(): Promise<void> {
     if (!allowed) throw new Error('未获得该 API origin 的网络权限。');
     const previous = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
     const apiKey = apiKeyInput.value || previous?.apiKey;
-    if (!localProxyInput.checked && !apiKey) throw new Error('请输入 API key，或勾选“使用本地 proxy”。');
+    if (!localProxyInput.checked && !apiKey) throw new Error('请输入 API key，或勾选“使用本地 Bridge”。');
     const config: StoredLlmConfig = {
       baseURL,
       model: modelInput.value.trim(),
@@ -83,7 +88,7 @@ function isLocalProxyUrl(value: string): boolean {
 
 function syncAuthMode(): void {
   apiKeyInput.disabled = localProxyInput.checked;
-  apiKeyInput.placeholder = localProxyInput.checked ? '本地 proxy 模式不需要 key' : '已有 key；留空则保留';
+  apiKeyInput.placeholder = localProxyInput.checked ? '本地 Bridge 模式不需要 key' : '已有 key；留空则保留';
 }
 
 function setStatus(message: string, state: 'progress' | 'success' | 'error'): void {

@@ -12,37 +12,38 @@ export const chatPlugin = {
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
-      <h2>Conversation <span v-if="engineName" class="badge">{{ engineName }}</span><span v-if="ctxInfo" class="badge">{{ ctxInfo }}</span></h2>
+      <h2>Chat <span v-if="engineName" class="badge">{{ engineName }}</span><span v-if="ctxInfo" class="badge">{{ ctxInfo }}</span></h2>
       <div id="chat" ref="chatEl">
+        <p v-if="!visible.length" class="empty-state">What would you like to build?</p>
         <template v-for="(m, i) in visible" :key="i">
-          <div v-if="m.role === 'user'" class="msg user"><span class="who">you</span>{{ m.text }}</div>
+          <div v-if="m.role === 'user'" class="msg user"><span class="who">You</span>{{ m.text }}</div>
           <div v-else-if="m.role === 'assistant'" class="msg assistant">
-            <span class="who">agent<span v-if="m.status==='streaming'"> · streaming</span></span>
+            <span class="who">Agent<span v-if="m.status==='streaming'"> · Working</span></span>
             <details v-if="m.thinking" class="thinking" :open="m.status==='streaming'">
-              <summary>thinking ({{ m.thinking.length }} chars)</summary>
+              <summary>Thinking</summary>
               <div class="body">{{ m.thinking }}</div>
             </details>
             <span :class="{ cursor: m.status==='streaming' && !m.toolCalls.length }">{{ m.text || (m.toolCalls.length ? '' : '…') }}</span>
             <div v-for="(tc, j) in m.toolCalls" :key="j" class="toolcall">
-              <span class="status" :class="tc.status">{{ tc.status === 'done' ? '✓ done' : tc.status === 'running' ? 'running' : 'pending' }}</span>
-              🔧 {{ tc.name }}({{ summarizeArgs(tc.args) }})
+              <span class="status" :class="tc.status">{{ tc.status === 'done' ? 'Done' : tc.status === 'running' ? 'Working' : 'Waiting' }}</span>
+              {{ tc.name }}<span v-if="summarizeArgs(tc.args)"> · {{ summarizeArgs(tc.args) }}</span>
               <div v-if="tc.result != null" class="result">{{ truncate(tc.result) }}</div>
             </div>
           </div>
           <details v-else-if="m.role === 'summary'" class="msg summary">
-            <summary>📦 context compacted — checkpoint summary ({{ m.text.length }} chars<template v-if="m.tokensBefore">, was ~{{ Math.round(m.tokensBefore / 1000) }}k tokens</template>)</summary>
+            <summary>Earlier conversation summary</summary>
             <div class="body">{{ m.text }}</div>
           </details>
           <div v-else class="msg note">{{ m.text }}</div>
         </template>
       </div>
       <textarea v-model="goal" :disabled="!connected || running" @keydown.ctrl.enter="run"
-        placeholder="e.g. write a snake game into index.html — or: build yourself a plugin with a dice tool and a panel"></textarea>
-      <button class="primary" @click="run" :disabled="!connected || running || !goal.trim()">Run (Ctrl+Enter)</button>
+        placeholder="Describe what you want to build…"></textarea>
+      <button class="primary" @click="run" :disabled="!connected || running || !goal.trim()">Send</button>
       <button class="danger" @click="stop" :disabled="!running">Stop</button>
-      <button @click="resetSession" :disabled="running">Clear session & files</button>
+      <button @click="resetSession" :disabled="running">Reset</button>
       <button v-if="compaction" @click="compactNow" :disabled="running || compacting || !visible.length"
-        title="Summarize older messages into a checkpoint to free context">{{ compacting ? 'Compacting…' : 'Compact' }}</button>
+        title="Summarize older messages">{{ compacting ? 'Compacting…' : 'Compact' }}</button>
     </div>
   </Teleport>`,
   setup() {

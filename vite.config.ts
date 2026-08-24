@@ -6,6 +6,9 @@ import { defineConfig, transformWithOxc, type Plugin } from 'vite';
 import manifest from './src/extension/manifest.ts';
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
+// This manifest is declared as a static object. CRXJS exposes a wider return
+// union because defineManifest also accepts async factories.
+const extensionManifest = manifest as Extract<typeof manifest, { manifest_version: number }>;
 const pluginRoots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
 const onDemand = new Set(['llm']);
 const virtualId = 'virtual:plugin-defaults';
@@ -101,7 +104,9 @@ function crxLiveReloadFixup(): Plugin {
 }
 
 export default defineConfig(({ mode, command }) => {
-  const extensionBuild = mode === 'extension';
+  // The extension is the default target. Standalone mode must be requested
+  // explicitly by the web dev/build scripts.
+  const extensionBuild = mode !== 'standalone';
   // CRXJS never patches manifest CSPs, and our production sandbox CSP
   // (script-src 'self'; connect-src 'none') forbids everything dev mode
   // needs: fetching the real page + modules from the dev server and the
@@ -113,21 +118,27 @@ export default defineConfig(({ mode, command }) => {
   const devCspConnect = 'http://localhost:5173 ws://localhost:5173';
   const activeManifest = extensionBuild && command === 'serve'
     ? {
-        ...manifest,
+        ...extensionManifest,
         content_security_policy: {
-          extension_pages: manifest.content_security_policy!.extension_pages!.replace(
+          extension_pages: extensionManifest.content_security_policy!.extension_pages!.replace(
             "script-src 'self'", `script-src 'self' ${devCspOrigin}`),
-          sandbox: manifest.content_security_policy!.sandbox!
+          sandbox: extensionManifest.content_security_policy!.sandbox!
             .replace("script-src 'self'", `script-src 'self' ${devCspOrigin}`)
             .replace("connect-src 'none'", `connect-src ${devCspConnect}`),
         },
       }
-    : manifest;
+    : extensionManifest;
   return {
     // Bind ALL interfaces: Vite's default "localhost" can land on ::1 only,
     // and Chrome resolving localhost via 127.0.0.1 then gets intermittent
     // connection failures / proxy-style 504s on extension script fetches.
-    server: { host: true },
+    server: {
+      host: true,
+      port: extensionBuild ? 5173 : 4000,
+      // The extension CSP names its dev origin, so silently choosing another
+      // port would produce a server that Chrome cannot load.
+      strictPort: true,
+    },
     plugins: [
       pluginDefaults(),
       crxLiveReloadFixup(),

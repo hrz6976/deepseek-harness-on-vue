@@ -1,0 +1,21 @@
+{
+  "name": "bridge",
+  "version": "1.0.0",
+  "description": "ModelHub AI Proxy",
+  "main": "bridge.js",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --watch-path=bridge.js --watch-path=bridge.config.json --watch-path=.env bridge.js",
+    "test": "node test.e2e.js && node test.cors.js",
+    "test:live": "node test.e2e.js --live",
+    "start": "node bridge.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "undici": "^7.25.0"
+  }
+}

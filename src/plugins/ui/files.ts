@@ -8,9 +8,9 @@ export const filesPlugin = {
   template: `
   <Teleport v-if="target" :to="target">
     <div class="panel">
-      <h2>Files (OPFS, survives refresh)</h2>
-      <div v-if="!fileList.length" class="dim">(empty — files the agent creates appear here)</div>
-      <div v-for="f in fileList" :key="f" class="file" :class="{ active: selected === f }" @click="selected = f">📄 {{ f }}</div>
+      <h2>Files</h2>
+      <div v-if="!fileList.length" class="dim">No files yet.</div>
+      <div v-for="f in fileList" :key="f" class="file" :class="{ active: selected === f }" @click="selected = f">{{ f }}</div>
       <div v-if="selected && content !== null" class="fileview">{{ content }}</div>
     </div>
   </Teleport>`,

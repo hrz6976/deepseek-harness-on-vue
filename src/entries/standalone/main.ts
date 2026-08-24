@@ -16,40 +16,37 @@ import { modules } from '../../kernel/modules';
 import { boot } from '../../kernel/boot';
 import { fsPlugin } from '../../plugins/fs';
 import defaults from 'virtual:plugin-defaults';
+import './standalone.css';
 
 const { createApp, shallowReactive } = Vue;
 
 const App = Vue.defineComponent({
   name: 'HarnessFrame',
   template: `
-    <h1>DeepSeek Harness on Vue</h1>
-    <div class="sub">everything is a plugin, loaded from OPFS .plugins/ — core ones seeded from the bundle, all of them agent-editable (HMR) · mount = register, unmount = dispose · LLM via pi-ai custom DeepSeek provider</div>
-    <div class="layout">
-      <div :ref="el => setRegion('main', el)"></div>
-      <div>
-        <div :ref="el => setRegion('side', el)"></div>
-        <div class="panel">
-          <h2>Plugins ({{ plugins.length }} mounted; plugin UI renders here)</h2>
-          <div v-for="p in plugins" :key="p.name + ':' + p.version" class="plugin-box">
-            <div class="pname">🔌 {{ p.name }}
-              <span class="badge">{{ isCore(p.name) ? 'core' : 'user' }}</span>
-              <span v-if="p.hmrError" class="badge hmr">HMR failed, old version running</span>
-            </div>
-            <PluginHost :plugin="p" />
-          </div>
+    <main class="standalone-shell">
+      <header class="app-header">
+        <div class="brand">
+          <strong>Harness</strong>
+          <span class="runtime-status"><i></i>Web</span>
         </div>
+      </header>
+      <div class="layout">
+        <section class="main-column" aria-label="Chat" :ref="el => setRegion('main', el)"></section>
+        <aside class="side-column" aria-label="Workspace tools">
+          <div :ref="el => setRegion('side', el)"></div>
+        </aside>
       </div>
-    </div>`,
+      <div class="runtime-host" aria-hidden="true">
+        <PluginHost v-for="p in plugins" :key="p.name + ':' + p.version" :plugin="p" />
+      </div>
+    </main>`,
   setup() {
     const regions = shallowReactive(new Map<string, Element>());
     // Layout-first: regions register as the frame's elements mount, before/
     // reactively-visible-to any plugin Teleport (they v-if on the target).
     provideService('layout', { regions, target: (name: string) => regions.get(name) ?? null });
     const setRegion = (name: string, element: Element | null) => { if (element) regions.set(name, element); };
-    // 'core' = shipped in the bundle manifest (reseeded by ?reset); 'user' =
-    // agent-created. Both live in .plugins/ and are equally editable.
-    const isCore = (name: string) => name === 'fs' || name in defaults;
-    return { plugins, setRegion, isCore };
+    return { plugins, setRegion };
   },
 });
 

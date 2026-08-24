@@ -1,0 +1,94 @@
+{
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "messages_base_url": "https://openrouter.ai/api/v1",
+      "auth": "bearer",
+      "api_key": "$OPENROUTER_API_KEY",
+      "api": [
+        "chat",
+        "responses",
+        "messages"
+      ]
+    },
+    "opencode-go": {
+      "base_url": "https://opencode.ai/zen/go/v1",
+      "messages_base_url": "https://opencode.ai/zen/go",
+      "auth": "bearer",
+      "api_key": "$OPENCODE_API_KEY",
+      "api": [
+        "chat",
+        "responses",
+        "messages"
+      ]
+    },
+    "minimax-cn": {
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "auth": "bearer",
+      "api_key": "$MINIMAX_CN_API_KEY",
+      "api": [
+        "messages"
+      ]
+    }
+  },
+  "models": {
+    "deepseek-v4-pro": {
+      "provider": "opencode-go",
+      "api": "chat",
+      "params": {
+        "max_tokens": 384000
+      }
+    },
+    "deepseek-v4-flash": { 
+      "provider": "opencode-go",
+      "api": "chat",
+      "params": {
+        "max_tokens": 384000
+      }
+    },
+    "kimi-k2.7-code": {
+      "provider": "opencode-go",
+      "api": "chat",
+      "params": {
+        "max_tokens": 65536
+      }
+    },
+    "kimi-k3": {
+      "provider": "opencode-go",
+      "api": "chat",
+      "params": {
+        "max_tokens": 131072
+      }
+    },
+    "MiniMax-M2.7": {
+      "provider": "minimax-cn",
+      "api": "messages",
+      "params": {
+        "max_tokens": 131072
+      }
+    },
+    "anthropic/claude-sonnet-4.5": {
+      "provider": "openrouter",
+      "params": {
+        "max_tokens": 64000
+      }
+    },
+    "anthropic/claude-3.5-haiku": {
+      "provider": "openrouter",
+      "params": {
+        "max_tokens": 8192
+      }
+    }
+  },
+  "fallback": [
+    {
+      "match": "^[a-zA-Z0-9_-]+/",
+      "provider": "openrouter"
+    },
+    {
+      "match": "^(deepseek-|kimi-|glm-|minimax-|qwen|mimo-|hy3$)",
+      "provider": "opencode-go",
+      "api": "chat"
+    }
+  ]
+}
