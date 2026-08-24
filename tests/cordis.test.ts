@@ -95,11 +95,10 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
     provider: 'site-skill', action: 'apply', input: { id: (saved.input.skill as { id: string }).id },
   });
   assert.match(saveResult, /"hotAppliedToCurrentDocument":true/);
-  assert.match(prompt.assemble(), /same agent run/);
-  assert.match(prompt.assemble(), /share DOM but not JavaScript globals/);
-  assert.match(prompt.assemble(), /missing from MAIN is expected/);
-  assert.match(prompt.assemble(), /page_recipe_list, page_recipe_get, and page_recipe_debug as strictly read-only/);
-  assert.match(prompt.assemble(), /never save, remove, disable, replace, stub, duplicate/);
+  assert.match(prompt.assemble(), /page_style_inspect/);
+  assert.match(prompt.assemble(), /page_settle/);
+  assert.match(prompt.assemble(), /page\.dynamic/);
+  assert.match(prompt.assemble(), /nextOffset/);
 
   assert.equal(await unmountPlugin('page'), true);
   assert.deepEqual(tools.schemas(), []);
