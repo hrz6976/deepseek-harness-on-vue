@@ -68,11 +68,12 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   const names = tools.schemas().map(tool => tool.name);
 
   assert.equal(entry.status, 'active');
-  assert.equal(names.length, 17, 'only dynamic observation and live-rule tools stay out of the prompt until loaded');
+  assert.equal(names.length, 18, 'only dynamic observation and live-rule tools stay out of the prompt until loaded');
   assert.ok(names.includes('page_snapshot'));
   assert.ok(names.includes('page_style_inspect'));
   assert.ok(names.includes('page_script_run'));
   assert.ok(names.includes('page_recipe_save'));
+  assert.ok(names.includes('page_recipe_get'));
   assert.equal(names.includes('page_live_rules_apply'), false);
   const dynamic = tools.catalog().find(group => group.id === 'page.dynamic');
   assert.ok(dynamic?.tools.includes('page_observe_start'));
@@ -81,19 +82,60 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   assert.match(prompt.assemble(), /page_style_inspect/);
   await tools.call('page_query', { selector: 'main' });
   assert.equal((requests[0] as { provider: string }).provider, 'page');
-  await tools.call('page_recipe_save', {
+  const saveResult = String(await tools.call('page_recipe_save', {
     type: 'userscript', name: 'Calendar grouping', matches: ['https://example.test/calendar*'],
     source: 'document.body.dataset.ready = "1"', runAt: 'document_idle', enabled: true,
-  });
+  }));
   const saved = requests[1] as { provider: string; input: { skill: { type?: string; source?: string } } };
   assert.equal(saved.provider, 'site-skill');
   assert.equal(saved.input.skill.type, 'userscript');
   assert.match(saved.input.skill.source ?? '', /document\.body/);
+  assert.deepEqual(requests[2], {
+    provider: 'site-skill', action: 'apply', input: { id: (saved.input.skill as { id: string }).id },
+  });
+  assert.match(saveResult, /"hotAppliedToCurrentDocument":true/);
+  assert.match(prompt.assemble(), /same agent run/);
 
   assert.equal(await unmountPlugin('page'), true);
   assert.deepEqual(tools.schemas(), []);
   assert.equal(prompt.assemble(), '');
   assert.equal(capabilities.has('page'), false);
+});
+
+test('page_recipe_get reads persisted userscript source in bounded chunks', async () => {
+  await applyTestPlugin(toolsPlugin);
+  await applyTestPlugin(promptPlugin);
+  const source = '0123456789abcdefghijklmnopqrstuvwxyz';
+  await provideTestService('broker', {
+    async request(request: { provider: string; action: string }) {
+      if (request.provider === 'site-skill' && request.action === 'list') {
+        return [{
+          id: 'nga-hover', name: 'NGA hover card', type: 'userscript', enabled: true,
+          matches: ['https://bbs.nga.cn/*'], runAt: 'document_start', source,
+          createdAt: 1, updatedAt: 1,
+        }];
+      }
+      return null;
+    },
+    async *stream() {},
+  });
+
+  const entry = await mountPlugin('page', pagePlugin, { builtin: true });
+  await entry.fiber?.await();
+  const tools = runtime.reflect.get('tools') as ToolsRuntime;
+
+  const first = String(await tools.call('page_recipe_get', { id: 'nga-hover', offset: 0, limit: 10 }));
+  assert.match(first, /content: userscript source/);
+  assert.match(first, /nextOffset: 10/);
+  assert.match(first, /--- content ---\n0123456789$/);
+
+  const second = String(await tools.call('page_recipe_get', { id: 'nga-hover', offset: 10, limit: 6_000 }));
+  assert.match(second, /offset: 10/);
+  assert.match(second, /nextOffset: none/);
+  assert.match(second, /--- content ---\nabcdefghijklmnopqrstuvwxyz$/);
+
+  const missing = String(await tools.call('page_recipe_get', { id: 'missing', offset: 0, limit: 6_000 }));
+  assert.equal(missing, 'Error: page plugin "missing" does not exist');
 });
 
 test('capability discovery prioritizes loadable groups and capability loading activates them', async () => {

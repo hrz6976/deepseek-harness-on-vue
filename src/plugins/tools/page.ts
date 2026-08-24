@@ -89,6 +89,12 @@ const recipeParameters = z.object({
   }
 });
 const idParameters = z.object({ id: z.string().min(1) });
+const recipeGetParameters = idParameters.extend({
+  offset: z.number().int().nonnegative().max(10_000_000).default(0)
+    .describe('Zero-based character offset into the stored userscript source or declarative definition.'),
+  limit: z.number().int().positive().max(6_000).default(6_000)
+    .describe('Maximum characters to return. Use the returned nextOffset to continue reading.'),
+});
 const emptyParameters = z.object({});
 const scriptParameters = z.object({
   code: z.string().min(1).max(1_000_000),
@@ -110,7 +116,7 @@ export function apply(ctx: Context): void {
   const previewDescription = 'Validate a transactional DOM patch without changing the page. Always preview a non-trivial patch before applying it.';
   const applyDescription = 'Apply and verify a DOM adjustment as one undoable temporary transaction. Ordinary reversible patches need no separate confirmation; persistence still requires explicit approval.';
   const revertDescription = 'Undo an applied page patch by transaction id.';
-  const recipeDescription = 'Install an approved page plugin. Use type recipe for declarative DOM changes or type userscript for persistent USER_SCRIPT code. Userscripts can use fetch for same-origin and cross-origin http(s) requests. Both reapply after matching navigations.';
+  const recipeDescription = 'Install or update an approved page plugin. Use type recipe for declarative DOM changes or type userscript for persistent USER_SCRIPT code. An enabled userscript is registered and hot-applied to the current document before this call returns; later matching navigations in the same agent run use the updated registration. Userscript source must be idempotent. Userscripts can use fetch for same-origin and cross-origin http(s) requests.';
 
   ctx.tools.register({ name: 'page_snapshot', description: snapshotDescription, parameters: snapshotParameters, run: ({ selector, maxNodes, maxDepth }) => request(ctx, { type: 'page/snapshot', options: { selector, maxNodes, maxDepth } }) });
   ctx.tools.register({ name: 'page_query', description: queryDescription, parameters: queryParameters, run: ({ selector, limit }) => request(ctx, { type: 'page/query', selector, limit }) });
@@ -155,15 +161,56 @@ export function apply(ctx: Context): void {
             ...(operations.length ? { operations } : {}),
             ...(liveRules.length ? { liveRules } : {}),
           } satisfies SiteRecipe;
-      return JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'save', input: { skill } }));
+      const saved = await ctx.broker.request({ provider: 'site-skill', action: 'save', input: { skill } });
+      if (type !== 'userscript' || !enabled) return JSON.stringify(saved);
+      const result = await ctx.broker.request({ provider: 'site-skill', action: 'apply', input: { id: common.id } });
+      return JSON.stringify({
+        saved,
+        hotAppliedToCurrentDocument: true,
+        result,
+      });
     },
   });
   ctx.tools.register({ name: 'page_recipe_list', description: 'List persisted page plugins, including declarative recipes and userscripts.', parameters: emptyParameters, run: async () => JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'list', input: {} })) });
+  ctx.tools.register({
+    name: 'page_recipe_get',
+    description: 'Read one persisted page plugin by id. Returns a bounded character window of its userscript source or declarative definition; continue with nextOffset instead of searching Harness checkpoints or artifacts.',
+    parameters: recipeGetParameters,
+    async run({ id, offset, limit }) {
+      const value = await ctx.broker.request({ provider: 'site-skill', action: 'list', input: {} });
+      const skill = Array.isArray(value)
+        ? (value as unknown as SiteSkill[]).find(candidate => candidate.id === id)
+        : undefined;
+      if (!skill) return `Error: page plugin "${id}" does not exist`;
+
+      const isUserScript = skill.type === 'userscript';
+      const contentKind = isUserScript ? 'userscript source' : 'declarative definition';
+      const content = isUserScript
+        ? skill.source
+        : JSON.stringify({ operations: skill.operations ?? [], liveRules: skill.liveRules ?? [] }, null, 2);
+      const start = Math.min(offset, content.length);
+      const chunk = content.slice(start, start + limit);
+      const nextOffset = start + chunk.length < content.length ? start + chunk.length : null;
+      return [
+        `page plugin: ${skill.name}`,
+        `id: ${skill.id}`,
+        `type: ${skill.type}`,
+        `enabled: ${skill.enabled}`,
+        ...(isUserScript ? [`runAt: ${skill.runAt}`] : []),
+        `content: ${contentKind}`,
+        `offset: ${start}`,
+        `totalCharacters: ${content.length}`,
+        `nextOffset: ${nextOffset ?? 'none'}`,
+        '--- content ---',
+        chunk,
+      ].join('\n');
+    },
+  });
   ctx.tools.register({ name: 'page_recipe_remove', description: 'Remove a persisted page plugin by id.', parameters: idParameters, run: async ({ id }) => JSON.stringify(await ctx.broker.request({ provider: 'site-skill', action: 'remove', input: { id } })) });
 
   ctx.prompt.register({
     name: 'page-tools',
     order: 10,
-    text: 'The host page is controlled only through framework-neutral page_* tools. Plugins and run_js never run in host DOM. Treat element references as capabilities: obtain and preserve them from snapshots/queries. For visual or CSS work, inspect the exact element and relevant ::before/::after state with page_style_inspect before changing it, then inspect the resulting computed style after applying; never infer the cascade from class names alone. Use page_query_page for large sets. After click/type, wait for an expected state and page_settle before reading again. Click/type cross the trusted approval boundary. Preview non-trivial patches. For DOM that is created or reconciled later, load the page.dynamic tool group with capability_load and use live rules for simple declarative changes. When actual page behavior or arbitrary DOM logic is required, use page_script_run and, after explicit approval, persist the same idempotent source through page_recipe_save with type userscript. Userscripts always use the browser USER_SCRIPT world and may use fetch for http(s) network access. If Chrome reports that User Scripts are disabled, explain how to enable them once and do not retry with MAIN.',
+    text: 'The host page is controlled only through framework-neutral page_* tools. Plugins and run_js never run in host DOM. Treat element references as capabilities: obtain and preserve them from snapshots/queries. For visual or CSS work, inspect the exact element and relevant ::before/::after state with page_style_inspect before changing it, then inspect the resulting computed style after applying; never infer the cascade from class names alone. Use page_query_page for large sets. After click/type, wait for an expected state and page_settle before reading again. Click/type cross the trusted approval boundary. Preview non-trivial patches. For DOM that is created or reconciled later, load the page.dynamic tool group with capability_load and use live rules for simple declarative changes. When actual page behavior or arbitrary DOM logic is required, use page_script_run and, after explicit approval, persist the same idempotent source through page_recipe_save with type userscript. page_recipe_save hot-applies an enabled userscript to the current document before returning, and its awaited registration update applies to later matching navigations in the same agent run; never attribute a failed verification to a cross-turn userscript cache. Read an existing persisted plugin with page_recipe_get; follow nextOffset for long source instead of searching Harness checkpoints or artifacts. Userscripts always use the browser USER_SCRIPT world and may use fetch for http(s) network access. If Chrome reports that User Scripts are disabled, explain how to enable them once and do not retry with MAIN.',
   });
 }

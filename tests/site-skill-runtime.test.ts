@@ -5,11 +5,15 @@ import type { PageCommand, SiteRecipe, SiteUserScript } from '@/shared/page-prot
 
 function installChromeMock(skills: Array<SiteRecipe | SiteUserScript>) {
   const registered: chrome.userScripts.RegisteredUserScript[] = [];
+  let storedSkills = [...skills];
   const chromeMock = {
     storage: {
       local: {
-        async get() { return { 'public.recipes': skills }; },
-        async set() {},
+        async get() { return { 'public.recipes': storedSkills }; },
+        async set(values: Record<string, unknown>) {
+          const next = values['public.recipes'];
+          if (Array.isArray(next)) storedSkills = next as Array<SiteRecipe | SiteUserScript>;
+        },
       },
     },
     permissions: {
@@ -55,6 +59,28 @@ test('saved userscripts restore in the background without a side panel', async t
   assert.equal(registered[0]?.id, 'harness:calendar');
   assert.deepEqual(registered[0]?.matches, script.matches);
   assert.match(registered[0]?.js?.[0]?.code ?? '', /document\.body\.dataset\.ready/);
+});
+
+test('saving a userscript updates its registration before the same call returns', async t => {
+  t.after(() => { Reflect.deleteProperty(globalThis, 'chrome'); });
+  const original: SiteUserScript = {
+    id: 'hover-card', name: 'Hover card', type: 'userscript', enabled: true,
+    matches: ['https://example.test/*'], runAt: 'document_start', source: 'globalThis.revision = "old"',
+    createdAt: 1, updatedAt: 1,
+  };
+  const registered = installChromeMock([original]);
+  const runtime = createSiteSkillRuntime(async () => null, () => undefined);
+  await runtime.restoreUserScripts();
+
+  await runtime.request({
+    provider: 'site-skill', action: 'save', input: {
+      skill: { ...original, source: 'globalThis.revision = "new"', updatedAt: 2 },
+    },
+  }, 42);
+
+  assert.equal(registered.length, 1);
+  assert.match(registered[0]?.js?.[0]?.code ?? '', /revision = "new"/);
+  assert.doesNotMatch(registered[0]?.js?.[0]?.code ?? '', /revision = "old"/);
 });
 
 test('saved declarative skills apply on matching background navigation without a side panel', async t => {
