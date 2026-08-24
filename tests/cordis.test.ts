@@ -95,6 +95,10 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   });
   assert.match(saveResult, /"hotAppliedToCurrentDocument":true/);
   assert.match(prompt.assemble(), /same agent run/);
+  assert.match(prompt.assemble(), /share DOM but not JavaScript globals/);
+  assert.match(prompt.assemble(), /missing from MAIN is expected/);
+  assert.match(prompt.assemble(), /page_recipe_list and page_recipe_get as strictly read-only/);
+  assert.match(prompt.assemble(), /never save, remove, disable, replace, stub, duplicate/);
 
   assert.equal(await unmountPlugin('page'), true);
   assert.deepEqual(tools.schemas(), []);
