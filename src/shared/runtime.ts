@@ -12,6 +12,7 @@ import type {
   SessionLlmConfig,
 } from './task-model';
 import type { Annotation } from './page-protocol';
+import type { ModelLimits } from './model-limits';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -94,7 +95,7 @@ export type LlmStreamEvent =
 
 export interface LlmService {
   engineName: Ref<string>;
-  contextWindow: number;
+  limits(sessionConfig?: SessionLlmConfig): ModelLimits;
   stream(request: LlmRequest): AsyncIterable<LlmStreamEvent>;
 }
 

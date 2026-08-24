@@ -6,8 +6,8 @@
 //
 // The recipe is pi-coding-agent's, simplified for our flat message model:
 //   - context size = last provider-reported usage + chars/4 for what follows
-//   - trigger when size > contextWindow - reserveTokens (pi default 16384)
-//   - keep the most recent ~keepRecentTokens (pi default 20000), summarize
+//   - trigger when size > contextWindow - requestOutputTokens - safetyTokens
+//   - keep the most recent ~keepRecentTokens, summarize
 //     everything older with ONE tool-less llm.stream() call into a structured
 //     checkpoint, and splice it in as a single { role: 'summary' } message
 //   - a provider "context length exceeded" error triggers the same compaction
@@ -20,16 +20,17 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { errorMessage, log, normalizeSessionLlmConfig, userMessageTextForModel } from '@/sdk';
+import { errorMessage, log, modelLimitsFor, normalizeSessionLlmConfig, userMessageTextForModel } from '@/sdk';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { ModelLimits } from '@/shared/model-limits';
 import type { HarnessMessage, LlmRequest, LlmService } from '@/shared/runtime';
 import type { SessionLlmConfig } from '@/shared/task-model';
 
-export interface CompactionSettings { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
+export interface CompactionSettings { enabled: boolean; safetyTokens: number; keepRecentTokens: number }
 interface TurnStartRequest { messages: HarnessMessage[]; signal: AbortSignal }
 interface LlmErrorRequest extends TurnStartRequest { message: string; retry: boolean }
 
-export const DEFAULT_SETTINGS = { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 };
+export const DEFAULT_SETTINGS = { enabled: true, safetyTokens: 32_000, keepRecentTokens: 128_000 };
 const TOOL_RESULT_MAX = 2000; // chars per tool result in the transcript sent to the summarizer
 const ARGS_MAX = 300;
 
@@ -178,6 +179,10 @@ export async function runCompaction(
   return true;
 }
 
+export function compactionThreshold(limits: ModelLimits, safetyTokens: number): number {
+  return Math.max(1, limits.contextWindow - limits.requestOutputTokens - Math.max(0, safetyTokens));
+}
+
 // ---- the plugin -------------------------------------------------------------
 
 export const name = 'compaction';
@@ -186,12 +191,16 @@ export function apply(ctx: Context): void {
     const settings = reactive({ ...DEFAULT_SETTINGS });
     const compacting = ref(false);
     const getLlm = () => ctx.reflect.get('llm') as LlmService | undefined;
+    const getTask = () => ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+    const sessionConfig = () => getTask()?.activeTask()?.llm;
+    const currentLimits = () => getLlm()?.limits(sessionConfig())
+      ?? modelLimitsFor(normalizeSessionLlmConfig(sessionConfig()).model);
     const note = (messages: HarnessMessage[], text: string): void => { messages.push({ role: 'note', text }); };
 
     async function compact(messages: HarnessMessage[], signal = new AbortController().signal): Promise<boolean> {
       const llm = getLlm();
       if (!llm || compacting.value) return false;
-      const task = ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+      const task = getTask();
       compacting.value = true;
       try {
         const before = estimateContextTokens(messages);
@@ -211,8 +220,7 @@ export function apply(ctx: Context): void {
     ctx.on('loop/turn-start', async (arg: TurnStartRequest, next: (value: TurnStartRequest) => unknown) => {
       const llm = getLlm();
       if (settings.enabled && llm) {
-        const window = llm.contextWindow ?? 131072;
-        if (estimateContextTokens(arg.messages) > window - settings.reserveTokens) {
+        if (estimateContextTokens(arg.messages) > compactionThreshold(currentLimits(), settings.safetyTokens)) {
           note(arg.messages, '上下文接近上限，正在压缩…');
           try { await compact(arg.messages, arg.signal); }
           catch (error: unknown) { note(arg.messages, `compaction failed: ${errorMessage(error)} — continuing uncompacted`); }
@@ -240,10 +248,10 @@ export function apply(ctx: Context): void {
     ctx.provide('compaction', {
       settings, compacting,
       contextTokens: estimateContextTokens,
-      contextWindow: () => getLlm()?.contextWindow ?? 131072,
+      contextWindow: () => currentLimits().contextWindow,
       // manual "Compact" from the UI; loop must be idle (the button enforces it)
       async compact() {
-        const task = ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+        const task = getTask();
         if (!task || !getLlm()) return false;
         try { return await compact(task.messages); }
         catch (error: unknown) { note(task.messages, `compaction failed: ${errorMessage(error)}`); return false; }

@@ -3,6 +3,7 @@ import { ZodError } from 'zod';
 import contentScriptFile from './content-script?script&iife';
 import { parseCapabilityEnvelope } from '@/shared/broker-schema';
 import { userMessageTextForModel } from '@/shared/message-annotations';
+import { modelLimitsFor } from '@/shared/model-limits';
 import type { CapabilityEnvelope, CapabilityRequest, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
 import type { PageCommand, PageCommandResult, PageEvent } from '@/shared/page-protocol';
 import { toJsonValue, type JsonValue, type LlmStreamEvent } from '@/shared/runtime';
@@ -292,6 +293,7 @@ async function* streamLlm(
   const completionRequest: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & Partial<DeepSeekThinkingParams> = {
     model: sessionConfig.model,
     messages,
+    max_tokens: modelLimitsFor(sessionConfig.model).requestOutputTokens,
     ...(tools.length ? { tools } : {}),
     ...(isDeepSeekModel ? {
       thinking: { type: sessionConfig.thinking ? 'enabled' : 'disabled' },

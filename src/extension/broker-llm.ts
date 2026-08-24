@@ -1,10 +1,13 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { ref } from 'vue';
+import { modelLimitsFor } from '@/shared/model-limits';
 import type { LlmRequest, LlmService, LlmStreamEvent } from '@/shared/runtime';
+import { DEFAULT_SESSION_LLM_CONFIG, type SessionLlmConfig } from '@/shared/task-model';
 
 class BrokerLlmRuntime extends Service implements LlmService {
   readonly engineName = ref('trusted broker');
-  readonly contextWindow = 131_072;
+  readonly limits = (sessionConfig?: SessionLlmConfig) =>
+    modelLimitsFor(sessionConfig?.model ?? DEFAULT_SESSION_LLM_CONFIG.model);
 
   constructor(ctx: Context) {
     super(ctx, 'llm');

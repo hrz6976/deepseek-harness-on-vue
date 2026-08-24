@@ -56,9 +56,12 @@ const ChatPanel = defineComponent({
     // reads the reactive messages array inside computed -> tracks streaming updates
     const ctxInfo = computed(() => {
       const c = compaction.value;
-      if (!c || !connected.value || !visible.value.length) return '';
-      // binary k, so 131072 reads as the familiar "128k"
-      return `~${Math.round(c.contextTokens(visible.value) / 1024)}k / ${Math.round(c.contextWindow() / 1024)}k ctx`;
+      const messages = taskSvc.value?.messages ?? [];
+      if (!c || !connected.value || !messages.length) return '';
+      const tokens = (value: number) => value >= 1_000_000
+        ? `${Number((value / 1_000_000).toFixed(1))}M`
+        : `${Math.round(value / 1000)}k`;
+      return `~${tokens(c.contextTokens(messages))} / ${tokens(c.contextWindow())} ctx`;
     });
     const compactNow = () => compaction.value?.compact();
 

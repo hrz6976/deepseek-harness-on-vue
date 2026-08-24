@@ -5,7 +5,7 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   estimateMessageTokens, estimateContextTokens, findCutIndex,
-  serializeTranscript, runCompaction, DEFAULT_SETTINGS,
+  serializeTranscript, runCompaction, compactionThreshold, DEFAULT_SETTINGS,
 } from '@/plugins/compaction';
 import { toPiMessages } from '@/plugins/llm';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
@@ -56,6 +56,12 @@ test('serializeTranscript: role tags, tool calls with truncated results, notes a
   assert.match(t, /more characters truncated/);
   assert.ok(!t.includes('ui noise'));
   assert.ok(!t.includes('SECRET THOUGHTS'));
+});
+
+test('compactionThreshold reserves the configured output budget and safety margin', () => {
+  assert.equal(compactionThreshold({
+    contextWindow: 1_000_000, maxOutputTokens: 384_000, requestOutputTokens: 128_000,
+  }, 32_000), 840_000);
 });
 
 test('serializeTranscript: persisted page annotations survive compaction', () => {
@@ -155,7 +161,7 @@ test('plugin end-to-end: over-threshold log is compacted before the next request
   await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => {}, remove: async () => {} });
   const requests = [];
   await provideTestService('llm', {
-    contextWindow: 1000, // tiny window so the trigger fires
+    limits: () => ({ contextWindow: 1000, maxOutputTokens: 100, requestOutputTokens: 100 }),
     stream(req) {
       requests.push(req);
       const isSummarizer = /summarization assistant/.test(req.systemPrompt);
@@ -170,7 +176,7 @@ test('plugin end-to-end: over-threshold log is compacted before the next request
   await applyTestPlugin(compactionPlugin);
   const loop = runtime.reflect.get('loop');
   const compaction = runtime.reflect.get('compaction');
-  compaction.settings.reserveTokens = 500;   // threshold: > 1000 - 500 = 500 tokens
+  compaction.settings.safetyTokens = 400;    // threshold: > 1000 - 100 output - 400 safety = 500
   compaction.settings.keepRecentTokens = 10;
 
   taskMessages.push({ role: 'user', text: 'a'.repeat(4000) }); // ~1000 tokens — must be summarized away

@@ -14,7 +14,8 @@ import { ref } from 'vue';
 import { createProvider } from '@earendil-works/pi-ai';
 import type { AssistantMessage, Context as PiContext, Message, Model, StopReason, Usage } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { errorMessage, log, parseJsonObject, userMessageTextForModel } from '@/sdk';
+import { errorMessage, log, modelLimitsFor, parseJsonObject, userMessageTextForModel } from '@/sdk';
+import type { ModelLimits } from '@/shared/model-limits';
 import type { HarnessMessage, LlmRequest, LlmStreamEvent, ToolCall } from '@/shared/runtime';
 
 interface LlmConfig {
@@ -23,12 +24,12 @@ interface LlmConfig {
   apiKey?: string;
   model: string;
   contextWindow?: number;
+  maxOutputTokens?: number;
+  requestOutputTokens?: number;
   fetch?: typeof globalThis.fetch;
 }
 
 const IDLE_MS = 45000; // pi-ai has no idle-stream watchdog (timeoutMs is the SDK request timeout), so we wrap: a gateway can drop a stream with no chunk and no error, and without this the loop hangs forever
-const CONTEXT_WINDOW = 131072; // DeepSeek-class default; exposed on the service so the compaction plugin knows the budget
-
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
 export function toHarnessFinishReason(reason: StopReason): Exclude<LlmStreamEvent, { type: 'error' }>['finishReason'] {
@@ -65,7 +66,7 @@ export function toPiMessages(messages: HarnessMessage[], modelId: string): Messa
 }
 
 // ---- real engine: pi-ai custom provider ------------------------------------
-function makePiEngine(cfg: LlmConfig): (request: LlmRequest) => AsyncIterable<LlmStreamEvent> {
+function makePiEngine(cfg: LlmConfig, limits: ModelLimits): (request: LlmRequest) => AsyncIterable<LlmStreamEvent> {
   // Relative baseURL ("/proxy") -> absolute: the SDK underneath pi-ai joins
   // URLs and rejects relative bases. Empty key -> "pi-local" placeholder: the
   // dev proxy replaces that token with the local pi credential server-side,
@@ -85,7 +86,8 @@ function makePiEngine(cfg: LlmConfig): (request: LlmRequest) => AsyncIterable<Ll
   const model: Model<'openai-completions'> = {
     id: cfg.model, name: cfg.model, api: 'openai-completions', provider: 'deepseek',
     baseUrl: baseURL, reasoning: true, input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: CONTEXT_WINDOW, maxTokens: 8192,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: limits.contextWindow, maxTokens: limits.requestOutputTokens,
   };
   return async function* piStream({ systemPrompt, messages, tools, signal }: LlmRequest): AsyncIterable<LlmStreamEvent> {
     const ctx = { systemPrompt, messages: toPiMessages(messages, model.id), tools } as unknown as PiContext;
@@ -176,11 +178,12 @@ function makeMockEngine(): (request: LlmRequest) => AsyncIterable<LlmStreamEvent
 // ---- the plugin -------------------------------------------------------------
 function setupLlm(ctx: CordisContext, cfg: LlmConfig): void {
   const mock = !!cfg.mock;
+  const limits = modelLimitsFor(cfg.model, cfg);
   const engineName = ref(mock ? 'mock engine (offline)' : `pi-ai · ${cfg.model}`);
-  const engine = mock ? makeMockEngine() : makePiEngine(cfg);
+  const engine = mock ? makeMockEngine() : makePiEngine(cfg, limits);
   ctx.provide('llm', {
     engineName,
-    contextWindow: cfg.contextWindow || CONTEXT_WINDOW,
+    limits: () => limits,
     stream: (request: LlmRequest) => engine(request),
   });
   ctx.effect(() => () => log('llm plugin unmounted', 'warn'), 'llm.log-dispose');
@@ -190,5 +193,5 @@ function setupLlm(ctx: CordisContext, cfg: LlmConfig): void {
 // Cordis plugin config. The service deliberately exposes no config getter.
 export default {
   name: 'llm',
-  apply: (ctx: CordisContext, config: { cfg?: LlmConfig } = {}) => setupLlm(ctx, config.cfg ?? { baseURL: '/proxy', model: 'deepseek-chat' }),
+  apply: (ctx: CordisContext, config: { cfg?: LlmConfig } = {}) => setupLlm(ctx, config.cfg ?? { baseURL: '/proxy', model: 'deepseek-v4-flash' }),
 };

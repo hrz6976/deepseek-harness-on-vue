@@ -26,6 +26,7 @@ export {
   useTool,
 } from '@/kernel/contrib';
 export { userMessageTextForModel } from '@/shared/message-annotations';
+export { modelLimitsFor } from '@/shared/model-limits';
 export { entries as logEntries, log } from '@/kernel/log';
 export { errorMessage, parseJsonObject } from '@/shared/runtime';
 export { renderMarkdown } from '@/shared/markdown';
