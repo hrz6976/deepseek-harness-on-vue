@@ -80,5 +80,3 @@ export default {
 
 // Test/embedding face: same plugin with the config frozen in.
 export const makeLlmPlugin = (cfg: LlmConfig) => ({ name: 'llm', setup: () => setupLlm(cfg) });
-
-export { toPiMessages } from '../shared/pi-engine';

@@ -7,7 +7,7 @@ import {
   estimateMessageTokens, estimateContextTokens, findCutIndex,
   serializeTranscript, runCompaction, DEFAULT_SETTINGS,
 } from '../src/plugins/compaction';
-import { toPiMessages } from '../src/plugins/llm';
+import { toPiMessages } from '../src/shared/pi-engine';
 
 const usage = (totalTokens) => ({ input: totalTokens - 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens });
 const asst = (text, extra = {}) => ({ role: 'assistant', text, thinking: '', toolCalls: [], status: 'done', ...extra });

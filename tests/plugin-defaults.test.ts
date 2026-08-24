@@ -3,7 +3,11 @@ import { basename, resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { transformWithOxc } from 'vite';
-import { rewriteImports } from '../src/kernel/compile';
+import { compilePlugin, rewriteImports } from '../src/kernel/compile';
+import { modules } from '../src/kernel/modules';
+
+const runtimeGlobal = globalThis as typeof globalThis & { __harness?: { modules: typeof modules } };
+runtimeGlobal.__harness = { modules };
 
 test('every shipped TypeScript plugin survives the build transform and import registry', async () => {
   const roots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
@@ -33,4 +37,16 @@ test('every shipped TypeScript plugin survives the build transform and import re
 
   assert.ok(compiled.includes('tools'));
   assert.ok(compiled.includes('loop'));
+});
+
+test('the shipped llm plugin survives its runtime compilation path', async () => {
+  const file = resolve('src/plugins/llm.ts');
+  const result = await transformWithOxc(await readFile(file, 'utf8'), file, {
+    lang: 'ts',
+    sourceType: 'module',
+    target: 'es2022',
+    sourcemap: false,
+  });
+  const def = await compilePlugin('llm', result.code);
+  assert.equal(def.name, 'llm');
 });

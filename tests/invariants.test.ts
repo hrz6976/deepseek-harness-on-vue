@@ -11,7 +11,7 @@ import { services, provideService } from '../src/kernel/services';
 import { useTool } from '../src/kernel/contrib';
 import { toolsPlugin } from '../src/plugins/tools';
 import { loopPlugin } from '../src/plugins/loop';
-import { toPiMessages } from '../src/plugins/llm';
+import { toPiMessages } from '../src/shared/pi-engine';
 import { translateESM, compilePlugin } from '../src/kernel/compile';
 
 // ---------------------------------------------------------------- helpers --

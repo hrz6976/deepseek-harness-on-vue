@@ -2,7 +2,7 @@
 // mount the llm plugin from .plugins/llm.js with the cfg as component props;
 // disconnect = unmount it, file kept (service revoked, chat disables).
 // Key lives in localStorage only — never OPFS (files are agent-readable).
-import { reactive, computed, onMounted, nextTick } from 'vue';
+import { reactive, computed, ref, onMounted, nextTick } from 'vue';
 import { useService } from '../../kernel/services';
 import { useLayoutTarget } from '../../kernel/contrib';
 
@@ -26,6 +26,7 @@ export const settingsPlugin = {
       <button class="primary" @click="connect" :disabled="connected || (!cfg.apiKey && !cfg.mock && !viaProxy)">Mount LLM plugin</button>
       <button class="danger" @click="disconnect" :disabled="!connected || running">Unmount LLM plugin</button>
       <span style="font-size:12px"><span class="dot" :class="connected ? 'on' : 'off'"></span>{{ connected ? engineName : 'not connected' }}</span>
+      <div v-if="connectionMessage" style="font-size:12px;margin-top:8px" :style="{ color: connectionError ? '#b42318' : '#28704b' }">{{ connectionMessage }}</div>
     </div>
   </Teleport>`,
   setup() {
@@ -42,29 +43,47 @@ export const settingsPlugin = {
     const connected = computed(() => !!llmSvc.value);
     const running = computed(() => loopSvc.value?.running?.value ?? false);
     const engineName = computed(() => llmSvc.value?.engineName?.value ?? '');
+    const connectionMessage = ref('');
+    const connectionError = computed(() => connectionMessage.value.startsWith('Error:'));
     // Same-origin or localhost proxy = serve.mjs can inject the local pi
     // credential. Absolute localhost URLs are useful from the extension.
     const viaProxy = computed(() => isLocalProxy(cfg.baseURL) || cfg.baseURL.startsWith('/'));
 
-    const connect = () => {
+    const connect = async () => {
       localStorage.setItem(LS.baseURL, cfg.baseURL);
       localStorage.setItem(LS.model, cfg.model);
       localStorage.setItem(LS.apiKey, cfg.apiKey);
       localStorage.setItem(LS.mock, cfg.mock ? '1' : '0');
-      localStorage.setItem(LS.auto, '1');
-      mgrSvc.value?.mount('llm', { cfg: { ...cfg } });
+      connectionMessage.value = '';
+      const manager = mgrSvc.value;
+      if (!manager) {
+        localStorage.setItem(LS.auto, '0');
+        connectionMessage.value = 'Error: plugin manager is unavailable';
+        return;
+      }
+      try {
+        const result = await manager.mount('llm', { cfg: { ...cfg } });
+        connectionMessage.value = result;
+        localStorage.setItem(LS.auto, result.startsWith('Error:') ? '0' : '1');
+      } catch (error) {
+        localStorage.setItem(LS.auto, '0');
+        connectionMessage.value = `Error: ${error instanceof Error ? error.message : String(error)}`;
+      }
     };
-    const disconnect = () => { localStorage.setItem(LS.auto, '0'); mgrSvc.value?.unmount('llm'); };
+    const disconnect = () => {
+      localStorage.setItem(LS.auto, '0');
+      connectionMessage.value = mgrSvc.value?.unmount('llm') ?? 'Error: plugin manager is unavailable';
+    };
 
     // Auto-reconnect on boot when the user was connected last session — a
     // refresh restores plugins AND the connection. Deferred past the initial
     // render pass: mountPlugin mutates the plugin list the frame is iterating.
     onMounted(() => nextTick(() => {
       if (!connected.value && localStorage.getItem(LS.auto) === '1'
-          && (cfg.apiKey || cfg.mock || viaProxy.value)) connect();
+          && (cfg.apiKey || cfg.mock || viaProxy.value)) void connect();
     }));
 
-    return { target, cfg, connected, running, engineName, viaProxy, connect, disconnect };
+    return { target, cfg, connected, running, engineName, connectionMessage, connectionError, viaProxy, connect, disconnect };
   },
 };
 
