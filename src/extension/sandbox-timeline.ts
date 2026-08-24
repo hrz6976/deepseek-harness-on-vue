@@ -1,5 +1,4 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue';
-import type { Annotation } from '@/shared/page-protocol';
 import type { HarnessMessage } from '@/shared/runtime';
 import { shouldDisplayMessage } from './message-presentation';
 import { isNearScrollBottom, nextScrollFollowState } from './scroll-follow';
@@ -11,7 +10,7 @@ interface TimelineEntry {
 }
 
 type DisplayBlock =
-  | { id: string; type: 'message'; message: HarnessMessage; annotations?: readonly Annotation[] }
+  | { id: string; type: 'message'; message: HarnessMessage }
   | { id: string; type: 'timeline'; item: TimelineEntry };
 
 const displayFeed = ref<DisplayBlock[]>([]);
@@ -120,9 +119,7 @@ export function useTimelineView(
     for (const message of messages()) {
       if (seenMessages.has(message)) continue;
       seenMessages.add(message);
-      const annotations = message.role === 'user' && message.annotations?.length
-        ? message.annotations : undefined;
-      displayFeed.value.push({ id: crypto.randomUUID(), type: 'message', message, annotations });
+      displayFeed.value.push({ id: crypto.randomUUID(), type: 'message', message });
     }
   }, { flush: 'sync' });
 

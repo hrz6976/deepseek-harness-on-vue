@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive } from 'vue';
-import { assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, SiteUserScriptSchema } from '@/shared/broker-schema';
+import { AnnotationSchema, assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, SiteUserScriptSchema } from '@/shared/broker-schema';
 import { systemPrincipal } from '@/kernel/broker';
 import { workspaceRevision } from '@/shared/capability-protocol';
 import { matchesPagePattern } from '@/shared/page-protocol';
@@ -50,6 +50,18 @@ test('broker validates bounded public web requests', () => {
     'session-token-with-at-least-32-bytes', 'request-web-bad', systemPrincipal(),
     { provider: 'web', action: 'open', input: { url: 'file:///etc/passwd' } },
   ));
+});
+
+test('annotation schema is the persisted type boundary and keeps empty notes', () => {
+  assert.equal(AnnotationSchema.safeParse({
+    id: 'annotation-1',
+    scope: { tabId: 1, frameId: 0, url: 'https://example.test/page', origin: 'https://example.test' },
+    target: {
+      nodeRef: 'n_4', selector: '#content',
+      fingerprint: { tag: 'main', classes: [], attributes: {} },
+    },
+    text: '', createdAt: 1,
+  }).success, true);
 });
 
 test('workspace revisions distinguish absent and changed file bodies', () => {

@@ -9,6 +9,8 @@ test('page-agent policy separates host DOM changes from sandbox plugins', () => 
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /create_plugin creates a sandbox capability/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /mcp_connect connects the built-in client/);
   assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /MCP server.*external listening process/i);
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /<page_annotations>/);
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /empty annotation text/i);
   assert.match(guardPageAgentTool({
     name: 'create_plugin',
     args: { source: `export default { setup() { document.head.append('style') } }` },

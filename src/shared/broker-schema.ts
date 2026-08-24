@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CapabilityPrincipalSchema, type CapabilityEnvelope, type CapabilityPrincipal } from './capability-protocol';
-import type { JsonValue } from './runtime';
+import { MAX_MESSAGE_ANNOTATIONS, type JsonValue } from './runtime';
 
 export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.string(),
@@ -82,7 +82,7 @@ const TokenUsageSchema = z.object({
   cost: z.object({ input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(), total: z.number() }).optional(),
 });
 
-const AnnotationSchema = z.object({
+export const AnnotationSchema = z.object({
   id: z.string().min(1).max(500),
   scope: z.object({
     tabId: z.number().int(),
@@ -98,7 +98,7 @@ const AnnotationSchema = z.object({
 });
 
 const HarnessMessageSchema = z.discriminatedUnion('role', [
-  z.object({ role: z.literal('user'), text: z.string(), annotations: z.array(AnnotationSchema).max(100).optional() }),
+  z.object({ role: z.literal('user'), text: z.string(), annotations: z.array(AnnotationSchema).max(MAX_MESSAGE_ANNOTATIONS).optional() }),
   z.object({ role: z.literal('note'), text: z.string() }),
   z.object({ role: z.literal('summary'), text: z.string(), tokensBefore: z.number().optional() }),
   z.object({

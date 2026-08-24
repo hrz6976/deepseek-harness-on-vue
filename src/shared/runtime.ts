@@ -16,6 +16,7 @@ import type { Annotation } from './page-protocol';
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject { [key: string]: JsonValue }
+export const MAX_MESSAGE_ANNOTATIONS = 100;
 
 export interface JsonSchema {
   type?: string;

@@ -39,6 +39,7 @@ export {
   CapabilityScopeSchema,
 } from '@/shared/capability-protocol';
 export {
+  AnnotationSchema,
   ElementFingerprintSchema,
   ElementRefSchema,
   JsonValueSchema,

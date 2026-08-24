@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import type { JsonValue } from './runtime';
 import type {
+  AnnotationSchema,
   ElementFingerprintSchema,
   ElementRefSchema,
   LiveRuleActionSchema,
@@ -85,13 +86,7 @@ export interface PatchTransaction {
   verification: PatchVerification[];
 }
 
-export interface Annotation {
-  id: string;
-  scope: PageScope;
-  target: ElementRef;
-  text: string;
-  createdAt: number;
-}
+export type Annotation = z.infer<typeof AnnotationSchema>;
 
 export type LiveRuleAction = z.infer<typeof LiveRuleActionSchema>;
 

@@ -48,14 +48,13 @@ import { SandboxComposer } from './sandbox-composer';
 import { createSandboxBroker } from './sandbox-broker';
 import { useSandboxInspector } from './sandbox-inspector';
 import appTemplate from './sandbox-app.html?raw';
-import harnessMarkUrl from './assets/harness-mark.svg';
 import defaults from 'virtual:plugin-defaults';
 import {
   type Annotation,
   type PageEvent,
   type PageSnapshot,
 } from '@/shared/page-protocol';
-import type { FsService, ToolCall } from '@/shared/runtime';
+import { MAX_MESSAGE_ANNOTATIONS, type FsService, type ToolCall } from '@/shared/runtime';
 import type { TaskContext } from '@/shared/task-model';
 import { DEFAULT_SESSION_LLM_CONFIG, normalizeSessionLlmConfig, type ReasoningEffort } from '@/shared/task-model';
 import { appendTimeline, displayMessageText, useTimelineView } from './sandbox-timeline';
@@ -115,7 +114,7 @@ window.addEventListener('message', event => {
   }
   const message = event.data as { channel?: unknown; event?: PageEvent };
   if (message.channel === 'harness-page-event-v1' && message.event) {
-    updateAnnotationContext(message.event);
+    if (!updateAnnotationContext(message.event)) return;
     runtime.emit('page/event', message.event);
     const text = summarizeEvent(message.event);
     if (text) appendTimeline('event', text);
@@ -318,7 +317,7 @@ const App = {
       ...timelineView, ...inspectorState,
       displayMessageText, renderMarkdown, busy, runtimeReady, runtimeFailure, runtimeLabel,
       annotations, taskService,
-      uiTheme, appMenuOptions, harnessMarkUrl, sessionModelOptions, sessionThinkingOptions,
+      uiTheme, appMenuOptions, sessionModelOptions, sessionThinkingOptions,
       sessionLlmConfig, sessionThinkingValue, sessionModelLabel,
       snapshot, picker, send, clearAnnotations, setSessionModel, setSessionThinking,
       contextKindLabel, formatToolArguments, toolStatusLabel, toolStatusType,
@@ -408,15 +407,20 @@ function summarizeEvent(event: PageEvent): string | null {
   }
 }
 
-function updateAnnotationContext(event: PageEvent): void {
+function updateAnnotationContext(event: PageEvent): boolean {
   if (event.type === 'page/connected' || event.type === 'page/route-changed') {
     annotations.value.splice(0);
-    return;
+    return true;
   }
-  if (event.type !== 'annotation/created') return;
+  if (event.type !== 'annotation/created') return true;
   const index = annotations.value.findIndex(annotation => annotation.id === event.annotation.id);
   if (index >= 0) annotations.value.splice(index, 1, event.annotation);
-  else annotations.value.push(event.annotation);
+  else if (annotations.value.length < MAX_MESSAGE_ANNOTATIONS) annotations.value.push(event.annotation);
+  else {
+    pushError(`每条消息最多附带 ${MAX_MESSAGE_ANNOTATIONS} 个批注；请先发送或清除现有批注。`);
+    return false;
+  }
+  return true;
 }
 
 function countNodes(nodes: PageSnapshot['nodes']): number {

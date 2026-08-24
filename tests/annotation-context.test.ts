@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canSubmitPageMessage, takeAnnotationSubmission } from '@/extension/annotation-context';
-import { formatAnnotationContext, userMessageTextForModel } from '@/shared/message-annotations';
+import { PAGE_AGENT_BOUNDARY_PROMPT } from '@/extension/agent-policy';
+import { formatAnnotationPayload, userMessageTextForModel } from '@/shared/message-annotations';
 import type { Annotation } from '@/shared/page-protocol';
 
 test('annotation context preserves user text and the selected element identity', () => {
@@ -18,13 +19,15 @@ test('annotation context preserves user text and the selected element identity',
     createdAt: 1,
   };
 
-  const prompt = formatAnnotationContext([annotation]);
-  assert.match(prompt, /这是个啥/);
-  assert.match(prompt, /#content/);
-  assert.match(prompt, /Dashboard/);
-  assert.match(prompt, /https:\/\/example\.test\/page/);
-  assert.match(prompt, /page_style_inspect/);
-  assert.equal(formatAnnotationContext([]), '');
+  const payload = formatAnnotationPayload([annotation]);
+  assert.match(payload, /^<page_annotations>/);
+  assert.match(payload, /这是个啥/);
+  assert.match(payload, /#content/);
+  assert.match(payload, /Dashboard/);
+  assert.match(payload, /https:\/\/example\.test\/page/);
+  assert.equal(formatAnnotationPayload([]), '');
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /empty annotation text/i);
+  assert.match(PAGE_AGENT_BOUNDARY_PROMPT, /page_style_inspect/);
 
   const modelText = userMessageTextForModel({ role: 'user', text: '1', annotations: [annotation] });
   assert.match(modelText, /^1/);
@@ -37,7 +40,14 @@ test('annotation context preserves user text and the selected element identity',
   assert.deepEqual(composerAnnotations, []);
 
   assert.equal(canSubmitPageMessage('', [annotation]), true);
-  assert.match(formatAnnotationContext([{ ...annotation, text: '' }]), /"text": ""/u);
+  assert.match(formatAnnotationPayload([{ ...annotation, text: '' }]), /"text":""/u);
   assert.equal(canSubmitPageMessage('1', []), true);
   assert.equal(canSubmitPageMessage('   ', []), false);
+
+  const many = Array.from({ length: 25 }, (_, index) => ({
+    ...annotation, id: `annotation-${index}`, text: `note-${index}`,
+  }));
+  const manyPayload = formatAnnotationPayload(many);
+  assert.match(manyPayload, /note-0/u);
+  assert.match(manyPayload, /note-24/u);
 });

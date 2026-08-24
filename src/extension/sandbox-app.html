@@ -2,7 +2,6 @@
   <main class="shell">
     <header class="app-header">
       <div class="brand">
-        <img class="brand-mark" :src="harnessMarkUrl" alt="" />
         <button class="task-identity" type="button" @click="openInspector('tasks')">
           <span>{{ activeTask?.title || '正在恢复任务' }}</span>
           <small><i :class="activeTask?.status"></i>{{ taskStatusLabel }}</small>
@@ -67,8 +66,8 @@
         </template>
         <template v-else-if="block.type === 'message'">
           <div v-if="displayMessageText(block.message)" class="message-text">{{ displayMessageText(block.message) }}</div>
-          <div v-if="block.message.role === 'user' && block.annotations?.length" class="message-annotations" aria-label="随消息发送的页面批注">
-            <section v-for="annotation in block.annotations" :key="annotation.id" class="message-annotation">
+          <div v-if="block.message.role === 'user' && block.message.annotations?.length" class="message-annotations" aria-label="随消息发送的页面批注">
+            <section v-for="annotation in block.message.annotations" :key="annotation.id" class="message-annotation">
               <span class="message-annotation-label">{{ annotation.text ? '批注' : '批注目标' }}</span><p v-if="annotation.text">{{ annotation.text }}</p><code>{{ annotation.target.selector }}</code>
             </section>
           </div>

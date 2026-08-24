@@ -99,6 +99,7 @@ test('runCompaction: splices the prefix into one summary message, keeps the tail
   assert.match(seenReq.messages[0].text, /<conversation>[\s\S]*old work[\s\S]*<\/conversation>/);
   assert.deepEqual(seenReq.tools, []);
   assert.match(seenReq.systemPrompt, /Do NOT continue the conversation/);
+  assert.match(seenReq.systemPrompt, /<page_annotations>/);
 });
 
 test('runCompaction: invalidates stale provider usage retained from the old transcript', async () => {

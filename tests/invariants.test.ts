@@ -88,7 +88,7 @@ test('toPiMessages: user annotations are included in model context', () => {
     }],
   }], 'm');
   assert.match(out[0].content, /#content/);
-  assert.match(out[0].content, /"text": ""/);
+  assert.match(out[0].content, /"text":""/);
 });
 
 test('toPiMessages: every toolCall is followed by a matching toolResult', () => {
