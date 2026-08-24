@@ -38,6 +38,17 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
     async function restore(preferCurrentTask: boolean): Promise<void> {
       const previousActiveTaskId = preferCurrentTask ? activeTaskId.value : null;
       const restored = await store.load();
+      if (!preferCurrentTask) {
+        // A sandbox frame cannot keep executing after its side panel/runtime is
+        // destroyed. Reconcile the durable status on the next boot so the UI
+        // never advertises a ghost run that has no AbortController behind it.
+        const interrupted = restored.tasks.filter(task => task.status === 'running');
+        await Promise.all(interrupted.map(async task => {
+          store.touch(task, 'idle');
+          await store.persistTask(task);
+          await store.appendEvent(task.id, 'task/run-interrupted', { reason: 'runtime-restarted' });
+        }));
+      }
       tasks.splice(0, tasks.length, ...restored.tasks);
       contexts.splice(0, contexts.length, ...restored.contexts);
       artifacts.splice(0, artifacts.length, ...restored.artifacts);

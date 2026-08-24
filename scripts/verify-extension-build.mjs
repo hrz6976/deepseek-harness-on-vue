@@ -11,7 +11,8 @@ assert.equal(typeof sandboxPage, 'string', 'manifest must declare a sandbox page
 assert.equal(fallbackPage, 'src/extension/sidepanel-fallback.html', 'manifest must default to the inert side-panel fallback');
 await access(resolve(outputRoot, 'src/extension/sidepanel.html'));
 const fallbackHtml = await readFile(resolve(outputRoot, fallbackPage), 'utf8');
-assert.doesNotMatch(fallbackHtml, /harness-sandbox|<script/iu, 'fallback page must not boot or retain an agent runtime');
+assert.doesNotMatch(fallbackHtml, /harness-sandbox/iu, 'fallback page must not boot or retain an agent runtime');
+assert.match(fallbackHtml, /<script\b[^>]*type="module"/iu, 'fallback page must include its lightweight tab router');
 const sandboxHtml = await readFile(resolve(outputRoot, sandboxPage), 'utf8');
 assert.match(sandboxHtml, /<script\s+src="\/sandbox-loader\.js"><\/script>/u,
   'sandbox page must install its startup-error relay before the app entry');

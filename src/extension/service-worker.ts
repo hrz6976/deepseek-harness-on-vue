@@ -32,6 +32,7 @@ const ports = new Map<chrome.runtime.Port, number>();
 const mcpHost = new McpHost();
 const capabilityHost = new TrustedCapabilityHost();
 const siteSkills = createSiteSkillRuntime(executePageCommand, emitPageEvent);
+let userScriptRestoreQueue = Promise.resolve();
 
 capabilityHost.register('workspace', {
   request: async () => { throw new Error('Workspace requests must be handled by the trusted side-panel provider.'); },
@@ -83,7 +84,7 @@ capabilityHost.register('web', {
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
 void chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 void configureExistingTabs().catch(error => console.warn('[harness] could not initialize tab panels', error));
-void siteSkills.restoreUserScripts().catch(error => console.warn('[harness] could not restore user scripts', error));
+void queueUserScriptRestore('service worker startup');
 
 chrome.runtime.onConnect.addListener(port => {
   const tabId = parseSidePanelPortName(port.name);
@@ -110,11 +111,13 @@ chrome.runtime.onUserScriptMessage.addListener((message: unknown, _sender, sendR
   return true;
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(details => {
   void configureExistingTabs().catch(error => console.warn('[harness] could not configure installed tabs', error));
+  void restorePersistedPagePlugins(`extension ${details.reason}`);
 });
 chrome.runtime.onStartup.addListener(() => {
   void configureExistingTabs().catch(error => console.warn('[harness] could not configure startup tabs', error));
+  void restorePersistedPagePlugins('browser startup');
 });
 
 chrome.tabs.onCreated.addListener(tab => {
@@ -144,6 +147,26 @@ async function configureExistingTabs(): Promise<void> {
   await Promise.all(tabs.flatMap(tab => tab.id == null
     ? []
     : [configureTabPanel(tab.id, tab.pendingUrl ?? tab.url)]));
+}
+
+function queueUserScriptRestore(reason: string): Promise<void> {
+  const restore = userScriptRestoreQueue
+    .catch(() => undefined)
+    .then(() => siteSkills.restoreUserScripts());
+  userScriptRestoreQueue = restore.catch(error => {
+    console.warn(`[harness] could not restore user scripts during ${reason}`, error);
+  });
+  return userScriptRestoreQueue;
+}
+
+async function restorePersistedPagePlugins(reason: string): Promise<void> {
+  await queueUserScriptRestore(reason);
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.flatMap(tab => tab.id == null || tab.status !== 'complete' || !isInspectableUrl(tab.url)
+    ? []
+    : [siteSkills.applyMatching(tab.id, tab.url).catch(error => {
+        console.warn(`[harness] could not restore page skills in tab ${tab.id} during ${reason}`, error);
+      })]));
 }
 
 async function configureTabPanel(tabId: number, url: string | undefined): Promise<void> {

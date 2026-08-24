@@ -23,10 +23,12 @@ export const SandboxComposer = defineComponent({
   props: {
     annotationCount: { type: Number, required: true },
     busy: { type: Boolean, required: true },
+    running: { type: Boolean, required: true },
     runtimeReady: { type: Boolean, required: true },
   },
   emits: {
     send: (text: string) => typeof text === 'string',
+    stop: () => true,
     clearAnnotations: () => true,
   },
   setup(props, { emit }) {
@@ -76,7 +78,8 @@ export const SandboxComposer = defineComponent({
           <span class="composer-hint">Ctrl Enter 发送</span>
           <div class="composer-actions">
             <slot name="controls"></slot>
-            <n-button type="primary" size="small" attr-type="button" :loading="busy" :disabled="!runtimeReady || !canSend" @click="send">
+            <n-button v-if="running" type="error" secondary size="small" attr-type="button" @click="$emit('stop')">停止</n-button>
+            <n-button v-else type="primary" size="small" attr-type="button" :loading="busy" :disabled="!runtimeReady || busy || !canSend" @click="send">
               <template #icon><n-icon><Send /></n-icon></template>{{ !runtimeReady ? '初始化中' : busy ? '处理中' : '发送' }}
             </n-button>
           </div>

@@ -80,11 +80,13 @@ export function useSandboxInspector(
   }
   async function createTask(): Promise<void> {
     if (!taskService.value) return;
+    if (loopService.value?.running.value) return reportError('请先停止正在执行的任务，再新建。');
     await taskService.value.createTask('New task');
     inspector.value = null;
   }
   async function activateTask(id: string): Promise<void> {
     const task = taskService.value;
+    if (loopService.value?.running.value) return reportError('请先停止正在执行的任务，再切换。');
     if (task && task.activeTaskId.value !== id) await task.activateTask(id);
   }
   async function deleteTask(id: string): Promise<void> {

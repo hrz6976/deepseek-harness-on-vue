@@ -42,7 +42,7 @@ service worker 为每个 `http(s)` tab 调用 `sidePanel.setOptions({ tabId, pat
 - 每个 broker envelope 都包含由 caller-bound `BrokerRuntime` 生成的 capability principal；trusted shell 会校验 provider、permission、scope 与 task id。side panel 在任何 OPFS plugin 挂载前一次性签发高熵 session capability，并拒绝之后的重复握手和无 session/错误 session envelope，避免动态代码直接伪造 `postMessage` 请求。
 - 动态模块表只包含公共 `@harness/sdk` 与第三方 authoring 依赖，不暴露 root Cordis、host、boot、compiler 或 mount/unmount。
 - page command、页面事件和 MCP client 都按 tab 路由。
-- `chrome://`、`chrome-extension://` 等页面切换到不启动 sandbox 的 tab-specific fallback；同一 tab 进入 `http(s)` 时再切换到绑定该 tab id 的 agent panel。
+- `chrome://`、`chrome-extension://` 等页面切换到不启动 sandbox 的 tab-specific fallback；fallback 只运行轻量标签路由，当前 tab 进入 `http(s)` 或切换到新的 HTTP(S) tab 时，会自动导航到绑定新 tab id 的 agent panel。
 - OPFS、LLM 配置和 recipe 属于扩展级数据；对话、批注、DOM 引用和运行期撤销属于 tab 会话。
 - `nodeRef` 只持有弱引用和五分钟租约；SPA 路由代际变化会清空节点租约和旧事务，未发生路由变化的 undo 闭包也会在两小时空闲后释放。
 - tab 关闭时清理该 tab 的 MCP client；content-script 事务随页面生命周期自然销毁。

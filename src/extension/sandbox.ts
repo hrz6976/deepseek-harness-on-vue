@@ -142,7 +142,8 @@ const App = {
       () => taskService.value?.messages ?? [],
       () => taskService.value?.activeTaskId.value,
     );
-    const busy = computed(() => actionBusy.value || loopService.value?.running.value === true);
+    const running = computed(() => loopService.value?.running.value === true);
+    const busy = computed(() => actionBusy.value || running.value);
     const runtimeLabel = computed(() => runtimeFailure.value ? '异常' : runtimeReady.value ? '就绪' : '启动中');
     const inspectorState = useSandboxInspector(
       taskService, loopService, fsService, managerService, broker, pushError,
@@ -232,6 +233,7 @@ const App = {
       const submittedAnnotations = takeAnnotationSubmission(annotations.value);
       timelineView.resumeTimelineFollow();
       const task = taskService.value;
+      actionBusy.value = true;
       try {
         if (task) {
           if (task.activeTask()?.title === 'New task') await task.renameTask(task.activeTask()!.id, text.slice(0, 48));
@@ -247,7 +249,13 @@ const App = {
       } catch (error) {
         if (task?.activeTask()) await task.setStatus(task.activeTask()!.id, 'failed');
         pushError(`发送失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        actionBusy.value = false;
       }
+    }
+
+    function stop(): void {
+      loopService.value?.stop();
     }
 
     function clearAnnotations(): void {
@@ -315,11 +323,11 @@ const App = {
 
     return {
       ...timelineView, ...inspectorState,
-      displayMessageText, renderMarkdown, busy, runtimeReady, runtimeFailure, runtimeLabel,
+      displayMessageText, renderMarkdown, busy, running, runtimeReady, runtimeFailure, runtimeLabel,
       annotations, taskService,
       uiTheme, appMenuOptions, sessionModelOptions, sessionThinkingOptions,
       sessionLlmConfig, sessionThinkingValue, sessionModelLabel,
-      snapshot, picker, send, clearAnnotations, setSessionModel, setSessionThinking,
+      snapshot, picker, send, stop, clearAnnotations, setSessionModel, setSessionThinking,
       contextKindLabel, formatToolArguments, toolStatusLabel, toolStatusType,
     };
   },

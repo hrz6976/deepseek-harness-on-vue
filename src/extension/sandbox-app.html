@@ -82,8 +82,10 @@
     <sandbox-composer
       :annotation-count="annotations.length"
       :busy="busy"
+      :running="running"
       :runtime-ready="runtimeReady"
       @send="send"
+      @stop="stop"
       @clear-annotations="clearAnnotations"
     >
       <template #controls>

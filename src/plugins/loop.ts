@@ -56,8 +56,22 @@ function apply(ctx: Context): void {
         usage: message.usage ? JSON.parse(JSON.stringify(message.usage)) as JsonObject : null,
       });
     };
-    const safePoint = (turn: number, reason: SafePointReason) =>
-      ctx.parallel('loop/safe-point', { turn, reason });
+    const persistCheckpoint = async (): Promise<void> => {
+      try {
+        if (task.activeTask()) await task.saveCheckpoint();
+      } catch (error) {
+        // A checkpoint failure must not replace the model/tool outcome, but it
+        // must remain visible in diagnostics because it weakens crash recovery.
+        log(`task checkpoint was not persisted: ${errorMessage(error)}`, 'warn');
+      }
+    };
+    const safePoint = async (turn: number, reason: SafePointReason): Promise<void> => {
+      // Persist only protocol-stable messages before capabilities are allowed
+      // to reload. Closing the side panel after this point can restore the
+      // completed tool round instead of falling back to the previous run.
+      await persistCheckpoint();
+      await ctx.parallel('loop/safe-point', { turn, reason });
+    };
 
     ctx.provide('loop', {
       running,
@@ -66,17 +80,22 @@ function apply(ctx: Context): void {
         if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
         if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
         await task.ready;
-        const submittedAnnotations = options?.annotations?.length
-          ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
-          : undefined;
-        messages.push({ role: 'user', text: goal, ...(submittedAnnotations ? { annotations: submittedAnnotations } : {}) });
-        // Keep one model profile across every internal reasoning/tool sub-turn
-        // in this run. A selector change applies atomically to the next run.
-        const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);
+        if (running.value) { note('a task is already running — stop it first'); return; }
         running.value = true;
         const controller = new AbortController();
         ctrl = controller;
         try {
+          const submittedAnnotations = options?.annotations?.length
+            ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
+            : undefined;
+          messages.push({ role: 'user', text: goal, ...(submittedAnnotations ? { annotations: submittedAnnotations } : {}) });
+          // The prompt is durable before the first provider request. If the
+          // sandbox is destroyed while streaming, reopening the panel still
+          // restores the submitted turn rather than an empty conversation.
+          await persistCheckpoint();
+          // Keep one model profile across every internal reasoning/tool sub-turn
+          // in this run. A selector change applies atomically to the next run.
+          const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);
           await ctx.parallel('loop/busy');
           let recovered = false; // one recovery retry per run, granted via loop/llm-error
           let truncationContinuations = 0;
@@ -245,7 +264,15 @@ function apply(ctx: Context): void {
           const last = messages.at(-1);
           if (last?.role === 'assistant' && last.status === 'streaming') last.status = 'error'; // close the cursor, never leave it blinking
           note(controller.signal.aborted ? 'stopped' : `loop error: ${errorMessage(error)}`);
-        } finally { running.value = false; ctrl = null; await ctx.parallel('loop/idle'); }
+        } finally {
+          // Normal completion, manual Stop, provider failure, and plugin
+          // disposal all converge here. Unfinished assistant placeholders are
+          // intentionally filtered by the task store; completed turns remain.
+          await persistCheckpoint();
+          running.value = false;
+          ctrl = null;
+          await ctx.parallel('loop/idle');
+        }
       },
     });
     ctx.effect(() => () => { ctrl?.abort(); log('loop plugin unmounted', 'warn'); }, 'loop.dispose');

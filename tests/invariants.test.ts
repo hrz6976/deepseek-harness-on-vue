@@ -38,7 +38,8 @@ async function mountHarness(script, options = {}) {
     },
   });
   const task = {
-    ready: Promise.resolve(), messages: [], activeTask: () => null, async appendEvent() {}, ...options.task,
+    ready: Promise.resolve(), messages: [], activeTask: () => null,
+    async appendEvent() {}, async saveCheckpoint() {}, ...options.task,
   };
   await provideTestService('task', task);
   await applyTestPlugin(loopPlugin);
@@ -415,20 +416,26 @@ test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async
 
 // ------------------------------------------------------------ loop: control --
 test('loop: stop mid-stream — loop exits with a "stopped" note, no stuck cursor', async () => {
+  const checkpoints = [];
   const { loop } = await mountHarness(async function* (req) {
     while (!req.signal.aborted) {
       yield { type: 'update', text: 'working…', thinking: '', toolCalls: [] };
       await sleep(5);
     }
-  });
+  }, { task: {
+    activeTask: () => ({ id: 'task-1', llm: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
+    async saveCheckpoint() { checkpoints.push(loop.messages.map(message => ({ ...message }))); },
+  } });
   const p = loop.run('goal');
   await sleep(30);
+  assert.equal(checkpoints[0]?.[0]?.text, 'goal', 'the submitted prompt is durable before streaming finishes');
   loop.stop();
   await p;
   assert.ok(notesOf(loop).some(t => t === 'stopped'));
   assert.equal(loop.running.value, false);
   const last = loop.messages.at(-1);
   assert.notEqual(last.status, 'streaming', 'cursor must not be left blinking');
+  assert.ok(checkpoints.length >= 2, 'manual stop flushes a final stable checkpoint');
 });
 
 test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async () => {

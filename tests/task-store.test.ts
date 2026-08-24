@@ -202,3 +202,25 @@ test('task runtime owns one conversation and checkpoints it across task switches
   await task.activateTask(second.id);
   assert.equal(task.messages[0]?.text, 'second conversation');
 });
+
+test('task runtime clears a ghost running status after the sandbox restarts', async () => {
+  const fs = fakeFs({
+    '.harness/sessions/index.json': JSON.stringify({ activeTaskId: 'interrupted', taskIds: ['interrupted'] }),
+    '.harness/sessions/interrupted/meta.json': JSON.stringify({
+      id: 'interrupted', title: 'Interrupted task', status: 'running',
+      llm: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' },
+      capabilityIds: [], createdAt: 1, updatedAt: 1,
+    }),
+    '.harness/sessions/interrupted/checkpoint.json': JSON.stringify({
+      taskId: 'interrupted', messages: [{ role: 'user', text: 'keep this prompt' }], savedAt: 1,
+    }),
+  });
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.reflect.get('task') as TaskRuntimeService;
+  await task.ready;
+
+  assert.equal(task.activeTask()?.status, 'idle');
+  assert.equal(task.messages[0]?.text, 'keep this prompt');
+  assert.match(fs.read('.harness/sessions/interrupted/events.jsonl')!, /"type":"task\/run-interrupted"/);
+});
