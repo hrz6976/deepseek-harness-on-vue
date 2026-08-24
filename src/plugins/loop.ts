@@ -62,11 +62,14 @@ function apply(ctx: Context): void {
     ctx.provide('loop', {
       running,
       stop: () => { ctrl?.abort(); },
-      async run(goal: string) {
+      async run(goal: string, options) {
         if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
         if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
         await task.ready;
-        messages.push({ role: 'user', text: goal });
+        const submittedAnnotations = options?.annotations?.length
+          ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
+          : undefined;
+        messages.push({ role: 'user', text: goal, ...(submittedAnnotations ? { annotations: submittedAnnotations } : {}) });
         // Keep one model profile across every internal reasoning/tool sub-turn
         // in this run. A selector change applies atomically to the next run.
         const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);

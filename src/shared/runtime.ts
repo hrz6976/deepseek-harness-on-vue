@@ -11,6 +11,7 @@ import type {
   TaskStatus,
   SessionLlmConfig,
 } from './task-model';
+import type { Annotation } from './page-protocol';
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -51,7 +52,11 @@ export interface TokenUsage {
   };
 }
 
-export interface UserMessage { role: 'user'; text: string }
+export interface UserMessage {
+  role: 'user';
+  text: string;
+  annotations?: Annotation[];
+}
 export interface NoteMessage { role: 'note'; text: string }
 export interface SummaryMessage { role: 'summary'; text: string; tokensBefore?: number }
 export interface AssistantHarnessMessage {
@@ -178,7 +183,7 @@ export interface UiService {
 export interface LoopService {
   running: Ref<boolean>;
   stop(): void;
-  run(goal: string): Promise<void>;
+  run(goal: string, options?: { annotations?: readonly Annotation[] }): Promise<void>;
 }
 
 export interface ManagerService {

@@ -58,6 +58,23 @@ test('serializeTranscript: role tags, tool calls with truncated results, notes a
   assert.ok(!t.includes('SECRET THOUGHTS'));
 });
 
+test('serializeTranscript: persisted page annotations survive compaction', () => {
+  const t = serializeTranscript([{
+    role: 'user', text: 'fix this', annotations: [{
+      id: 'annotation-1',
+      scope: { tabId: 1, frameId: 0, url: 'https://example.test/page', origin: 'https://example.test' },
+      target: {
+        nodeRef: 'n_4', selector: '#content',
+        fingerprint: { tag: 'main', text: 'Dashboard', classes: [], attributes: {} },
+      },
+      text: '边框太重', createdAt: 1,
+    }],
+  }]);
+  assert.match(t, /边框太重/u);
+  assert.match(t, /#content/u);
+  assert.match(t, /example\.test\/page/u);
+});
+
 test('toPiMessages: summary role becomes a user checkpoint message', () => {
   const out = toPiMessages([{ role: 'summary', text: 'THE SUMMARY' }], 'm');
   assert.equal(out.length, 1);

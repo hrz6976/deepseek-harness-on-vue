@@ -14,7 +14,7 @@ import { ref } from 'vue';
 import { createProvider } from '@earendil-works/pi-ai';
 import type { AssistantMessage, Context as PiContext, Message, Model, StopReason, Usage } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
-import { errorMessage, log, parseJsonObject } from '@/sdk';
+import { errorMessage, log, parseJsonObject, userMessageTextForModel } from '@/sdk';
 import type { HarnessMessage, LlmRequest, LlmStreamEvent, ToolCall } from '@/shared/runtime';
 
 interface LlmConfig {
@@ -46,7 +46,7 @@ export function toHarnessFinishReason(reason: StopReason): Exclude<LlmStreamEven
 export function toPiMessages(messages: HarnessMessage[], modelId: string): Message[] {
   const out: Message[] = [];
   for (const m of messages) {
-    if (m.role === 'user') out.push({ role: 'user', content: m.text, timestamp: Date.now() });
+    if (m.role === 'user') out.push({ role: 'user', content: userMessageTextForModel(m), timestamp: Date.now() });
     else if (m.role === 'summary') // compaction checkpoint goes to the model as user prose (pi does the same)
       out.push({ role: 'user', content: `[Context checkpoint — the earlier conversation was compacted into this summary]\n\n${m.text}`, timestamp: Date.now() });
     else if (m.role === 'assistant') {

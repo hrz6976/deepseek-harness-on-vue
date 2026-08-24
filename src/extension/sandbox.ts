@@ -32,7 +32,7 @@ import {
   World,
 } from '@vicons/tabler';
 import { useService } from '@/kernel/services';
-import { useBusOn, useRequestTransform, useToolGuard } from '@/kernel/bus';
+import { useBusOn, useToolGuard } from '@/kernel/bus';
 import { usePromptSection } from '@/kernel/contrib';
 import { UiContributionsHost } from '@/kernel/ui';
 import { capabilities } from '@/kernel/capabilities';
@@ -43,7 +43,7 @@ import { cordisContextKey, runtime } from '@/kernel/cordis';
 import { brokerFsPlugin } from './broker-fs';
 import { brokerLlmPlugin } from './broker-llm';
 import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from './agent-policy';
-import { attachAnnotationContext, canSubmitPageMessage, formatAnnotationContext, takeAnnotationSubmission } from './annotation-context';
+import { canSubmitPageMessage, takeAnnotationSubmission } from './annotation-context';
 import { SandboxComposer } from './sandbox-composer';
 import { createSandboxBroker } from './sandbox-broker';
 import { useSandboxInspector } from './sandbox-inspector';
@@ -55,7 +55,7 @@ import {
   type PageEvent,
   type PageSnapshot,
 } from '@/shared/page-protocol';
-import type { FsService, LlmRequest, ToolCall } from '@/shared/runtime';
+import type { FsService, ToolCall } from '@/shared/runtime';
 import type { TaskContext } from '@/shared/task-model';
 import { DEFAULT_SESSION_LLM_CONFIG, normalizeSessionLlmConfig, type ReasoningEffort } from '@/shared/task-model';
 import { appendTimeline, displayMessageText, useTimelineView } from './sandbox-timeline';
@@ -139,12 +139,9 @@ const App = {
     const managerService = useService('manager');
     let workspaceRefreshTimer: number | null = null;
     const unsavedPagePatch = ref(false);
-    const submittedAnnotationContext = ref('');
-    const pendingUserAnnotations = ref<readonly Annotation[]>([]);
     const timelineView = useTimelineView(
       () => taskService.value?.messages ?? [],
       () => taskService.value?.activeTaskId.value,
-      pendingUserAnnotations,
     );
     const busy = computed(() => actionBusy.value || loopService.value?.running.value === true);
     const runtimeLabel = computed(() => runtimeFailure.value ? '异常' : runtimeReady.value ? '就绪' : '启动中');
@@ -165,7 +162,6 @@ const App = {
       return `${model} · ${thinking}`;
     });
     usePromptSection({ name: 'extension-page-boundary', order: -100, text: PAGE_AGENT_BOUNDARY_PROMPT });
-    useRequestTransform<LlmRequest>(request => attachAnnotationContext(request, submittedAnnotationContext.value));
     usePromptSection({
       name: 'extension-page-persistence',
       order: -90,
@@ -235,8 +231,6 @@ const App = {
         return;
       }
       const submittedAnnotations = takeAnnotationSubmission(annotations.value);
-      pendingUserAnnotations.value = submittedAnnotations;
-      submittedAnnotationContext.value = formatAnnotationContext(submittedAnnotations);
       timelineView.resumeTimelineFollow();
       const task = taskService.value;
       try {
@@ -245,7 +239,7 @@ const App = {
           await task.setStatus(task.activeTask()!.id, 'running');
           await task.appendEvent('task/run-started', { prompt: text });
         }
-        await loop.run(text);
+        await loop.run(text, { annotations: submittedAnnotations });
         if (task) {
           await task.saveCheckpoint();
           await task.setStatus(task.activeTask()!.id, 'idle');
@@ -254,9 +248,6 @@ const App = {
       } catch (error) {
         if (task?.activeTask()) await task.setStatus(task.activeTask()!.id, 'failed');
         pushError(`发送失败：${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        pendingUserAnnotations.value = [];
-        submittedAnnotationContext.value = '';
       }
     }
 

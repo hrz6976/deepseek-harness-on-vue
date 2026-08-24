@@ -35,7 +35,17 @@ test('task store restores task identity independently from page/tab state', asyn
   await store.persistContexts(task.id, [page, file]);
   await store.persistArtifact(artifact);
   await store.appendEvent(task.id, 'task/created', { title: task.title });
-  await store.persistCheckpoint(task.id, [{ role: 'user', text: 'continue this task' }]);
+  await store.persistCheckpoint(task.id, [{
+    role: 'user', text: 'continue this task', annotations: [{
+      id: 'annotation-1',
+      scope: { tabId: 7, frameId: 0, url: 'https://example.test/product', origin: 'https://example.test' },
+      target: {
+        nodeRef: 'n_4', selector: '#buy',
+        fingerprint: { tag: 'button', text: 'Buy', classes: ['primary'], attributes: {} },
+      },
+      text: '', createdAt: 1,
+    }],
+  }]);
   await store.persistIndex(task.id, [task]);
 
   const restoredStore = new HarnessTaskStore(fs);
@@ -45,7 +55,10 @@ test('task store restores task identity independently from page/tab state', asyn
   assert.deepEqual(restored.contexts.map(item => item.kind), ['page', 'file']);
   assert.deepEqual(restored.artifacts.map(item => item.title), ['Launch report']);
   assert.match(fs.read(`.harness/sessions/${task.id}/events.jsonl`)!, /"sequence":1/);
-  assert.equal(restoredStore.checkpointMessages(task.id)[0]?.role, 'user');
+  const restoredMessage = restoredStore.checkpointMessages(task.id)[0];
+  assert.equal(restoredMessage?.role, 'user');
+  assert.equal(restoredMessage?.role === 'user' ? restoredMessage.annotations?.[0]?.target.selector : null, '#buy');
+  assert.equal(restoredMessage?.role === 'user' ? restoredMessage.annotations?.[0]?.text : null, '');
 });
 
 test('legacy task metadata gains a current per-session model profile', async () => {

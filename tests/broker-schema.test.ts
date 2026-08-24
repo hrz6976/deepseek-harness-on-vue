@@ -8,7 +8,15 @@ import { matchesPagePattern } from '@/shared/page-protocol';
 import { normalizeSessionLlmConfig } from '@/shared/task-model';
 
 test('broker envelope removes Vue proxies before the structured-clone boundary', () => {
-  const messages = reactive([{ role: 'user' as const, text: 'hello' }]);
+  const messages = reactive([{ role: 'user' as const, text: 'hello', annotations: [{
+    id: 'annotation-1',
+    scope: { tabId: 1, frameId: 0, url: 'https://example.test/page', origin: 'https://example.test' },
+    target: {
+      nodeRef: 'n_4', selector: '#content',
+      fingerprint: { tag: 'main', classes: [], attributes: {} },
+    },
+    text: '', createdAt: 1,
+  }] }]);
   const tools = reactive([{
     name: 'inspect',
     description: 'Inspect the page',
@@ -28,6 +36,9 @@ test('broker envelope removes Vue proxies before the structured-clone boundary',
   assert.notEqual(envelope.payload.provider === 'llm' && envelope.payload.action === 'complete'
     ? envelope.payload.input.request.messages
     : null, messages);
+  const parsedMessage = envelope.payload.provider === 'llm' && envelope.payload.action === 'complete'
+    ? envelope.payload.input.request.messages[0] : null;
+  assert.equal(parsedMessage?.role === 'user' ? parsedMessage.annotations?.[0]?.target.selector : null, '#content');
 });
 
 test('broker validates bounded public web requests', () => {

@@ -20,7 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { errorMessage, log, normalizeSessionLlmConfig } from '@/sdk';
+import { errorMessage, log, normalizeSessionLlmConfig, userMessageTextForModel } from '@/sdk';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { HarnessMessage, LlmRequest, LlmService } from '@/shared/runtime';
 import type { SessionLlmConfig } from '@/shared/task-model';
@@ -38,7 +38,8 @@ const ARGS_MAX = 300;
 export function estimateMessageTokens(message: HarnessMessage): number {
   const m = message;
   if (m.role === 'note') return 0;
-  let chars = m.text.length + (m.role === 'assistant' ? m.thinking.length : 0);
+  let chars = (m.role === 'user' ? userMessageTextForModel(m) : m.text).length
+    + (m.role === 'assistant' ? m.thinking.length : 0);
   if (m.role === 'assistant') {
     for (const tc of m.toolCalls) chars += tc.name.length + tc.args.length + String(tc.result ?? '').length;
   }
@@ -88,7 +89,7 @@ export function serializeTranscript(messages: HarnessMessage[]): string {
   const parts = [];
   for (const m of messages) {
     if (m.role === 'summary') parts.push(`[Previous context checkpoint]: ${m.text}`);
-    else if (m.role === 'user') parts.push(`[User]: ${m.text}`);
+    else if (m.role === 'user') parts.push(`[User]: ${userMessageTextForModel(m)}`);
     else if (m.role === 'assistant') {
       if (m.text) parts.push(`[Assistant]: ${m.text}`);
       for (const tc of m.toolCalls ?? []) {

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attachAnnotationContext, canSubmitPageMessage, formatAnnotationContext, takeAnnotationSubmission } from '@/extension/annotation-context';
+import { canSubmitPageMessage, takeAnnotationSubmission } from '@/extension/annotation-context';
+import { formatAnnotationContext, userMessageTextForModel } from '@/shared/message-annotations';
 import type { Annotation } from '@/shared/page-protocol';
 
 test('annotation context preserves user text and the selected element identity', () => {
@@ -25,16 +26,10 @@ test('annotation context preserves user text and the selected element identity',
   assert.match(prompt, /page_style_inspect/);
   assert.equal(formatAnnotationContext([]), '');
 
-  const request = attachAnnotationContext({
-    systemPrompt: 'system',
-    messages: [{ role: 'user', text: '1' }],
-    tools: [],
-    signal: new AbortController().signal,
-  }, prompt);
-  assert.equal(request.messages[0]?.role, 'user');
-  assert.match(request.messages[0]?.text ?? '', /^1/);
-  assert.match(request.messages[0]?.text ?? '', /这是个啥/);
-  assert.match(request.messages[0]?.text ?? '', /#content/);
+  const modelText = userMessageTextForModel({ role: 'user', text: '1', annotations: [annotation] });
+  assert.match(modelText, /^1/);
+  assert.match(modelText, /这是个啥/);
+  assert.match(modelText, /#content/);
 
   const composerAnnotations = [annotation];
   const submittedAnnotations = takeAnnotationSubmission(composerAnnotations);

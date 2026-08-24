@@ -75,6 +75,22 @@ test('toPiMessages: notes never reach the model; only user/assistant convert', (
   assert.deepEqual({ role: out[0].role, content: out[0].content }, { role: 'user', content: 'hello' });
 });
 
+test('toPiMessages: user annotations are included in model context', () => {
+  const out = toPiMessages([{
+    role: 'user', text: '', annotations: [{
+      id: 'annotation-1',
+      scope: { tabId: 1, frameId: 0, url: 'https://example.test/page', origin: 'https://example.test' },
+      target: {
+        nodeRef: 'n_4', selector: '#content',
+        fingerprint: { tag: 'main', classes: [], attributes: {} },
+      },
+      text: '', createdAt: 1,
+    }],
+  }], 'm');
+  assert.match(out[0].content, /#content/);
+  assert.match(out[0].content, /"text": ""/);
+});
+
 test('toPiMessages: every toolCall is followed by a matching toolResult', () => {
   const out = toPiMessages([
     { role: 'assistant', text: '', thinking: '', toolCalls: [
@@ -122,6 +138,24 @@ test('loop: notes and streaming/error partials never reach the model', async () 
   }
   // the completed history DID go: note + 2 partials injected, so only the goal is eligible
   assert.deepEqual(requests[0].messages.map(m => m.role), ['user']);
+});
+
+test('loop: submitted annotations belong to the canonical user message', async () => {
+  const { loop } = await mountHarness(doneText('ok'));
+  const annotation = {
+    id: 'annotation-1',
+    scope: { tabId: 1, frameId: 0, url: 'https://example.test/page', origin: 'https://example.test' },
+    target: {
+      nodeRef: 'n_4', selector: '#content',
+      fingerprint: { tag: 'main', classes: [], attributes: {} },
+    },
+    text: '只要外部边框', createdAt: 1,
+  };
+  const submitted = [annotation];
+  await loop.run('', { annotations: submitted });
+  assert.deepEqual(loop.messages[0].annotations, [annotation]);
+  assert.notEqual(loop.messages[0].annotations, submitted);
+  assert.notEqual(loop.messages[0].annotations[0], annotation);
 });
 
 test('loop snapshots the active session model profile into its request', async () => {

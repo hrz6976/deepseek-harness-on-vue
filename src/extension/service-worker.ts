@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { ZodError } from 'zod';
 import contentScriptFile from './content-script?script&iife';
 import { parseCapabilityEnvelope } from '@/shared/broker-schema';
+import { userMessageTextForModel } from '@/shared/message-annotations';
 import type { CapabilityEnvelope, CapabilityRequest, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
 import type { PageCommand, PageCommandResult, PageEvent } from '@/shared/page-protocol';
 import { toJsonValue, type JsonValue, type LlmStreamEvent } from '@/shared/runtime';
@@ -253,7 +254,7 @@ async function* streamLlm(
     { role: 'system', content: request.systemPrompt },
   ];
   for (const message of request.messages) {
-    if (message.role === 'user') messages.push({ role: 'user', content: message.text });
+    if (message.role === 'user') messages.push({ role: 'user', content: userMessageTextForModel(message) });
     if (message.role === 'summary') messages.push({ role: 'user', content: `[Context checkpoint]\n\n${message.text}` });
     if (message.role !== 'assistant') continue;
     const assistantMessage: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & { reasoning_content?: string } = {

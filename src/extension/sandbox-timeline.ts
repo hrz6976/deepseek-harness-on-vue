@@ -1,4 +1,4 @@
-import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect, type Ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue';
 import type { Annotation } from '@/shared/page-protocol';
 import type { HarnessMessage } from '@/shared/runtime';
 import { shouldDisplayMessage } from './message-presentation';
@@ -33,7 +33,6 @@ export function displayMessageText(message: HarnessMessage): string {
 export function useTimelineView(
   messages: () => readonly HarnessMessage[],
   activeTaskId: () => string | null | undefined,
-  pendingAnnotations: Ref<readonly Annotation[]>,
 ) {
   const element = ref<HTMLElement | null>(null);
   const following = ref(true);
@@ -121,10 +120,9 @@ export function useTimelineView(
     for (const message of messages()) {
       if (seenMessages.has(message)) continue;
       seenMessages.add(message);
-      const annotations = message.role === 'user' && pendingAnnotations.value.length
-        ? pendingAnnotations.value : undefined;
+      const annotations = message.role === 'user' && message.annotations?.length
+        ? message.annotations : undefined;
       displayFeed.value.push({ id: crypto.randomUUID(), type: 'message', message, annotations });
-      if (annotations) pendingAnnotations.value = [];
     }
   }, { flush: 'sync' });
 

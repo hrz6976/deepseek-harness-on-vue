@@ -25,6 +25,7 @@ export {
   usePromptSection,
   useTool,
 } from '@/kernel/contrib';
+export { userMessageTextForModel } from '@/shared/message-annotations';
 export { entries as logEntries, log } from '@/kernel/log';
 export { errorMessage, parseJsonObject } from '@/shared/runtime';
 export { renderMarkdown } from '@/shared/markdown';

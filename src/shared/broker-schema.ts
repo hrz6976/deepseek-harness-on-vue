@@ -82,8 +82,23 @@ const TokenUsageSchema = z.object({
   cost: z.object({ input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(), total: z.number() }).optional(),
 });
 
+const AnnotationSchema = z.object({
+  id: z.string().min(1).max(500),
+  scope: z.object({
+    tabId: z.number().int(),
+    frameId: z.number().int(),
+    documentId: z.string().max(10_000).optional(),
+    generation: z.number().int().nonnegative().optional(),
+    url: z.string().max(100_000),
+    origin: z.string().max(100_000),
+  }),
+  target: ElementRefSchema,
+  text: z.string().max(100_000),
+  createdAt: z.number().finite(),
+});
+
 const HarnessMessageSchema = z.discriminatedUnion('role', [
-  z.object({ role: z.literal('user'), text: z.string() }),
+  z.object({ role: z.literal('user'), text: z.string(), annotations: z.array(AnnotationSchema).max(100).optional() }),
   z.object({ role: z.literal('note'), text: z.string() }),
   z.object({ role: z.literal('summary'), text: z.string(), tokensBefore: z.number().optional() }),
   z.object({
