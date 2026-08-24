@@ -9,6 +9,7 @@ import {
   type SiteUserScript,
 } from '@/shared/page-protocol';
 import { toJsonValue, type JsonValue } from '@/shared/runtime';
+import { withUserScriptNetwork } from './user-script-network';
 
 const STORAGE_KEY = 'public.recipes';
 const USER_SCRIPT_PREFIX = 'harness:';
@@ -113,12 +114,13 @@ export function createSiteSkillRuntime(
   async function evaluate(tabId: number, code: string, world: 'MAIN' | 'USER_SCRIPT'): Promise<JsonValue> {
     const api = await requireUserScriptsApi();
     if (!api.execute) throw new Error('当前 Chrome 版本不支持即时执行 User Script。');
-    const wrapped = `(async () => {
+    const executable = `(async () => {
       const value = await (0, eval)(${JSON.stringify(code)});
       if (value === undefined) return null;
       try { return JSON.parse(JSON.stringify(value)); }
       catch { return String(value); }
     })()`;
+    const wrapped = world === 'USER_SCRIPT' ? withUserScriptNetwork(executable) : executable;
     const [result] = await api.execute<JsonValue>({ js: [{ code: wrapped }], target: { tabId }, world });
     if (!result) return null;
     if ('error' in result) throw new Error(result.error);
@@ -158,6 +160,7 @@ export function createSiteSkillRuntime(
     try {
       const api = chrome.userScripts;
       await api.getScripts();
+      await api.configureWorld({ messaging: true });
       return api;
     } catch { return null; }
   }
@@ -174,7 +177,7 @@ export function createSiteSkillRuntime(
   function registeredUserScript(script: SiteUserScript): chrome.userScripts.RegisteredUserScript {
     return {
       id: registrationId(script.id), matches: script.matches, runAt: script.runAt,
-      world: 'USER_SCRIPT', js: [{ code: script.source }],
+      world: 'USER_SCRIPT', js: [{ code: withUserScriptNetwork(script.source) }],
     };
   }
 

@@ -1,6 +1,8 @@
 import type { CapabilityRequest } from '@/shared/capability-protocol';
 import { PUBLIC_WEB_ORIGIN_PATTERNS } from './web-browser';
 
+const USER_SCRIPT_NETWORK_ORIGINS = ['http://*/*', 'https://*/*'] as const;
+
 export interface ApprovalRequest {
   title: string;
   body: string;
@@ -26,6 +28,7 @@ export function approvalForRequest(request: CapabilityRequest): ApprovalRequest 
       body: `${request.input.command.world} context\n\n${request.input.command.code.slice(0, 600)}`,
       confirmLabel: '允许执行',
       danger: true,
+      ...(request.input.command.world === 'USER_SCRIPT' ? { origins: [...USER_SCRIPT_NETWORK_ORIGINS] } : {}),
     };
   }
   if (request.provider === 'site-skill' && request.action === 'save') {
@@ -37,6 +40,7 @@ export function approvalForRequest(request: CapabilityRequest): ApprovalRequest 
       body: `${request.input.skill.name}\n${request.input.skill.matches.join(', ')}${script ? `\n\n${script.source.slice(0, 600)}` : ''}`,
       confirmLabel: request.input.skill.enabled ? '安装并启用' : '停用',
       ...(script ? { danger: true } : {}),
+      ...(script?.enabled ? { origins: [...USER_SCRIPT_NETWORK_ORIGINS] } : {}),
     };
   }
   if (request.provider === 'site-skill' && request.action === 'remove') {

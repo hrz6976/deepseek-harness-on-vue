@@ -24,6 +24,7 @@ test('temporary page patches need no shell prompt while persistent and high-risk
   assert.match(userScript?.title ?? '', /页面脚本/);
   assert.equal(userScript?.danger, true);
   assert.match(userScript?.body ?? '', /document\.body/);
+  assert.deepEqual(userScript?.origins, ['http://*/*', 'https://*/*']);
 
   assert.equal(approvalForRequest({ provider: 'page', action: 'command', input: { command: { type: 'page/snapshot' } } }), null);
 
@@ -37,6 +38,7 @@ test('temporary page patches need no shell prompt while persistent and high-risk
     command: { type: 'page/eval', world: 'USER_SCRIPT', code: 'document.body.dataset.ready = "1"' },
   } });
   assert.equal(script?.danger, true, 'arbitrary page code retains one explicit high-risk boundary');
+  assert.deepEqual(script?.origins, ['http://*/*', 'https://*/*']);
 
   const mcp = approvalForRequest({ provider: 'mcp', action: 'connect', input: { id: 'local', url: 'http://localhost:3001/mcp' } });
   assert.deepEqual(mcp?.origins, ['http://localhost/*']);

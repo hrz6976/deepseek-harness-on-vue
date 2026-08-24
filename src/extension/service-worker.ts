@@ -19,6 +19,7 @@ import {
 } from './tab-scope';
 import { TrustedCapabilityHost } from './capability-host';
 import { openWebPageInBackground, searchWebInBackground } from './web-browser';
+import { fetchForUserScript, isUserScriptNetworkRequest } from './user-script-network';
 
 interface StoredLlmConfig { baseURL: string; model?: string; apiKey: string }
 type DeepSeekThinkingParams = {
@@ -101,6 +102,12 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
   if (event.type === 'page/route-changed' && sender.tab?.id != null) {
     void siteSkills.applyMatching(sender.tab.id, event.scope.url);
   }
+});
+
+chrome.runtime.onUserScriptMessage.addListener((message: unknown, _sender, sendResponse) => {
+  if (!isUserScriptNetworkRequest(message)) return;
+  void fetchForUserScript(message).then(sendResponse);
+  return true;
 });
 
 chrome.runtime.onInstalled.addListener(() => {
