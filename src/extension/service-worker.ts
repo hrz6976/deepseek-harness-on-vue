@@ -6,6 +6,7 @@ import type { CapabilityEnvelope, CapabilityRequest, CapabilityResponse, Capabil
 import type { PageCommand, PageCommandResult, PageEvent } from '@/shared/page-protocol';
 import { toJsonValue, type JsonValue, type LlmStreamEvent } from '@/shared/runtime';
 import { OpenAiStreamAccumulator, type OpenAiStreamChunk } from './openai-stream';
+import { normalizeSessionLlmConfig } from '@/shared/task-model';
 import { McpHost } from './mcp-host';
 import { createSiteSkillRuntime } from './site-skill-runtime';
 import {
@@ -16,7 +17,11 @@ import {
 } from './tab-scope';
 import { TrustedCapabilityHost } from './capability-host';
 
-interface StoredLlmConfig { baseURL: string; model: string; apiKey: string }
+interface StoredLlmConfig { baseURL: string; model?: string; apiKey: string }
+type DeepSeekThinkingParams = {
+  thinking: { type: 'enabled' | 'disabled' };
+  reasoning_effort?: 'low' | 'high' | 'max';
+};
 const LLM_CONFIG_KEY = 'secrets.llm';
 
 const ports = new Map<chrome.runtime.Port, number>();
@@ -54,7 +59,11 @@ capabilityHost.register('llm', {
   request: async request => {
     if (request.action === 'complete') throw new Error('LLM completion requests use the streaming provider path.');
     const config = await readLlmConfig();
-    return toJsonValue(config ? { configured: true, baseURL: config.baseURL, model: config.model } : { configured: false });
+    return toJsonValue(config ? {
+      configured: true,
+      baseURL: config.baseURL,
+      ...(config.model ? { legacyDefaultModel: config.model } : {}),
+    } : { configured: false });
   },
   stream: request => streamLlmCapability(request),
 });
@@ -270,13 +279,21 @@ async function* streamLlm(
       parameters: tool.parameters,
     },
   }));
-  const completion = await client.chat.completions.create({
-    model: config.model,
+  const sessionConfig = normalizeSessionLlmConfig(request.sessionConfig
+    ?? (config.model ? { model: config.model } : undefined));
+  const isDeepSeekModel = sessionConfig.model.toLowerCase().startsWith('deepseek-');
+  const completionRequest: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & Partial<DeepSeekThinkingParams> = {
+    model: sessionConfig.model,
     messages,
     ...(tools.length ? { tools } : {}),
+    ...(isDeepSeekModel ? {
+      thinking: { type: sessionConfig.thinking ? 'enabled' : 'disabled' },
+      ...(sessionConfig.thinking ? { reasoning_effort: sessionConfig.reasoningEffort } : {}),
+    } : {}),
     stream: true,
     stream_options: { include_usage: true },
-  });
+  };
+  const completion = await client.chat.completions.create(completionRequest);
   const accumulator = new OpenAiStreamAccumulator();
   for await (const chunk of completion) {
     yield accumulator.ingest(chunk as unknown as OpenAiStreamChunk);
@@ -286,7 +303,7 @@ async function* streamLlm(
 
 async function readLlmConfig(): Promise<StoredLlmConfig | null> {
   const value = (await chrome.storage.local.get(LLM_CONFIG_KEY))[LLM_CONFIG_KEY] as StoredLlmConfig | undefined;
-  if (!value?.apiKey || !value.baseURL || !value.model) return null;
+  if (!value?.apiKey || !value.baseURL) return null;
   return value;
 }
 

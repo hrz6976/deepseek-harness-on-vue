@@ -1,7 +1,7 @@
 import type { Context, Fiber } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { HarnessTaskStore } from '@/kernel/task-store';
-import type { HarnessArtifact, TaskContext, TaskStatus } from '@/shared/task-model';
+import { normalizeSessionLlmConfig, type HarnessArtifact, type SessionLlmConfig, type TaskContext, type TaskStatus } from '@/shared/task-model';
 import type { HarnessMessage, JsonValue } from '@/shared/runtime';
 
 function applyTaskRuntime(ctx: Context, storageScope?: string): void {
@@ -115,6 +115,13 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
       await store.persistTask(task);
     }
 
+    async function setLlmConfig(config: SessionLlmConfig): Promise<void> {
+      const task = requireActive();
+      task.llm = normalizeSessionLlmConfig(config);
+      store.touch(task);
+      await store.persistTask(task);
+    }
+
     async function addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>) {
       const task = requireActive();
       const existing = contexts.find(context => context.taskId === task.id && context.kind === input.kind && context.locator === input.locator);
@@ -180,7 +187,7 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
     ctx.provide('task', {
       ready, messages, tasks, contexts, artifacts, activeTaskId, activeTask, scope,
       refresh,
-      createTask, activateTask, deleteTask, renameTask, setStatus, addContext, removeContext, attachCapability, detachCapability,
+      createTask, activateTask, deleteTask, renameTask, setStatus, setLlmConfig, addContext, removeContext, attachCapability, detachCapability,
       createArtifact, updateArtifact, appendEvent, saveCheckpoint,
     });
 }

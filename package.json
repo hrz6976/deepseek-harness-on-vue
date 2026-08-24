@@ -22,6 +22,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@vicons/tabler": "^0.13.0",
     "ajv": "^8.20.0",
+    "markdown-it": "^14.1.0",
     "naive-ui": "^2.45.2",
     "openai": "^7.5.0",
     "vue": "^3.5.13",
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.7.1",
     "@types/chrome": "^0.2.6",
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

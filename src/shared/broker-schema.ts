@@ -100,6 +100,12 @@ const ToolSchema = z.object({
   parameters: z.record(z.string(), JsonValueSchema),
 });
 
+const SessionLlmConfigSchema = z.object({
+  model: z.string().trim().min(1).max(200),
+  thinking: z.boolean(),
+  reasoningEffort: z.enum(['low', 'high', 'max']),
+});
+
 export const PageCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('page/snapshot'), options: z.object({ selector: z.string().optional(), maxNodes: z.number().int().positive().max(10_000).optional(), maxDepth: z.number().int().nonnegative().max(100).optional() }).optional() }),
   z.object({ type: z.literal('page/query'), selector: z.string(), limit: z.number().int().positive().max(1_000).optional() }),
@@ -186,6 +192,7 @@ const CapabilityRequestSchema = z.union([
         systemPrompt: z.string().max(1_000_000),
         messages: z.array(HarnessMessageSchema).max(10_000),
         tools: z.array(ToolSchema).max(1_000),
+        sessionConfig: SessionLlmConfigSchema,
       }),
     }),
   }),

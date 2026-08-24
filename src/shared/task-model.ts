@@ -4,11 +4,35 @@ export type TaskStatus = 'idle' | 'running' | 'waiting' | 'failed' | 'completed'
 export type ContextKind = 'page' | 'file' | 'selection' | 'mcp';
 export type ArtifactKind = 'change-set' | 'file' | 'site-skill' | 'workflow' | 'dynamic-ui' | 'dataset' | 'report' | 'capability';
 export type ArtifactStatus = 'draft' | 'ready' | 'verified' | 'failed' | 'archived';
+export type ReasoningEffort = 'low' | 'high' | 'max';
+
+export interface SessionLlmConfig {
+  model: string;
+  thinking: boolean;
+  reasoningEffort: ReasoningEffort;
+}
+
+export const DEFAULT_SESSION_LLM_CONFIG: Readonly<SessionLlmConfig> = Object.freeze({
+  model: 'deepseek-v4-flash',
+  thinking: true,
+  reasoningEffort: 'high',
+});
+
+export function normalizeSessionLlmConfig(value?: Partial<SessionLlmConfig> | null): SessionLlmConfig {
+  const effort = value?.reasoningEffort;
+  return {
+    model: value?.model?.trim() || DEFAULT_SESSION_LLM_CONFIG.model,
+    thinking: value?.thinking ?? DEFAULT_SESSION_LLM_CONFIG.thinking,
+    reasoningEffort: effort === 'low' || effort === 'high' || effort === 'max'
+      ? effort : DEFAULT_SESSION_LLM_CONFIG.reasoningEffort,
+  };
+}
 
 export interface TaskSession {
   id: string;
   title: string;
   status: TaskStatus;
+  llm: SessionLlmConfig;
   capabilityIds: string[];
   createdAt: number;
   updatedAt: number;

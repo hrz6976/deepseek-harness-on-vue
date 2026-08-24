@@ -1,5 +1,5 @@
 import type { FsService, HarnessMessage, JsonValue } from '@/shared/runtime';
-import type { HarnessArtifact, TaskCheckpoint, TaskContext, TaskEvent, TaskSession, TaskStatus, TaskStoreSnapshot } from '@/shared/task-model';
+import { normalizeSessionLlmConfig, type HarnessArtifact, type TaskCheckpoint, type TaskContext, type TaskEvent, type TaskSession, type TaskStatus, type TaskStoreSnapshot } from '@/shared/task-model';
 
 const HARNESS_ROOT = '.harness/';
 interface SessionIndex { activeTaskId: string | null; taskIds: string[] }
@@ -32,6 +32,7 @@ export class HarnessTaskStore {
       .filter(id => !this.isTaskDeleted(id))
       .map(id => parseJson<TaskSession | null>(this.fs.read(this.metaPath(id)), null))
       .filter((task): task is TaskSession => task !== null);
+    for (const task of tasks) task.llm = normalizeSessionLlmConfig(task.llm);
     const taskIds = new Set(tasks.map(task => task.id));
     const contexts = tasks.flatMap(task => parseJson<TaskContext[]>(this.fs.read(this.contextsPath(task.id)), []));
     for (const task of tasks) {
@@ -55,6 +56,7 @@ export class HarnessTaskStore {
     const timestamp = this.now();
     return {
       id: this.uuid(), title: title.trim() || 'Untitled task', status: 'idle',
+      llm: normalizeSessionLlmConfig(),
       capabilityIds: [],
       createdAt: timestamp, updatedAt: timestamp,
     };

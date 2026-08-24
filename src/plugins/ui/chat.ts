@@ -2,7 +2,7 @@
 // thinking, tool cards forming during the stream, stop button.
 import type { Context } from '@deepseek-ai/cordis';
 import { defineComponent, ref, computed, watch, nextTick } from 'vue';
-import { parseJsonObject, useService } from '@/sdk';
+import { parseJsonObject, renderMarkdown, useService } from '@/sdk';
 import type { JsonObject } from '@/shared/runtime';
 
 const ChatPanel = defineComponent({
@@ -17,9 +17,10 @@ const ChatPanel = defineComponent({
             <span class="who">agent<span v-if="m.status==='streaming'"> · streaming</span></span>
             <details v-if="m.thinking" class="thinking" :open="m.status==='streaming'">
               <summary>thinking ({{ m.thinking.length }} chars)</summary>
-              <div class="body">{{ m.thinking }}</div>
+              <div class="body markdown-body" v-html="renderMarkdown(m.thinking)"></div>
             </details>
-            <span :class="{ cursor: m.status==='streaming' && !m.toolCalls.length }">{{ m.text || (m.toolCalls.length ? '' : '…') }}</span>
+            <div v-if="m.text" class="markdown-body" :class="{ cursor: m.status==='streaming' && !m.toolCalls.length }" v-html="renderMarkdown(m.text)"></div>
+            <span v-else-if="!m.toolCalls.length" :class="{ cursor: m.status==='streaming' }">…</span>
             <div v-for="(tc, j) in m.toolCalls" :key="j" class="toolcall">
               <span class="status" :class="tc.status">{{ tc.status === 'done' ? '✓ done' : tc.status === 'running' ? 'running' : 'pending' }}</span>
               🔧 {{ tc.name }}({{ summarizeArgs(tc.args) }})
@@ -95,7 +96,7 @@ const ChatPanel = defineComponent({
               assistant?.toolCalls.map(tool => (tool.status || '') + (tool.result?.length || 0)).join('|')];
     }, () => nextTick(() => { if (chatEl.value) chatEl.value.scrollTop = chatEl.value.scrollHeight; }));
 
-    return { goal, chatEl, visible, running, connected, engineName, run, stop, resetSession, summarizeArgs, truncate,
+    return { goal, chatEl, visible, running, connected, engineName, run, stop, resetSession, summarizeArgs, truncate, renderMarkdown,
              compaction, compacting, ctxInfo, compactNow };
   },
 });

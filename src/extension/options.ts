@@ -2,14 +2,13 @@ import { requiredElement } from './required-element';
 
 interface StoredLlmConfig {
   baseURL: string;
-  model: string;
+  model?: string;
   apiKey: string;
 }
 
 const CONFIG_KEY = 'secrets.llm';
 const form = requiredElement<HTMLFormElement>('#settings');
 const baseUrlInput = requiredElement<HTMLInputElement>('#base-url');
-const modelInput = requiredElement<HTMLInputElement>('#model');
 const apiKeyInput = requiredElement<HTMLInputElement>('#api-key');
 const statusElement = requiredElement<HTMLElement>('#status');
 const submitButton = requiredElement<HTMLButtonElement>('#submit');
@@ -25,7 +24,6 @@ async function restore(): Promise<void> {
   const stored = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
   if (!stored) return;
   baseUrlInput.value = stored.baseURL;
-  modelInput.value = stored.model;
   apiKeyInput.placeholder = '已有 key；留空则保留';
 }
 
@@ -43,7 +41,13 @@ async function save(): Promise<void> {
     const previous = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
     const apiKey = apiKeyInput.value || previous?.apiKey;
     if (!apiKey) throw new Error('请输入 API key。');
-    const config: StoredLlmConfig = { baseURL, model: modelInput.value.trim(), apiKey };
+    // Preserve the old global model only as a compatibility fallback. New
+    // requests carry the active task/session model explicitly.
+    const config: StoredLlmConfig = {
+      baseURL,
+      apiKey,
+      ...(previous?.model ? { model: previous.model } : {}),
+    };
     await chrome.storage.local.set({ [CONFIG_KEY]: config });
     apiKeyInput.value = '';
     apiKeyInput.placeholder = '已有 key；留空则保留';

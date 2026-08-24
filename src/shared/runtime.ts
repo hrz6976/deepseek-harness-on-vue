@@ -9,6 +9,7 @@ import type {
   TaskEvent,
   TaskSession,
   TaskStatus,
+  SessionLlmConfig,
 } from './task-model';
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -69,6 +70,7 @@ export interface LlmRequest {
   systemPrompt: string;
   messages: HarnessMessage[];
   tools: ToolSchema[];
+  sessionConfig: SessionLlmConfig;
   signal: AbortSignal;
 }
 
@@ -228,6 +230,7 @@ export interface TaskRuntimeService {
   deleteTask(id: string): Promise<void>;
   renameTask(id: string, title: string): Promise<void>;
   setStatus(id: string, status: TaskStatus): Promise<void>;
+  setLlmConfig(config: SessionLlmConfig): Promise<void>;
   addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>): Promise<TaskContext>;
   removeContext(id: string): Promise<void>;
   attachCapability(id: string): Promise<void>;

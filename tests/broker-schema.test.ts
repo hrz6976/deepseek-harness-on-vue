@@ -5,6 +5,7 @@ import { assertCapabilitySession, createCapabilityEnvelope, SiteRecipeSchema, Si
 import { systemPrincipal } from '@/kernel/broker';
 import { workspaceRevision } from '@/shared/capability-protocol';
 import { matchesPagePattern } from '@/shared/page-protocol';
+import { normalizeSessionLlmConfig } from '@/shared/task-model';
 
 test('broker envelope removes Vue proxies before the structured-clone boundary', () => {
   const messages = reactive([{ role: 'user' as const, text: 'hello' }]);
@@ -17,7 +18,7 @@ test('broker envelope removes Vue proxies before the structured-clone boundary',
   const envelope = createCapabilityEnvelope('session-token-with-at-least-32-bytes', 'request-1', systemPrincipal(), {
     provider: 'llm',
     action: 'complete',
-    input: { request: { systemPrompt: 'system', messages, tools } },
+    input: { request: { systemPrompt: 'system', messages, tools, sessionConfig: normalizeSessionLlmConfig() } },
   });
 
   assert.doesNotThrow(() => structuredClone(envelope));

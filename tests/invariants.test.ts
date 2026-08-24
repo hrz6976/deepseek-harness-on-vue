@@ -32,6 +32,7 @@ async function mountHarness(script, options = {}) {
       requests.push({
         tools: req.tools.map(t => t.name),
         messages: req.messages.map(m => ({ role: m.role, status: m.status, text: m.text })),
+        sessionConfig: { ...req.sessionConfig },
       });
       return script(req, requests.length);
     },
@@ -121,6 +122,20 @@ test('loop: notes and streaming/error partials never reach the model', async () 
   }
   // the completed history DID go: note + 2 partials injected, so only the goal is eligible
   assert.deepEqual(requests[0].messages.map(m => m.role), ['user']);
+});
+
+test('loop snapshots the active session model profile into its request', async () => {
+  const task = {
+    activeTask: () => ({
+      id: 'task-1',
+      llm: { model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' },
+    }),
+  };
+  const { loop, requests } = await mountHarness(doneText('ok'), { task });
+  await loop.run('goal');
+  assert.deepEqual(requests[0].sessionConfig, {
+    model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max',
+  });
 });
 
 test('loop publishes Cordis busy and idle lifecycle events', async () => {

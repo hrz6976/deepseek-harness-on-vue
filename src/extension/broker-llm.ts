@@ -19,6 +19,7 @@ class BrokerLlmRuntime extends Service implements LlmService {
           systemPrompt: request.systemPrompt,
           messages: request.messages,
           tools: request.tools,
+          sessionConfig: request.sessionConfig,
         } },
       })) {
         const event = value as unknown as LlmStreamEvent;

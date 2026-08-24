@@ -27,6 +27,8 @@ export {
 } from '@/kernel/contrib';
 export { entries as logEntries, log } from '@/kernel/log';
 export { errorMessage, parseJsonObject } from '@/shared/runtime';
+export { renderMarkdown } from '@/shared/markdown';
+export { normalizeSessionLlmConfig } from '@/shared/task-model';
 export { lockedPluginNameFromPath, pluginPolicy } from '@/kernel/plugin-policy';
 export { systemPluginNameFromPath } from '@/kernel/system-plugin-names';
 export {

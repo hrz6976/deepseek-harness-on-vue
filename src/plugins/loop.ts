@@ -8,6 +8,7 @@ import { reactive, ref } from 'vue';
 import { errorMessage, log, parseJsonObject } from '@/sdk';
 import type { ToolGuardRequest } from '@/kernel/bus';
 import type { AssistantHarnessMessage, HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent } from '@/shared/runtime';
+import { normalizeSessionLlmConfig } from '@/shared/task-model';
 
 // Failsafe kill switch ONLY, not a control mechanism: Stop aborts for real,
 // and the compaction plugin keeps context bounded. This exists so a wedged
@@ -66,6 +67,9 @@ function apply(ctx: Context): void {
         if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
         await task.ready;
         messages.push({ role: 'user', text: goal });
+        // Keep one model profile across every internal reasoning/tool sub-turn
+        // in this run. A selector change applies atomically to the next run.
+        const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);
         running.value = true;
         const controller = new AbortController();
         ctrl = controller;
@@ -104,6 +108,7 @@ function apply(ctx: Context): void {
               // not model conversation history.
               messages: requestMessages,
               tools: toolsSnap.schemas,
+              sessionConfig,
               signal: controller.signal,
             }, (value: LlmRequest) => value);
 

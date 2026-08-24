@@ -26,6 +26,7 @@ test('task store restores task identity independently from page/tab state', asyn
   let sequence = 0;
   const store = new HarnessTaskStore(fs, () => 1_700_000_000_000 + sequence, () => `id-${++sequence}`);
   const task = store.newTask('Research launch');
+  assert.deepEqual(task.llm, { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' });
   const page = store.newContext(task.id, { kind: 'page', title: 'Product', locator: 'https://example.test/product', metadata: { tabId: 7 } });
   const file = store.newContext(task.id, { kind: 'file', title: 'brief.md', locator: 'brief.md' });
   const artifact = store.newArtifact(task.id, { kind: 'report', title: 'Launch report', source: { type: 'agent' }, status: 'ready', content: { summary: 'done' } });
@@ -45,6 +46,20 @@ test('task store restores task identity independently from page/tab state', asyn
   assert.deepEqual(restored.artifacts.map(item => item.title), ['Launch report']);
   assert.match(fs.read(`.harness/sessions/${task.id}/events.jsonl`)!, /"sequence":1/);
   assert.equal(restoredStore.checkpointMessages(task.id)[0]?.role, 'user');
+});
+
+test('legacy task metadata gains a current per-session model profile', async () => {
+  const legacy = {
+    id: 'legacy-task', title: 'Legacy', status: 'idle', capabilityIds: [], createdAt: 1, updatedAt: 1,
+  };
+  const fs = fakeFs({
+    '.harness/sessions/index.json': JSON.stringify({ activeTaskId: legacy.id, taskIds: [legacy.id] }),
+    [`.harness/sessions/${legacy.id}/meta.json`]: JSON.stringify(legacy),
+  });
+  const restored = await new HarnessTaskStore(fs).load();
+  assert.deepEqual(restored.tasks[0]?.llm, {
+    model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high',
+  });
 });
 
 test('each page host has an isolated task list and artifact namespace', async () => {
@@ -156,16 +171,19 @@ test('task runtime owns one conversation and checkpoints it across task switches
   const task = runtime.reflect.get('task') as TaskRuntimeService;
   await task.ready;
   const first = task.activeTask()!;
+  await task.setLlmConfig({ model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' });
   const firstScope = task.scope();
   task.messages.push({ role: 'user', text: 'first conversation' });
 
   const second = await task.createTask('Second');
+  assert.equal(second.llm.model, 'deepseek-v4-flash');
   const secondScope = task.scope();
   assert.equal(firstScope.fiber.uid, null);
   assert.deepEqual(task.messages, []);
   task.messages.push({ role: 'user', text: 'second conversation' });
 
   await task.activateTask(first.id);
+  assert.deepEqual(task.activeTask()?.llm, { model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' });
   assert.equal(secondScope.fiber.uid, null);
   assert.equal(task.messages[0]?.text, 'first conversation');
   await task.activateTask(second.id);

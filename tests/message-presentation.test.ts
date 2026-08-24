@@ -8,10 +8,16 @@ test('context checkpoints stay internal to the model transcript', () => {
   }), false);
 });
 
-test('streaming assistant drafts stay out of the stable message feed', () => {
+test('streaming assistant text is visible immediately', () => {
   assert.equal(shouldDisplayMessage({
     role: 'assistant', text: 'I will inspect the page…', thinking: '', toolCalls: [], status: 'streaming',
-  }), false);
+  }), true);
+});
+
+test('provider reasoning is visible while the assistant is still thinking', () => {
+  assert.equal(shouldDisplayMessage({
+    role: 'assistant', text: '', thinking: '先读取页面结构', toolCalls: [], status: 'streaming',
+  }), true);
 });
 
 test('completed tool turns become stable activity records', () => {
@@ -21,7 +27,7 @@ test('completed tool turns become stable activity records', () => {
   }), true);
 });
 
-test('a streaming tool call is visible without exposing its text draft', () => {
+test('a streaming tool call and its cumulative prose are visible together', () => {
   assert.equal(shouldDisplayMessage({
     role: 'assistant', text: 'I might click something…', thinking: '', status: 'streaming',
     toolCalls: [{ id: 'call-1', name: 'page_query', args: '{"selector":"main"}', status: 'running' }],

@@ -12,7 +12,7 @@
         <div class="brand"><span>H</span>Harness</div>
         <p class="eyebrow">MODEL CONNECTION</p>
         <h1>连接你的模型</h1>
-        <p class="lede">使用 DeepSeek 或其他 OpenAI-compatible endpoint。凭据只保存在扩展的可信存储中。</p>
+        <p class="lede">配置 DeepSeek 或其他 OpenAI-compatible endpoint。模型与思考模式在每个任务会话中单独选择；凭据只保存在扩展的可信存储中。</p>
       </header>
       <form id="settings">
         <div class="form-heading">
@@ -20,7 +20,6 @@
           <span class="secure-badge">Trusted storage</span>
         </div>
         <label><span>Base URL</span><input id="base-url" type="url" required value="https://api.deepseek.com" spellcheck="false" /></label>
-        <label><span>Model</span><input id="model" type="text" required value="deepseek-chat" spellcheck="false" /></label>
         <label><span>API Key</span><input id="api-key" type="password" autocomplete="off" placeholder="留空则保留已有 key" /></label>
         <footer>
           <button id="submit" type="submit">保存设置</button>

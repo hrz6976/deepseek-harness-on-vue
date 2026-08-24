@@ -29,6 +29,14 @@
       <div class="page-actions" aria-label="网页能力">
         <n-button text size="small" :disabled="busy" @click="snapshot"><template #icon><n-icon><World /></n-icon></template>读取</n-button>
         <n-button text size="small" :disabled="busy" @click="picker"><template #icon><n-icon><Activity /></n-icon></template>批注</n-button>
+        <n-popover trigger="click" placement="bottom-end" :show-arrow="false">
+          <template #trigger><n-button text size="small" :disabled="busy" class="session-model-trigger"><template #icon><n-icon><Bulb /></n-icon></template>{{ sessionModelLabel }}</n-button></template>
+          <div class="session-model-popover">
+            <label><span>当前会话模型</span><n-select :value="sessionLlmConfig.model" :options="sessionModelOptions" filterable tag size="small" @update:value="setSessionModel" /></label>
+            <label><span>Thinking effort</span><n-select :value="sessionThinkingValue" :options="sessionThinkingOptions" size="small" @update:value="setSessionThinking" /></label>
+            <small>仅作用于当前任务，下一次发送时生效；DeepSeek 模型会显式发送 thinking 参数。</small>
+          </div>
+        </n-popover>
         <n-button text size="small" @click="openPagePlugins"><template #icon><n-icon><Tool /></n-icon></template>Skills</n-button>
       </div>
     </section>
@@ -43,23 +51,27 @@
         :key="block.id"
         :class="[block.type === 'message' ? block.message.role : block.item.kind, { 'tool-record': block.type === 'message' && block.message.role === 'assistant' && block.message.toolCalls.length }]"
       >
-        <template v-if="block.type === 'message' && block.message.role === 'assistant' && block.message.toolCalls.length">
-          <div class="tool-turn-heading"><n-icon><Tool /></n-icon><strong>{{ block.message.toolCalls.length }} 个工具调用</strong></div>
-          <n-collapse arrow-placement="right">
-            <n-collapse-item v-for="call in block.message.toolCalls" :key="call.id" :name="call.id">
-              <template #header>
-                <div class="tool-call-title"><code>{{ call.name }}</code><n-tag size="tiny" :bordered="false" :type="toolStatusType(call)">{{ toolStatusLabel(call) }}</n-tag></div>
-              </template>
-              <div class="tool-payload">
-                <span>参数</span><pre>{{ formatToolArguments(call) }}</pre>
-                <template v-if="call.result !== undefined"><span>结果</span><pre>{{ call.result }}</pre></template>
-              </div>
-            </n-collapse-item>
-          </n-collapse>
-        </template>
-        <template v-else-if="block.type === 'message' && block.message.role === 'assistant'">
-          <div class="assistant-answer">{{ displayMessageText(block.message) }}</div>
-          <n-button v-if="block.message.text" text size="tiny" class="message-action" @click="saveMessageArtifact(block.message)"><template #icon><n-icon><FileText /></n-icon></template>存为报告</n-button>
+        <template v-if="block.type === 'message' && block.message.role === 'assistant'">
+          <details v-if="block.message.thinking" class="reasoning-panel" :open="block.message.status === 'streaming'">
+            <summary><span>{{ block.message.status === 'streaming' ? '思考中' : '思考过程' }}</span><small>{{ block.message.thinking.length }} 字符</small></summary>
+            <div class="reasoning-content markdown-body" v-html="renderMarkdown(block.message.thinking)"></div>
+          </details>
+          <div v-if="block.message.text" class="assistant-answer markdown-body" :class="{ 'assistant-draft': block.message.status === 'streaming' || block.message.toolCalls.length }" v-html="renderMarkdown(displayMessageText(block.message))"></div>
+          <template v-if="block.message.toolCalls.length">
+            <div class="tool-turn-heading"><n-icon><Tool /></n-icon><strong>{{ block.message.toolCalls.length }} 个工具调用</strong></div>
+            <n-collapse arrow-placement="right">
+              <n-collapse-item v-for="call in block.message.toolCalls" :key="call.id" :name="call.id">
+                <template #header>
+                  <div class="tool-call-title"><code>{{ call.name }}</code><n-tag size="tiny" :bordered="false" :type="toolStatusType(call)">{{ toolStatusLabel(call) }}</n-tag></div>
+                </template>
+                <div class="tool-payload">
+                  <span>参数</span><pre>{{ formatToolArguments(call) }}</pre>
+                  <template v-if="call.result !== undefined"><span>结果</span><pre>{{ call.result }}</pre></template>
+                </div>
+              </n-collapse-item>
+            </n-collapse>
+          </template>
+          <n-button v-if="block.message.status === 'done' && block.message.text && !block.message.toolCalls.length" text size="tiny" class="message-action" @click="saveMessageArtifact(block.message)"><template #icon><n-icon><FileText /></n-icon></template>存为报告</n-button>
         </template>
         <template v-else-if="block.type === 'message'">
           <div v-if="displayMessageText(block.message)" class="message-text">{{ displayMessageText(block.message) }}</div>
@@ -76,21 +88,13 @@
     <n-button v-if="!followTimeline" class="timeline-jump" circle size="small" aria-label="回到底部" @click="resumeTimelineFollow"><template #icon><n-icon><ArrowDown /></n-icon></template></n-button>
     </div>
 
-    <form class="composer" @submit.prevent="send">
-      <div class="composer-field">
-        <div v-if="annotations.length" class="annotation-context">
-          <span>{{ annotations.length }} 个批注</span>
-          <n-button text size="tiny" @click="clearAnnotations">清除</n-button>
-        </div>
-        <n-input v-model:value="input" class="composer-input" type="textarea" :bordered="false" :autosize="{ minRows: 2, maxRows: 6 }" placeholder="描述任务，或让 Harness 读取、分析和构建…" @keydown.ctrl.enter.prevent="send" />
-        <div class="composer-footer">
-          <span class="composer-hint">Ctrl Enter 发送</span>
-          <n-button type="primary" size="small" :loading="busy" :disabled="!runtimeReady || !canSend" @click="send">
-            <template #icon><n-icon><Send /></n-icon></template>{{ !runtimeReady ? '初始化中' : busy ? '处理中' : '发送' }}
-          </n-button>
-        </div>
-      </div>
-    </form>
+    <sandbox-composer
+      :annotation-count="annotations.length"
+      :busy="busy"
+      :runtime-ready="runtimeReady"
+      @send="send"
+      @clear-annotations="clearAnnotations"
+    />
 
     <n-drawer v-model:show="inspectorOpen" width="min(380px, 94vw)" placement="right">
       <n-drawer-content :title="inspectorTitle" closable :native-scrollbar="false">

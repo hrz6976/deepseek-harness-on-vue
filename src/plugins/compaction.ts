@@ -20,9 +20,10 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { errorMessage, log } from '@/sdk';
+import { errorMessage, log, normalizeSessionLlmConfig } from '@/sdk';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { HarnessMessage, LlmRequest, LlmService } from '@/shared/runtime';
+import type { SessionLlmConfig } from '@/shared/task-model';
 
 export interface CompactionSettings { enabled: boolean; reserveTokens: number; keepRecentTokens: number }
 interface TurnStartRequest { messages: HarnessMessage[]; signal: AbortSignal }
@@ -139,7 +140,12 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 // AGENT requests must not touch the summarizer's request.
 export async function runCompaction(
   messages: HarnessMessage[],
-  { llm, settings, signal = new AbortController().signal }: { llm: LlmService; settings: CompactionSettings; signal?: AbortSignal },
+  { llm, settings, signal = new AbortController().signal, sessionConfig }: {
+    llm: LlmService;
+    settings: CompactionSettings;
+    signal?: AbortSignal;
+    sessionConfig?: SessionLlmConfig;
+  },
 ): Promise<boolean> {
   const cut = findCutIndex(messages, settings.keepRecentTokens);
   const prefix = messages.slice(0, cut);
@@ -150,6 +156,7 @@ export async function runCompaction(
     systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
     messages: [{ role: 'user', text: `<conversation>\n${serializeTranscript(prefix)}\n</conversation>\n\n${SUMMARIZATION_PROMPT}` }],
     tools: [],
+    sessionConfig: { ...normalizeSessionLlmConfig(sessionConfig), thinking: false },
     signal,
   };
   for await (const ev of llm.stream(req)) {
@@ -181,10 +188,11 @@ export function apply(ctx: Context): void {
     async function compact(messages: HarnessMessage[], signal = new AbortController().signal): Promise<boolean> {
       const llm = getLlm();
       if (!llm || compacting.value) return false;
+      const task = ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
       compacting.value = true;
       try {
         const before = estimateContextTokens(messages);
-        const did = await runCompaction(messages, { llm, settings, signal });
+        const did = await runCompaction(messages, { llm, settings, signal, sessionConfig: task?.activeTask()?.llm });
         if (did) {
           const after = estimateContextTokens(messages);
           note(messages, `上下文已压缩：约 ${Math.round(before / 1000)}k → ${Math.round(after / 1000)}k tokens`);

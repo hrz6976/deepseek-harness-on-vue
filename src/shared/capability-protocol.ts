@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { PageCommand, SiteSkill } from './page-protocol';
 import type { HarnessMessage, JsonObject, JsonValue, ToolSchema } from './runtime';
+import type { SessionLlmConfig } from './task-model';
 
 const uniqueNames = (label: string) => z.array(z.string().trim().min(1))
   .refine(items => new Set(items).size === items.length, `${label} entries must be unique`);
@@ -88,7 +89,7 @@ export type LlmCapabilityRequest =
       provider: 'llm';
       action: 'complete';
       contextId?: string;
-      input: { request: { systemPrompt: string; messages: HarnessMessage[]; tools: ToolSchema[] } };
+      input: { request: { systemPrompt: string; messages: HarnessMessage[]; tools: ToolSchema[]; sessionConfig: SessionLlmConfig } };
     };
 
 export type McpCapabilityRequest =

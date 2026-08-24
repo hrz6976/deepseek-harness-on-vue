@@ -10,8 +10,9 @@ import {
   NDropdown,
   NEmpty,
   NIcon,
-  NInput,
+  NPopover,
   NPopconfirm,
+  NSelect,
   NSwitch,
   NTag,
   NTooltip,
@@ -20,12 +21,12 @@ import {
 import {
   Activity,
   ArrowDown,
+  Bulb,
   Box,
   Dots,
   FileText,
   LayersSubtract,
   Paperclip,
-  Send,
   Tool,
   Trash,
   World,
@@ -43,6 +44,7 @@ import { brokerFsPlugin } from './broker-fs';
 import { brokerLlmPlugin } from './broker-llm';
 import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from './agent-policy';
 import { attachAnnotationContext, canSubmitPageMessage, formatAnnotationContext, takeAnnotationSubmission } from './annotation-context';
+import { SandboxComposer } from './sandbox-composer';
 import { createSandboxBroker } from './sandbox-broker';
 import { useSandboxInspector } from './sandbox-inspector';
 import appTemplate from './sandbox-app.html?raw';
@@ -54,7 +56,9 @@ import {
 } from '@/shared/page-protocol';
 import type { FsService, LlmRequest, ToolCall } from '@/shared/runtime';
 import type { TaskContext } from '@/shared/task-model';
+import { DEFAULT_SESSION_LLM_CONFIG, normalizeSessionLlmConfig, type ReasoningEffort } from '@/shared/task-model';
 import { appendTimeline, displayMessageText, useTimelineView } from './sandbox-timeline';
+import { renderMarkdown } from '@/shared/markdown';
 import './sandbox.css';
 
 const uiTheme: GlobalThemeOverrides = {
@@ -71,6 +75,17 @@ const uiTheme: GlobalThemeOverrides = {
 const appMenuOptions = [
   { label: '任务管理', key: 'tasks' },
   { label: '扩展设置', key: 'settings' },
+];
+
+const sessionModelOptions = [
+  { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash' },
+  { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
+];
+const sessionThinkingOptions = [
+  { label: '关闭思考', value: 'off' },
+  { label: 'Low', value: 'low' },
+  { label: 'High', value: 'high' },
+  { label: 'Max', value: 'max' },
 ];
 
 const sandboxBroker = createSandboxBroker(parent);
@@ -111,12 +126,11 @@ const App = {
   name: 'HarnessSandbox',
   components: {
     NButton, NCollapse, NCollapseItem, NConfigProvider, NDrawer, NDrawerContent,
-    NDropdown, NEmpty, NIcon, NInput, NPopconfirm, NSwitch, NTag, NTooltip,
-    Activity, ArrowDown, Box, Dots, FileText, LayersSubtract, Paperclip, Send,
+    NDropdown, NEmpty, NIcon, NPopover, NPopconfirm, NSelect, NSwitch, NTag, NTooltip, SandboxComposer,
+    Activity, ArrowDown, Box, Bulb, Dots, FileText, LayersSubtract, Paperclip,
     Tool, Trash, World,
   },
   setup() {
-    const input = ref('');
     const actionBusy = ref(false);
     const loopService = useService('loop');
     const taskService = useService('task');
@@ -132,12 +146,21 @@ const App = {
       pendingUserAnnotations,
     );
     const busy = computed(() => actionBusy.value || loopService.value?.running.value === true);
-    const canSend = computed(() => canSubmitPageMessage(input.value, annotations.value));
     const runtimeLabel = computed(() => runtimeFailure.value ? '异常' : runtimeReady.value ? '就绪' : '启动中');
     const inspectorState = useSandboxInspector(
       taskService, loopService, fsService, managerService, broker, pushError,
       () => parent.postMessage({ channel: 'harness-shell-v1', type: 'open-options' }, '*'),
     );
+    const sessionLlmConfig = computed(() => normalizeSessionLlmConfig(
+      inspectorState.activeTask.value?.llm ?? DEFAULT_SESSION_LLM_CONFIG,
+    ));
+    const sessionThinkingValue = computed(() => sessionLlmConfig.value.thinking
+      ? sessionLlmConfig.value.reasoningEffort : 'off');
+    const sessionModelLabel = computed(() => {
+      const selected = sessionModelOptions.find(option => option.value === sessionLlmConfig.value.model);
+      const model = selected?.label.replace('DeepSeek ', '') ?? sessionLlmConfig.value.model;
+      return `${model} · ${sessionThinkingValue.value}`;
+    });
     usePromptSection({ name: 'extension-page-boundary', order: -100, text: PAGE_AGENT_BOUNDARY_PROMPT });
     useRequestTransform<LlmRequest>(request => attachAnnotationContext(request, submittedAnnotationContext.value));
     usePromptSection({
@@ -191,8 +214,8 @@ const App = {
       });
     }
 
-    async function send(): Promise<void> {
-      const text = input.value.trim();
+    async function send(submittedText: string): Promise<void> {
+      const text = submittedText.trim();
       if (!canSubmitPageMessage(text, annotations.value) || busy.value) return;
       if (!runtimeReady.value) {
         pushError(runtimeFailure.value || 'Agent runtime 尚未就绪，请稍后重试。');
@@ -208,7 +231,6 @@ const App = {
         pushError(message);
         return;
       }
-      input.value = '';
       const submittedAnnotations = takeAnnotationSubmission(annotations.value);
       pendingUserAnnotations.value = submittedAnnotations;
       submittedAnnotationContext.value = formatAnnotationContext(submittedAnnotations);
@@ -237,6 +259,27 @@ const App = {
 
     function clearAnnotations(): void {
       annotations.value.splice(0);
+    }
+
+    async function setSessionModel(model: string): Promise<void> {
+      const task = taskService.value;
+      if (!task || busy.value || !model.trim()) return;
+      try { await task.setLlmConfig({ ...sessionLlmConfig.value, model: model.trim() }); }
+      catch (error) { pushError(`模型设置保存失败：${error instanceof Error ? error.message : String(error)}`); }
+    }
+
+    async function setSessionThinking(value: 'off' | ReasoningEffort): Promise<void> {
+      const task = taskService.value;
+      if (!task || busy.value) return;
+      try {
+        await task.setLlmConfig({
+          ...sessionLlmConfig.value,
+          thinking: value !== 'off',
+          ...(value !== 'off' ? { reasoningEffort: value } : {}),
+        });
+      } catch (error) {
+        pushError(`思考模式保存失败：${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     async function run(action: () => Promise<string | null>): Promise<void> {
@@ -279,10 +322,11 @@ const App = {
 
     return {
       ...timelineView, ...inspectorState,
-      input, displayMessageText, busy, canSend, runtimeReady, runtimeFailure, runtimeLabel,
+      displayMessageText, renderMarkdown, busy, runtimeReady, runtimeFailure, runtimeLabel,
       annotations, taskService,
-      uiTheme, appMenuOptions,
-      snapshot, picker, send, clearAnnotations,
+      uiTheme, appMenuOptions, sessionModelOptions, sessionThinkingOptions,
+      sessionLlmConfig, sessionThinkingValue, sessionModelLabel,
+      snapshot, picker, send, clearAnnotations, setSessionModel, setSessionThinking,
       contextKindLabel, formatToolArguments, toolStatusLabel, toolStatusType,
     };
   },
