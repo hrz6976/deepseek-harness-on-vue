@@ -21,8 +21,8 @@ import {
 import {
   Activity,
   ArrowDown,
-  Bulb,
   Box,
+  ChevronDown,
   Dots,
   FileText,
   LayersSubtract,
@@ -48,6 +48,7 @@ import { SandboxComposer } from './sandbox-composer';
 import { createSandboxBroker } from './sandbox-broker';
 import { useSandboxInspector } from './sandbox-inspector';
 import appTemplate from './sandbox-app.html?raw';
+import harnessMarkUrl from './assets/harness-mark.svg';
 import defaults from 'virtual:plugin-defaults';
 import {
   type Annotation,
@@ -127,7 +128,7 @@ const App = {
   components: {
     NButton, NCollapse, NCollapseItem, NConfigProvider, NDrawer, NDrawerContent,
     NDropdown, NEmpty, NIcon, NPopover, NPopconfirm, NSelect, NSwitch, NTag, NTooltip, SandboxComposer,
-    Activity, ArrowDown, Box, Bulb, Dots, FileText, LayersSubtract, Paperclip,
+    Activity, ArrowDown, Box, ChevronDown, Dots, FileText, LayersSubtract, Paperclip,
     Tool, Trash, World,
   },
   setup() {
@@ -159,7 +160,9 @@ const App = {
     const sessionModelLabel = computed(() => {
       const selected = sessionModelOptions.find(option => option.value === sessionLlmConfig.value.model);
       const model = selected?.label.replace('DeepSeek ', '') ?? sessionLlmConfig.value.model;
-      return `${model} · ${sessionThinkingValue.value}`;
+      const thinking = sessionThinkingOptions.find(option => option.value === sessionThinkingValue.value)?.label
+        ?? sessionThinkingValue.value;
+      return `${model} · ${thinking}`;
     });
     usePromptSection({ name: 'extension-page-boundary', order: -100, text: PAGE_AGENT_BOUNDARY_PROMPT });
     useRequestTransform<LlmRequest>(request => attachAnnotationContext(request, submittedAnnotationContext.value));
@@ -324,7 +327,7 @@ const App = {
       ...timelineView, ...inspectorState,
       displayMessageText, renderMarkdown, busy, runtimeReady, runtimeFailure, runtimeLabel,
       annotations, taskService,
-      uiTheme, appMenuOptions, sessionModelOptions, sessionThinkingOptions,
+      uiTheme, appMenuOptions, harnessMarkUrl, sessionModelOptions, sessionThinkingOptions,
       sessionLlmConfig, sessionThinkingValue, sessionModelLabel,
       snapshot, picker, send, clearAnnotations, setSessionModel, setSessionThinking,
       contextKindLabel, formatToolArguments, toolStatusLabel, toolStatusType,
@@ -405,7 +408,7 @@ function summarizeEvent(event: PageEvent): string | null {
     case 'page/mutation': return null;
     case 'page/route-changed': return `页面路由变化：${event.scope.url}`;
     case 'page/element-selected': return null;
-    case 'annotation/created': return `批注：${event.annotation.text}`;
+    case 'annotation/created': return event.annotation.text ? `批注：${event.annotation.text}` : '已添加批注目标。';
     case 'patch/applied': return `补丁「${event.transaction.label}」已应用。`;
     case 'patch/reverted': return `补丁「${event.transaction.label}」已撤销。`;
     case 'patch/verification-failed': return `补丁「${event.transaction.label}」验证失败。`;

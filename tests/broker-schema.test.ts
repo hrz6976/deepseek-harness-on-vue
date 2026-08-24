@@ -30,6 +30,17 @@ test('broker envelope removes Vue proxies before the structured-clone boundary',
     : null, messages);
 });
 
+test('broker validates bounded public web requests', () => {
+  assert.doesNotThrow(() => createCapabilityEnvelope(
+    'session-token-with-at-least-32-bytes', 'request-web', systemPrincipal(),
+    { provider: 'web', action: 'search', input: { query: 'Yuri anime news', limit: 6 } },
+  ));
+  assert.throws(() => createCapabilityEnvelope(
+    'session-token-with-at-least-32-bytes', 'request-web-bad', systemPrincipal(),
+    { provider: 'web', action: 'open', input: { url: 'file:///etc/passwd' } },
+  ));
+});
+
 test('workspace revisions distinguish absent and changed file bodies', () => {
   assert.equal(workspaceRevision(null), 'absent');
   assert.equal(workspaceRevision('same'), workspaceRevision('same'));

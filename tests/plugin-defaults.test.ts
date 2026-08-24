@@ -71,6 +71,7 @@ test('every shipped TypeScript plugin survives the build transform and import re
   const protectedPermissions = new Set([
     'capability.manage', 'workspace.write', 'llm.use', 'page.modify', 'page.interact', 'page.eval',
     'site-skill.manage', 'mcp.connect', 'mcp.use',
+    'web.read',
   ]);
   for (const name of compiled) {
     const sensitive = legacyCapabilityManifest(name, true).permissions

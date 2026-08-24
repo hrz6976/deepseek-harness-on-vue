@@ -298,7 +298,10 @@ function replyBrokerError(requestId: string, error: unknown, stream = false): vo
 async function forwardEnvelope(envelope: CapabilityEnvelope): Promise<void> {
   assertPrincipalAuthorized(envelope.principal, envelope.payload);
   const approval = approvalForRequest(envelope.payload);
-  if (approval && !await requestApproval(approval)) {
+  const originAccessAlreadyGranted = approval?.reuseGrantedOrigins && approval.origins
+    ? await chrome.permissions.contains({ origins: approval.origins })
+    : false;
+  if (approval && !originAccessAlreadyGranted && !await requestApproval(approval)) {
     frame.contentWindow?.postMessage({
       channel: 'harness-broker-v1',
       requestId: envelope.requestId,

@@ -13,6 +13,7 @@ function requiredPermission(request: CapabilityRequest): string {
     return request.action === 'get' ? 'storage.read' : 'storage.write';
   }
   if (request.provider === 'llm') return 'llm.use';
+  if (request.provider === 'web') return 'web.read';
   if (request.provider === 'mcp') {
     return request.action === 'connect' || request.action === 'disconnect' ? 'mcp.connect' : 'mcp.use';
   }

@@ -18,6 +18,7 @@ export const PROTECTED_PLUGIN_NAMES = [
   'capability-catalog',
   'page',
   'mcp',
+  'web',
   'settings',
 ] as const;
 

@@ -5,9 +5,19 @@ export default defineManifest({
   name: 'Harness Page Agent',
   description: 'Talk to an agent that can inspect, annotate, and transactionally modify the current page.',
   version: '0.1.0',
+  icons: {
+    16: 'src/extension/assets/harness-mark-16.png',
+    32: 'src/extension/assets/harness-mark-32.png',
+    48: 'src/extension/assets/harness-mark-48.png',
+    128: 'src/extension/assets/harness-mark-128.png',
+  },
   minimum_chrome_version: '135',
   action: {
     default_title: 'Open Harness Page Agent',
+    default_icon: {
+      16: 'src/extension/assets/harness-mark-16.png',
+      32: 'src/extension/assets/harness-mark-32.png',
+    },
   },
   background: {
     service_worker: 'src/extension/service-worker.ts',
@@ -20,6 +30,7 @@ export default defineManifest({
   permissions: [
     'activeTab',
     'scripting',
+    'search',
     'sidePanel',
     'storage',
     'tabs',

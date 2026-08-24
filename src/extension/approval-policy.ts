@@ -1,4 +1,5 @@
 import type { CapabilityRequest } from '@/shared/capability-protocol';
+import { PUBLIC_WEB_ORIGIN_PATTERNS } from './web-browser';
 
 export interface ApprovalRequest {
   title: string;
@@ -6,6 +7,7 @@ export interface ApprovalRequest {
   confirmLabel: string;
   danger?: boolean;
   origins?: string[];
+  reuseGrantedOrigins?: boolean;
 }
 
 export function approvalForRequest(request: CapabilityRequest): ApprovalRequest | null {
@@ -43,6 +45,17 @@ export function approvalForRequest(request: CapabilityRequest): ApprovalRequest 
   if (request.provider === 'mcp' && request.action === 'connect') {
     const { protocol, hostname } = new URL(request.input.url);
     return { title: '连接 MCP？', body: request.input.url, confirmLabel: '授权并连接', danger: true, origins: [`${protocol}//${hostname}/*`] };
+  }
+  if (request.provider === 'web') {
+    return {
+      title: '允许读取公共网页？',
+      body: request.action === 'search'
+        ? `Harness 将使用你的默认搜索引擎，并在临时后台标签页中搜索：\n\n${request.input.query}`
+        : `Harness 将在临时后台标签页中读取：\n\n${request.input.url}`,
+      confirmLabel: '允许网页读取',
+      origins: [...PUBLIC_WEB_ORIGIN_PATTERNS],
+      reuseGrantedOrigins: true,
+    };
   }
   return null;
 }

@@ -1,5 +1,15 @@
 import type { Annotation, ElementRef, PageEvent, PageScope } from '@/shared/page-protocol';
 
+export function buildAnnotation(target: ElementRef, pageScope: PageScope, value: string, now = Date.now()): Annotation {
+  return {
+    id: `annotation_${now}`,
+    scope: pageScope,
+    target,
+    text: value.trim(),
+    createdAt: now,
+  };
+}
+
 export function createPickerUi(
   describe: (element: Element) => ElementRef,
   scope: () => PageScope,
@@ -49,6 +59,14 @@ export function createPickerUi(
 
   let active = false;
   let selected: ElementRef | null = null;
+  let draft = '';
+
+  const ensureMounted = (): void => {
+    if (!host.isConnected) document.documentElement.append(host);
+    if (!style.isConnected || !highlight.isConnected || !composer.isConnected) {
+      shadow.replaceChildren(style, highlight, composer);
+    }
+  };
 
   const positionHighlight = (element: Element): void => {
     const rect = element.getBoundingClientRect();
@@ -73,11 +91,11 @@ export function createPickerUi(
     composer.style.display = 'block';
     composer.style.left = `${Math.max(12, Math.min(event.clientX + 12, innerWidth - 332))}px`;
     composer.style.top = `${Math.max(12, Math.min(event.clientY + 12, innerHeight - 210))}px`;
-    textarea.value = '';
+    textarea.value = draft;
     textarea.focus();
   };
   const start = (): void => {
-    if (!host.isConnected) document.documentElement.append(host);
+    ensureMounted();
     if (active) return;
     active = true;
     composer.style.display = 'none';
@@ -90,18 +108,18 @@ export function createPickerUi(
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('click', onClick, true);
   };
-  cancel.addEventListener('click', () => { composer.style.display = 'none'; selected = null; });
+  textarea.addEventListener('input', () => { draft = textarea.value; });
+  cancel.addEventListener('click', () => {
+    draft = textarea.value;
+    composer.style.display = 'none';
+    selected = null;
+  });
   save.addEventListener('click', () => {
-    const text = textarea.value.trim();
-    if (!selected || !text) return;
-    const annotation: Annotation = {
-      id: `annotation_${Date.now()}`,
-      scope: scope(),
-      target: selected,
-      text,
-      createdAt: Date.now(),
-    };
+    if (!selected) return;
+    const annotation = buildAnnotation(selected, scope(), textarea.value);
     emit({ type: 'annotation/created', annotation });
+    draft = '';
+    textarea.value = '';
     composer.style.display = 'none';
     selected = null;
   });

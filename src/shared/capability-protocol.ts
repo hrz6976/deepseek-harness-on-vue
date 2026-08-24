@@ -9,7 +9,7 @@ const uniqueNames = (label: string) => z.array(z.string().trim().min(1))
 export const CapabilityScopeSchema = z.enum(['task', 'workspace', 'site', 'global']);
 
 export const CapabilityProviderSchema = z.enum(
-  ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp'],
+  ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web'],
   { error: issue => `unknown capability provider "${String(issue.input)}"` },
 );
 export type CapabilityProvider = z.infer<typeof CapabilityProviderSchema>;
@@ -98,13 +98,18 @@ export type McpCapabilityRequest =
   | { provider: 'mcp'; action: 'list-tools'; contextId?: string; input: { id: string } }
   | { provider: 'mcp'; action: 'call-tool'; contextId?: string; input: { id: string; name: string; arguments?: JsonObject } };
 
+export type WebCapabilityRequest =
+  | { provider: 'web'; action: 'search'; contextId?: string; input: { query: string; limit?: number } }
+  | { provider: 'web'; action: 'open'; contextId?: string; input: { url: string; maxChars?: number } };
+
 export type CapabilityRequest =
   | PageCapabilityRequest
   | WorkspaceCapabilityRequest
   | SiteSkillCapabilityRequest
   | StorageCapabilityRequest
   | LlmCapabilityRequest
-  | McpCapabilityRequest;
+  | McpCapabilityRequest
+  | WebCapabilityRequest;
 
 export interface CapabilityEnvelope<T = CapabilityRequest> {
   channel: 'harness-broker-v1';

@@ -2,7 +2,7 @@
   <main class="shell">
     <header class="app-header">
       <div class="brand">
-        <strong>Harness</strong>
+        <img class="brand-mark" :src="harnessMarkUrl" alt="" />
         <button class="task-identity" type="button" @click="openInspector('tasks')">
           <span>{{ activeTask?.title || '正在恢复任务' }}</span>
           <small><i :class="activeTask?.status"></i>{{ taskStatusLabel }}</small>
@@ -29,14 +29,6 @@
       <div class="page-actions" aria-label="网页能力">
         <n-button text size="small" :disabled="busy" @click="snapshot"><template #icon><n-icon><World /></n-icon></template>读取</n-button>
         <n-button text size="small" :disabled="busy" @click="picker"><template #icon><n-icon><Activity /></n-icon></template>批注</n-button>
-        <n-popover trigger="click" placement="bottom-end" :show-arrow="false">
-          <template #trigger><n-button text size="small" :disabled="busy" class="session-model-trigger"><template #icon><n-icon><Bulb /></n-icon></template>{{ sessionModelLabel }}</n-button></template>
-          <div class="session-model-popover">
-            <label><span>当前会话模型</span><n-select :value="sessionLlmConfig.model" :options="sessionModelOptions" filterable tag size="small" @update:value="setSessionModel" /></label>
-            <label><span>Thinking effort</span><n-select :value="sessionThinkingValue" :options="sessionThinkingOptions" size="small" @update:value="setSessionThinking" /></label>
-            <small>仅作用于当前任务，下一次发送时生效；DeepSeek 模型会显式发送 thinking 参数。</small>
-          </div>
-        </n-popover>
         <n-button text size="small" @click="openPagePlugins"><template #icon><n-icon><Tool /></n-icon></template>Skills</n-button>
       </div>
     </section>
@@ -49,7 +41,7 @@
       <article
         v-for="block in displayBlocks"
         :key="block.id"
-        :class="[block.type === 'message' ? block.message.role : block.item.kind, { 'tool-record': block.type === 'message' && block.message.role === 'assistant' && block.message.toolCalls.length }]"
+        :class="block.type === 'message' ? block.message.role : block.item.kind"
       >
         <template v-if="block.type === 'message' && block.message.role === 'assistant'">
           <details v-if="block.message.thinking" class="reasoning-panel" :open="block.message.status === 'streaming'">
@@ -57,7 +49,7 @@
             <div class="reasoning-content markdown-body" v-html="renderMarkdown(block.message.thinking)"></div>
           </details>
           <div v-if="block.message.text" class="assistant-answer markdown-body" :class="{ 'assistant-draft': block.message.status === 'streaming' || block.message.toolCalls.length }" v-html="renderMarkdown(displayMessageText(block.message))"></div>
-          <template v-if="block.message.toolCalls.length">
+          <section v-if="block.message.toolCalls.length" class="tool-record" aria-label="工具调用">
             <div class="tool-turn-heading"><n-icon><Tool /></n-icon><strong>{{ block.message.toolCalls.length }} 个工具调用</strong></div>
             <n-collapse arrow-placement="right">
               <n-collapse-item v-for="call in block.message.toolCalls" :key="call.id" :name="call.id">
@@ -70,14 +62,14 @@
                 </div>
               </n-collapse-item>
             </n-collapse>
-          </template>
+          </section>
           <n-button v-if="block.message.status === 'done' && block.message.text && !block.message.toolCalls.length" text size="tiny" class="message-action" @click="saveMessageArtifact(block.message)"><template #icon><n-icon><FileText /></n-icon></template>存为报告</n-button>
         </template>
         <template v-else-if="block.type === 'message'">
           <div v-if="displayMessageText(block.message)" class="message-text">{{ displayMessageText(block.message) }}</div>
           <div v-if="block.message.role === 'user' && block.annotations?.length" class="message-annotations" aria-label="随消息发送的页面批注">
             <section v-for="annotation in block.annotations" :key="annotation.id" class="message-annotation">
-              <span class="message-annotation-label">批注</span><p>{{ annotation.text }}</p><code>{{ annotation.target.selector }}</code>
+              <span class="message-annotation-label">{{ annotation.text ? '批注' : '批注目标' }}</span><p v-if="annotation.text">{{ annotation.text }}</p><code>{{ annotation.target.selector }}</code>
             </section>
           </div>
         </template>
@@ -94,7 +86,22 @@
       :runtime-ready="runtimeReady"
       @send="send"
       @clear-annotations="clearAnnotations"
-    />
+    >
+      <template #controls>
+        <n-popover trigger="click" placement="top-end" :show-arrow="false">
+          <template #trigger>
+            <n-button text size="tiny" :disabled="busy" class="session-model-trigger">
+              <span>{{ sessionModelLabel }}</span><n-icon class="session-model-chevron"><ChevronDown /></n-icon>
+            </n-button>
+          </template>
+          <div class="session-model-popover">
+            <label><span>当前会话模型</span><n-select :value="sessionLlmConfig.model" :options="sessionModelOptions" filterable tag size="small" @update:value="setSessionModel" /></label>
+            <label><span>Thinking effort</span><n-select :value="sessionThinkingValue" :options="sessionThinkingOptions" size="small" @update:value="setSessionThinking" /></label>
+            <small>仅用于当前任务，下次发送时生效。DeepSeek 模型会显式发送 thinking 参数。</small>
+          </div>
+        </n-popover>
+      </template>
+    </sandbox-composer>
 
     <n-drawer v-model:show="inspectorOpen" width="min(380px, 94vw)" placement="right">
       <n-drawer-content :title="inspectorTitle" closable :native-scrollbar="false">

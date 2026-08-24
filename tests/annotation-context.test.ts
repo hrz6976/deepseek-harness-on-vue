@@ -42,6 +42,7 @@ test('annotation context preserves user text and the selected element identity',
   assert.deepEqual(composerAnnotations, []);
 
   assert.equal(canSubmitPageMessage('', [annotation]), true);
+  assert.match(formatAnnotationContext([{ ...annotation, text: '' }]), /"text": ""/u);
   assert.equal(canSubmitPageMessage('1', []), true);
   assert.equal(canSubmitPageMessage('   ', []), false);
 });

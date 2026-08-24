@@ -38,6 +38,7 @@ const BUILTIN_PROVIDER_REQUIREMENTS: Record<string, CapabilityProvider[]> = {
   files: ['workspace'],
   preview: ['workspace'],
   mcp: ['mcp'],
+  web: ['web'],
   'capability-catalog': ['site-skill'],
   'workspace-tools': ['workspace'],
 };
@@ -67,6 +68,7 @@ const BUILTIN_PERMISSIONS: Record<string, CapabilityPermission[]> = {
     { id: 'mcp.connect', reason: 'Connect and disconnect user-approved MCP servers.' },
     { id: 'mcp.use', reason: 'Discover and call tools on connected MCP servers.' },
   ],
+  web: [{ id: 'web.read', reason: 'Search and read the public web through trusted temporary browser tabs.' }],
   'capability-catalog': [
     { id: 'capability.manage', reason: 'Attach discovered capabilities and load task-scoped tool groups.' },
     { id: 'site-skill.read', reason: 'Discover persisted Site Skills.' },

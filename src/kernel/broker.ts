@@ -22,7 +22,7 @@ const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
   // adapter, so model completions are authorized as kernel:loop.
   'loop': { providers: ['llm'], permissions: ['llm.use'] },
   'shell': {
-    providers: ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp'],
+    providers: ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web'],
     permissions: ['*'],
   },
 };
@@ -69,7 +69,7 @@ export function systemPrincipal(id = 'harness-shell'): CapabilityPrincipal {
     id,
     fiberId: `system:${id}`,
     scope: 'global',
-    providers: ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp'],
+    providers: ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web'],
     permissions: ['*'],
   };
 }

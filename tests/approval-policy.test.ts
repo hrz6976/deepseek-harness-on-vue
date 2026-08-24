@@ -40,4 +40,9 @@ test('temporary page patches need no shell prompt while persistent and high-risk
 
   const mcp = approvalForRequest({ provider: 'mcp', action: 'connect', input: { id: 'local', url: 'http://localhost:3001/mcp' } });
   assert.deepEqual(mcp?.origins, ['http://localhost/*']);
+
+  const web = approvalForRequest({ provider: 'web', action: 'search', input: { query: 'DeepSeek API docs' } });
+  assert.deepEqual(web?.origins, ['http://*/*', 'https://*/*']);
+  assert.equal(web?.reuseGrantedOrigins, true);
+  assert.match(web?.body ?? '', /默认搜索引擎/u);
 });

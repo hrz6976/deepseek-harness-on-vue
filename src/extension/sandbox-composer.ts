@@ -74,9 +74,12 @@ export const SandboxComposer = defineComponent({
         ></textarea>
         <div class="composer-footer">
           <span class="composer-hint">Ctrl Enter 发送</span>
-          <n-button type="primary" size="small" attr-type="button" :loading="busy" :disabled="!runtimeReady || !canSend" @click="send">
-            <template #icon><n-icon><Send /></n-icon></template>{{ !runtimeReady ? '初始化中' : busy ? '处理中' : '发送' }}
-          </n-button>
+          <div class="composer-actions">
+            <slot name="controls"></slot>
+            <n-button type="primary" size="small" attr-type="button" :loading="busy" :disabled="!runtimeReady || !canSend" @click="send">
+              <template #icon><n-icon><Send /></n-icon></template>{{ !runtimeReady ? '初始化中' : busy ? '处理中' : '发送' }}
+            </n-button>
+          </div>
         </div>
       </div>
     </form>

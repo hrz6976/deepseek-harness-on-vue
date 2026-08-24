@@ -201,6 +201,18 @@ const CapabilityRequestSchema = z.union([
   z.object({ provider: z.literal('mcp'), action: z.literal('disconnect'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1) }) }),
   z.object({ provider: z.literal('mcp'), action: z.literal('list-tools'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1) }) }),
   z.object({ provider: z.literal('mcp'), action: z.literal('call-tool'), contextId: ContextIdSchema, input: z.object({ id: z.string().min(1), name: z.string().min(1), arguments: z.record(z.string(), JsonValueSchema).optional() }) }),
+
+  z.object({
+    provider: z.literal('web'), action: z.literal('search'), contextId: ContextIdSchema,
+    input: z.object({ query: z.string().trim().min(1).max(500), limit: z.number().int().min(1).max(10).optional() }),
+  }),
+  z.object({
+    provider: z.literal('web'), action: z.literal('open'), contextId: ContextIdSchema,
+    input: z.object({
+      url: z.string().url().max(10_000).refine(value => /^https?:/u.test(value), 'web open URL must use http(s)'),
+      maxChars: z.number().int().min(1_000).max(60_000).optional(),
+    }),
+  }),
 ]);
 
 const CapabilityEnvelopeSchema = z.object({

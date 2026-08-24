@@ -16,6 +16,7 @@ import {
   sidePanelPath,
 } from './tab-scope';
 import { TrustedCapabilityHost } from './capability-host';
+import { openWebPageInBackground, searchWebInBackground } from './web-browser';
 
 interface StoredLlmConfig { baseURL: string; model?: string; apiKey: string }
 type DeepSeekThinkingParams = {
@@ -69,6 +70,11 @@ capabilityHost.register('llm', {
 });
 capabilityHost.register('mcp', {
   request: (request, context) => mcpHost.request(request, context.tabId),
+});
+capabilityHost.register('web', {
+  request: async (request, context) => toJsonValue(request.action === 'search'
+    ? await searchWebInBackground(context.tabId, request.input.query, request.input.limit)
+    : await openWebPageInBackground(context.tabId, request.input.url, request.input.maxChars)),
 });
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);

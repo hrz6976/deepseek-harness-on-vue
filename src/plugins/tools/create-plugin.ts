@@ -50,7 +50,7 @@ Key points:
 - Declare required services in inject. A Fiber stays pending until they exist and is automatically restarted if a required service changes.
 - Use ctx.provide(name, service), ctx.on/emit/waterfall, and ctx.effect for custom services, events, middleware, and resources.
 - The trusted shell emits host lifecycle as ctx.on('page/event', listener). Vue setup code may import usePageEvent from @harness/sdk. Load page.dynamic and call page_observe_start when mutation events are actually needed; prefer declarative LiveRules for automatic future-node changes.
-- Generated task manifests have no trusted provider grants. If code injects broker/fs/llm or manages capabilities, pass a declared manifest with the matching provider and permission: page.read/page.modify/page.interact, site-skill.read/site-skill.manage, workspace.read/workspace.write, llm.use, storage.read/storage.write, mcp.connect/mcp.use, or capability.manage.
+- Generated task manifests have no trusted provider grants. If code injects broker/fs/llm or manages capabilities, pass a declared manifest with the matching provider and permission: page.read/page.modify/page.interact, site-skill.read/site-skill.manage, workspace.read/workspace.write, llm.use, storage.read/storage.write, mcp.connect/mcp.use, web.read, or capability.manage.
 - Dynamic imports are limited to vue, zod, @deepseek-ai/cordis, the model SDK, and @harness/sdk. Kernel/root/mount/compiler modules are private.
 - Remove a capability with remove_plugin.`;
 
