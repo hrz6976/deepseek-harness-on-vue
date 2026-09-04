@@ -8,7 +8,7 @@ class BrokerFsRuntime extends WorkspaceRuntime {
 
   constructor(ctx: Context) {
     super(ctx);
-    this.ready = this.restore();
+    this.ready = ctx.fs.refresh?.() ?? Promise.resolve();
   }
 
   private async restore(): Promise<void> {

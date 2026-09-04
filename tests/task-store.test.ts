@@ -26,7 +26,7 @@ test('task store restores task identity independently from page/tab state', asyn
   let sequence = 0;
   const store = new HarnessTaskStore(fs, () => 1_700_000_000_000 + sequence, () => `id-${++sequence}`);
   const task = store.newTask('Research launch');
-  assert.deepEqual(task.llm, { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' });
+  assert.deepEqual(task.llm, { profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' });
   const page = store.newContext(task.id, { kind: 'page', title: 'Product', locator: 'https://example.test/product', metadata: { tabId: 7 } });
   const file = store.newContext(task.id, { kind: 'file', title: 'brief.md', locator: 'brief.md' });
   const artifact = store.newArtifact(task.id, { kind: 'report', title: 'Launch report', source: { type: 'agent' }, status: 'ready', content: { summary: 'done' } });
@@ -71,7 +71,7 @@ test('legacy task metadata gains a current per-session model profile', async () 
   });
   const restored = await new HarnessTaskStore(fs).load();
   assert.deepEqual(restored.tasks[0]?.llm, {
-    model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high',
+    profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high',
   });
 });
 
@@ -184,23 +184,74 @@ test('task runtime owns one conversation and checkpoints it across task switches
   const task = runtime.reflect.get('task') as TaskRuntimeService;
   await task.ready;
   const first = task.activeTask()!;
-  await task.setLlmConfig({ model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' });
+  await task.setModelSelection('opencode-go', 'deepseek-v4-pro');
+  await task.setLlmConfig({ ...task.activeTask()!.llm, thinking: true, reasoningEffort: 'max' });
   const firstScope = task.scope();
   task.messages.push({ role: 'user', text: 'first conversation' });
 
   const second = await task.createTask('Second');
-  assert.equal(second.llm.model, 'deepseek-v4-flash');
+  assert.equal(second.llm.model, 'deepseek-v4-pro');
   const secondScope = task.scope();
   assert.equal(firstScope.fiber.uid, null);
   assert.deepEqual(task.messages, []);
   task.messages.push({ role: 'user', text: 'second conversation' });
 
   await task.activateTask(first.id);
-  assert.deepEqual(task.activeTask()?.llm, { model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' });
+  assert.deepEqual(task.activeTask()?.llm, { profileId: 'opencode-go', model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' });
   assert.equal(secondScope.fiber.uid, null);
   assert.equal(task.messages[0]?.text, 'first conversation');
   await task.activateTask(second.id);
   assert.equal(task.messages[0]?.text, 'second conversation');
+});
+
+test('model selection applies to existing and newly created conversations', async () => {
+  await provideTestService('fs', fakeFs());
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.reflect.get('task') as TaskRuntimeService;
+  await task.ready;
+  const first = task.activeTask()!;
+  const second = await task.createTask('Second');
+
+  await task.setModelSelection('opencode-go', 'remembered-model');
+  const third = await task.createTask('Third');
+
+  assert.ok([first, second, third].every(item => item.llm.profileId === 'opencode-go'));
+  assert.ok([first, second, third].every(item => item.llm.model === 'remembered-model'));
+});
+
+test('model selection is shared across page-scoped conversation stores', async () => {
+  const fs = fakeFs();
+  const firstStore = new HarnessTaskStore(fs, undefined, undefined, 'first.example');
+  firstStore.setModelSelection('opencode-go', 'remembered-model');
+  await firstStore.persistModelSelection();
+
+  const otherStore = new HarnessTaskStore(fs, undefined, undefined, 'other.example');
+  await otherStore.load();
+  const task = otherStore.newTask('Other page');
+
+  assert.equal(task.llm.profileId, 'opencode-go');
+  assert.equal(task.llm.model, 'remembered-model');
+});
+
+test('the last selected model survives overlapping saves and runtime restore', async () => {
+  const fs = fakeFs();
+  const write = fs.write.bind(fs);
+  fs.write = async (path, content) => {
+    if (content.includes('slow-model')) await new Promise(resolve => setTimeout(resolve, 20));
+    await write(path, content);
+  };
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.reflect.get('task') as TaskRuntimeService;
+  await task.ready;
+
+  const firstSave = task.setModelSelection('opencode-go', 'slow-model');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lastSave = task.setModelSelection('opencode-go', 'remembered-model');
+  await Promise.all([firstSave, lastSave]);
+
+  const restored = await new HarnessTaskStore(fs).load();
+  assert.ok(restored.tasks.every(item => item.llm.model === 'remembered-model'));
 });
 
 test('task runtime clears a ghost running status after the sandbox restarts', async () => {

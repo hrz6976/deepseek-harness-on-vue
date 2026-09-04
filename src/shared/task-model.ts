@@ -6,13 +6,21 @@ export type ArtifactKind = 'change-set' | 'file' | 'site-skill' | 'workflow' | '
 export type ArtifactStatus = 'draft' | 'ready' | 'verified' | 'failed' | 'archived';
 export type ReasoningEffort = 'low' | 'high' | 'max';
 
+export interface LlmProfileSummary {
+  id: string;
+  name: string;
+  defaultModel: string;
+}
+
 export interface SessionLlmConfig {
+  profileId: string;
   model: string;
   thinking: boolean;
   reasoningEffort: ReasoningEffort;
 }
 
 export const DEFAULT_SESSION_LLM_CONFIG: Readonly<SessionLlmConfig> = Object.freeze({
+  profileId: '',
   model: 'deepseek-v4-flash',
   thinking: true,
   reasoningEffort: 'high',
@@ -21,6 +29,7 @@ export const DEFAULT_SESSION_LLM_CONFIG: Readonly<SessionLlmConfig> = Object.fre
 export function normalizeSessionLlmConfig(value?: Partial<SessionLlmConfig> | null): SessionLlmConfig {
   const effort = value?.reasoningEffort;
   return {
+    profileId: value?.profileId?.trim() || DEFAULT_SESSION_LLM_CONFIG.profileId,
     model: value?.model?.trim() || DEFAULT_SESSION_LLM_CONFIG.model,
     thinking: value?.thinking ?? DEFAULT_SESSION_LLM_CONFIG.thinking,
     reasoningEffort: effort === 'low' || effort === 'high' || effort === 'max'

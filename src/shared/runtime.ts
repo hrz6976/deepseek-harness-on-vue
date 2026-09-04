@@ -9,6 +9,7 @@ import type {
   TaskEvent,
   TaskSession,
   TaskStatus,
+  LlmProfileSummary,
   SessionLlmConfig,
 } from './task-model';
 import type { Annotation } from './page-protocol';
@@ -99,6 +100,15 @@ export interface LlmService {
   stream(request: LlmRequest): AsyncIterable<LlmStreamEvent>;
 }
 
+export interface ModelProfilesService {
+  profiles: Ref<LlmProfileSummary[]>;
+  defaultProfileId: Ref<string>;
+  refresh(): Promise<void>;
+  models(profileId?: string): Promise<string[]>;
+  effectiveId(requestedProfileId?: string): string;
+  resolve(requestedProfileId?: string): LlmProfileSummary | null;
+}
+
 export interface ToolSchema {
   name: string;
   description: string;
@@ -168,11 +178,13 @@ export interface PromptService {
   assemble(context?: { fs?: FsService | null }): string;
 }
 
+export type UiRegion = 'main' | 'side' | 'composer-controls';
+
 export interface UiContribution {
   name: string;
   component: Component;
   props?: Record<string, unknown> | null;
-  region?: string;
+  region: UiRegion;
   order?: number;
 }
 
@@ -238,6 +250,7 @@ export interface TaskRuntimeService {
   renameTask(id: string, title: string): Promise<void>;
   setStatus(id: string, status: TaskStatus): Promise<void>;
   setLlmConfig(config: SessionLlmConfig): Promise<void>;
+  setModelSelection(profileId: string, model: string): Promise<void>;
   addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>): Promise<TaskContext>;
   removeContext(id: string): Promise<void>;
   attachCapability(id: string): Promise<void>;
@@ -256,6 +269,7 @@ export interface BrokerService {
 export interface ServiceTypes {
   fs: FsService;
   llm: LlmService;
+  modelProfiles: ModelProfilesService;
   tools: ToolsService;
   prompt: PromptService;
   ui: UiService;

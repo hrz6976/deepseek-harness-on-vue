@@ -7,7 +7,11 @@ import { DEFAULT_SESSION_LLM_CONFIG, type SessionLlmConfig } from '@/shared/task
 class BrokerLlmRuntime extends Service implements LlmService {
   readonly engineName = ref('trusted broker');
   readonly limits = (sessionConfig?: SessionLlmConfig) =>
-    modelLimitsFor(sessionConfig?.model ?? DEFAULT_SESSION_LLM_CONFIG.model);
+    modelLimitsFor(
+      sessionConfig?.model ?? DEFAULT_SESSION_LLM_CONFIG.model,
+      {},
+      sessionConfig?.profileId ?? DEFAULT_SESSION_LLM_CONFIG.profileId,
+    );
 
   constructor(ctx: Context) {
     super(ctx, 'llm');

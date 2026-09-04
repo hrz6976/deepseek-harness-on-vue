@@ -8,7 +8,7 @@ import {
   shallowReactive,
 } from 'vue';
 import type { ComponentPublicInstance } from 'vue';
-import type { UiContribution } from '@/shared/runtime';
+import type { UiContribution, UiRegion } from '@/shared/runtime';
 import { capabilityForContext, recordCapabilityContribution } from './capabilities';
 import { cordisContextKey } from './cordis';
 import { log } from './log';
@@ -118,10 +118,10 @@ const UiContributionHost = defineComponent({
 export const UiContributionsHost = defineComponent({
   name: 'UiContributionsHost',
   props: { region: { type: String, default: 'main' } },
-  setup(props: { region: string }) {
+  setup(props: { region: UiRegion }) {
     const ui = useService<UiService>('ui');
     return () => [...(ui.value?.contributions.values() ?? [])]
-      .filter(contribution => (contribution.region ?? 'main') === props.region)
+      .filter(contribution => contribution.region === props.region)
       .sort((a, b) => (a.order ?? 50) - (b.order ?? 50) || a.id.localeCompare(b.id))
       .map(contribution => h(UiContributionHost, {
       key: `${contribution.id}:${contribution.version}`,

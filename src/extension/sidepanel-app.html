@@ -1,0 +1,19 @@
+<section id="site-access" v-show="siteAccessVisible">
+  <span>{{ siteAccessLabel }}</span>
+  <button type="button" :disabled="siteAccessBusy" @click="authorizeSite">授权并读取</button>
+</section>
+<section v-if="!sandboxReady" id="sandbox-status" role="status" :class="{ failed: statusFailed }">
+  <strong>{{ statusTitle }}</strong>
+  <span>{{ statusDetail }}</span>
+</section>
+<iframe ref="sandboxFrame" v-show="sandboxReady" src="./sandbox.html" sandbox="allow-scripts" title="Harness agent runtime" :data-tab-id="tabId" :data-host="host"></iframe>
+<dialog ref="approvalDialog" :class="{ danger: approvalRequest?.danger }" @close="finishApproval">
+  <form @submit.prevent>
+    <h2>{{ approvalRequest?.title }}</h2>
+    <p>{{ approvalError || approvalRequest?.body }}</p>
+    <footer>
+      <button type="button" @click="cancelApproval">取消</button>
+      <button class="primary" type="button" :disabled="approvalBusy" @click="confirmApproval">{{ approvalRequest?.confirmLabel || '允许' }}</button>
+    </footer>
+  </form>
+</dialog>

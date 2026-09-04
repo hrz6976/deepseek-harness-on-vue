@@ -13,6 +13,7 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
     const messages = reactive<HarnessMessage[]>([]);
     const activeTaskId = ref<string | null>(null);
     let taskFiber: Fiber | null = null;
+    let llmSaveQueue = Promise.resolve();
 
     const activeTask = () => tasks.find(task => task.id === activeTaskId.value) ?? null;
     const scope = () => taskFiber?.ctx ?? ctx;
@@ -126,11 +127,26 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
       await store.persistTask(task);
     }
 
-    async function setLlmConfig(config: SessionLlmConfig): Promise<void> {
+    function setLlmConfig(config: SessionLlmConfig): Promise<void> {
       const task = requireActive();
       task.llm = normalizeSessionLlmConfig(config);
       store.touch(task);
-      await store.persistTask(task);
+      const save = llmSaveQueue.catch(() => undefined).then(() => store.persistTask(task));
+      llmSaveQueue = save;
+      return save;
+    }
+
+    function setModelSelection(profileId: string, model: string): Promise<void> {
+      const selection = store.setModelSelection(profileId, model);
+      for (const task of tasks) {
+        task.llm = { ...task.llm, ...selection };
+        store.touch(task);
+      }
+      const save = llmSaveQueue.catch(() => undefined)
+        .then(() => Promise.all([store.persistModelSelection(), ...tasks.map(task => store.persistTask(task))]))
+        .then(() => undefined);
+      llmSaveQueue = save;
+      return save;
     }
 
     async function addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>) {
@@ -198,7 +214,7 @@ function applyTaskRuntime(ctx: Context, storageScope?: string): void {
     ctx.provide('task', {
       ready, messages, tasks, contexts, artifacts, activeTaskId, activeTask, scope,
       refresh,
-      createTask, activateTask, deleteTask, renameTask, setStatus, setLlmConfig, addContext, removeContext, attachCapability, detachCapability,
+      createTask, activateTask, deleteTask, renameTask, setStatus, setLlmConfig, setModelSelection, addContext, removeContext, attachCapability, detachCapability,
       createArtifact, updateArtifact, appendEvent, saveCheckpoint,
     });
 }

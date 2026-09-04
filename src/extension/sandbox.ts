@@ -10,9 +10,7 @@ import {
   NDropdown,
   NEmpty,
   NIcon,
-  NPopover,
   NPopconfirm,
-  NSelect,
   NSwitch,
   NTag,
   NTooltip,
@@ -22,7 +20,6 @@ import {
   Activity,
   ArrowDown,
   Box,
-  ChevronDown,
   Dots,
   FileText,
   LayersSubtract,
@@ -35,13 +32,12 @@ import { useService } from '@/kernel/services';
 import { useBusOn, useToolGuard } from '@/kernel/bus';
 import { usePromptSection } from '@/kernel/contrib';
 import { UiContributionsHost } from '@/kernel/ui';
-import { capabilities } from '@/kernel/capabilities';
 import { modules } from '@/kernel/modules';
-import { PLUGIN_DIR } from '@/kernel/capability-package';
 import { startHarnessRuntime } from '@/kernel/runtime-supervisor';
 import { cordisContextKey, runtime } from '@/kernel/cordis';
 import { brokerFsPlugin } from './broker-fs';
 import { brokerLlmPlugin } from './broker-llm';
+import { modelProfilesPlugin } from './model-profiles';
 import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from './agent-policy';
 import { canSubmitPageMessage, takeAnnotationSubmission } from './annotation-context';
 import { SandboxComposer } from './sandbox-composer';
@@ -54,9 +50,8 @@ import {
   type PageEvent,
   type PageSnapshot,
 } from '@/shared/page-protocol';
-import { MAX_MESSAGE_ANNOTATIONS, type FsService, type ToolCall } from '@/shared/runtime';
+import { MAX_MESSAGE_ANNOTATIONS, type TaskRuntimeService, type ToolCall } from '@/shared/runtime';
 import type { TaskContext } from '@/shared/task-model';
-import { DEFAULT_SESSION_LLM_CONFIG, normalizeSessionLlmConfig, type ReasoningEffort } from '@/shared/task-model';
 import { appendTimeline, displayMessageText, useTimelineView } from './sandbox-timeline';
 import { renderMarkdown } from '@/shared/markdown';
 import './sandbox.css';
@@ -77,24 +72,13 @@ const appMenuOptions = [
   { label: '扩展设置', key: 'settings' },
 ];
 
-const sessionModelOptions = [
-  { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash' },
-  { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
-];
-const sessionThinkingOptions = [
-  { label: '关闭思考', value: 'off' },
-  { label: 'Low', value: 'low' },
-  { label: 'High', value: 'high' },
-  { label: 'Max', value: 'max' },
-];
-
 const sandboxBroker = createSandboxBroker(parent);
 const broker = sandboxBroker.request;
 
 const runtimeReady = ref(false);
 const runtimeFailure = ref('');
 const annotations = ref<Annotation[]>([]);
-const REQUIRED_RUNTIME_SERVICES = ['fs', 'llm', 'tools', 'prompt', 'loop', 'task'] as const;
+const REQUIRED_RUNTIME_SERVICES = ['fs', 'llm', 'modelProfiles', 'tools', 'prompt', 'loop', 'task'] as const;
 let siteAuthorizedHandler: ((origin: string) => void) | null = null;
 let workspaceChangedHandler: (() => void) | null = null;
 let lastSnapshotSignature = '';
@@ -126,8 +110,8 @@ const App = {
   name: 'HarnessSandbox',
   components: {
     NButton, NCollapse, NCollapseItem, NConfigProvider, NDrawer, NDrawerContent,
-    NDropdown, NEmpty, NIcon, NPopover, NPopconfirm, NSelect, NSwitch, NTag, NTooltip, SandboxComposer,
-    Activity, ArrowDown, Box, ChevronDown, Dots, FileText, LayersSubtract, Paperclip,
+    NDropdown, NEmpty, NIcon, NPopconfirm, NSwitch, NTag, NTooltip, SandboxComposer,
+    Activity, ArrowDown, Box, Dots, FileText, LayersSubtract, Paperclip,
     Tool, Trash, World,
   },
   setup() {
@@ -149,18 +133,6 @@ const App = {
       taskService, loopService, fsService, managerService, broker, pushError,
       () => parent.postMessage({ channel: 'harness-shell-v1', type: 'open-options' }, '*'),
     );
-    const sessionLlmConfig = computed(() => normalizeSessionLlmConfig(
-      inspectorState.activeTask.value?.llm ?? DEFAULT_SESSION_LLM_CONFIG,
-    ));
-    const sessionThinkingValue = computed(() => sessionLlmConfig.value.thinking
-      ? sessionLlmConfig.value.reasoningEffort : 'off');
-    const sessionModelLabel = computed(() => {
-      const selected = sessionModelOptions.find(option => option.value === sessionLlmConfig.value.model);
-      const model = selected?.label.replace('DeepSeek ', '') ?? sessionLlmConfig.value.model;
-      const thinking = sessionThinkingOptions.find(option => option.value === sessionThinkingValue.value)?.label
-        ?? sessionThinkingValue.value;
-      return `${model} · ${thinking}`;
-    });
     usePromptSection({ name: 'extension-page-boundary', order: -100, text: PAGE_AGENT_BOUNDARY_PROMPT });
     usePromptSection({
       name: 'extension-page-persistence',
@@ -233,25 +205,28 @@ const App = {
       const submittedAnnotations = takeAnnotationSubmission(annotations.value);
       timelineView.resumeTimelineFollow();
       const task = taskService.value;
+      const taskId = task?.activeTask()?.id;
       actionBusy.value = true;
       try {
-        if (task) {
+        if (task && taskId) {
           if (task.activeTask()?.title === 'New task') await task.renameTask(task.activeTask()!.id, text.slice(0, 48));
-          await task.setStatus(task.activeTask()!.id, 'running');
+          await task.setStatus(taskId, 'running');
           await task.appendEvent('task/run-started', { prompt: text });
         }
         await loop.run(text, { annotations: submittedAnnotations });
-        if (task) {
-          await task.saveCheckpoint();
-          await task.setStatus(task.activeTask()!.id, 'idle');
-          await task.appendEvent('task/run-finished');
-        }
+        if (task && taskId) settleTaskRun(task, taskId, 'idle', 'task/run-finished');
       } catch (error) {
-        if (task?.activeTask()) await task.setStatus(task.activeTask()!.id, 'failed');
+        if (task && taskId) settleTaskRun(task, taskId, 'failed', 'task/run-failed');
         pushError(`发送失败：${error instanceof Error ? error.message : String(error)}`);
       } finally {
         actionBusy.value = false;
       }
+    }
+
+    function settleTaskRun(task: TaskRuntimeService, taskId: string, status: 'idle' | 'failed', event: string): void {
+      void task.setStatus(taskId, status)
+        .then(() => task.activeTask()?.id === taskId ? task.appendEvent(event) : undefined)
+        .catch(error => console.warn(`[harness] ${event} was not persisted`, error));
     }
 
     function stop(): void {
@@ -260,27 +235,6 @@ const App = {
 
     function clearAnnotations(): void {
       annotations.value.splice(0);
-    }
-
-    async function setSessionModel(model: string): Promise<void> {
-      const task = taskService.value;
-      if (!task || busy.value || !model.trim()) return;
-      try { await task.setLlmConfig({ ...sessionLlmConfig.value, model: model.trim() }); }
-      catch (error) { pushError(`模型设置保存失败：${error instanceof Error ? error.message : String(error)}`); }
-    }
-
-    async function setSessionThinking(value: 'off' | ReasoningEffort): Promise<void> {
-      const task = taskService.value;
-      if (!task || busy.value) return;
-      try {
-        await task.setLlmConfig({
-          ...sessionLlmConfig.value,
-          thinking: value !== 'off',
-          ...(value !== 'off' ? { reasoningEffort: value } : {}),
-        });
-      } catch (error) {
-        pushError(`思考模式保存失败：${error instanceof Error ? error.message : String(error)}`);
-      }
     }
 
     async function run(action: () => Promise<string | null>): Promise<void> {
@@ -325,9 +279,8 @@ const App = {
       ...timelineView, ...inspectorState,
       displayMessageText, renderMarkdown, busy, running, runtimeReady, runtimeFailure, runtimeLabel,
       annotations, taskService,
-      uiTheme, appMenuOptions, sessionModelOptions, sessionThinkingOptions,
-      sessionLlmConfig, sessionThinkingValue, sessionModelLabel,
-      snapshot, picker, send, stop, clearAnnotations, setSessionModel, setSessionThinking,
+      uiTheme, appMenuOptions,
+      snapshot, picker, send, stop, clearAnnotations,
       contextKindLabel, formatToolArguments, toolStatusLabel, toolStatusType,
     };
   },
@@ -349,8 +302,10 @@ async function initializeRuntime(): Promise<void> {
     infrastructure: [
       { name: 'broker', plugin: sandboxBroker.plugin },
       { name: 'workspace', plugin: brokerFsPlugin },
+      { name: 'model-profiles', plugin: modelProfilesPlugin },
       { name: 'llm', plugin: brokerLlmPlugin },
     ],
+    requiredServices: [...REQUIRED_RUNTIME_SERVICES],
   });
   const shellContext = await runtime.shellContext;
   await runtime.ready;
@@ -372,6 +327,7 @@ function pushError(text: string): void {
 function reportBootFailure(error: unknown): void {
   runtimeReady.value = false;
   runtimeFailure.value = error instanceof Error ? error.message : String(error);
+  console.error('[harness] sandbox startup failed', error);
   pushError(`Agent runtime 初始化失败：${runtimeFailure.value}`);
   parent.postMessage({
     channel: 'harness-shell-v1',
@@ -381,18 +337,7 @@ function reportBootFailure(error: unknown): void {
 }
 
 function describeMissingRuntimeServices(): string {
-  const fs = runtime.reflect.get('fs') as FsService | undefined;
-  const details = missingRuntimeServices().map(name => {
-    const plugin = capabilities.get(name);
-    const stored = fs?.read(`${PLUGIN_DIR}${name}.js`);
-    const shipped = runtimeDefaults[name]?.source;
-    const sourceState = stored == null || shipped == null
-      ? '无可比对源码'
-      : stored === shipped ? '源码与当前构建一致' : 'OPFS 源码不同于当前构建';
-    const error = plugin?.error ? `，挂载错误：${plugin.error}` : plugin ? `，插件状态：${plugin.status}` : '，插件条目不存在';
-    return `${name}（${sourceState}${error}）`;
-  });
-  return `核心服务未挂载：${details.join('；')}`;
+  return `核心服务未挂载：${missingRuntimeServices().join('、')}`;
 }
 
 function missingRuntimeServices(): string[] {

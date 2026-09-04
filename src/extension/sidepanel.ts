@@ -1,32 +1,24 @@
 import { assertCapabilitySession, parseCapabilityEnvelope } from '@/shared/broker-schema';
 import type { CapabilityEnvelope, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
 import { assertPrincipalAuthorized } from '@/shared/capability-policy';
-import { approvalForRequest, type ApprovalRequest } from './approval-policy';
+import { approvalForRequest } from './approval-policy';
 import { TrustedCapabilityHost } from './capability-host';
 import { OpfsStore } from '@/kernel/opfs-store';
 import { assertWorkspaceMutationAllowed } from '@/kernel/plugin-policy';
 import { isInspectableUrl, parseSidePanelTabId, sidePanelPortName } from './tab-scope';
-import { requiredElement } from './required-element';
+import { mountSidePanelUi } from './sidepanel-ui';
 import './sidepanel.css';
 
-const frame = requiredElement<HTMLIFrameElement>('#harness-sandbox');
-const sandboxStatus = requiredElement<HTMLElement>('#sandbox-status');
-const siteAccess = requiredElement<HTMLElement>('#site-access');
-const siteAccessLabel = requiredElement<HTMLElement>('#site-access-label');
-const siteAccessButton = requiredElement<HTMLButtonElement>('#site-access-button');
-const approvalDialog = requiredElement<HTMLDialogElement>('#approval-dialog');
-const approvalTitle = requiredElement<HTMLElement>('#approval-title');
-const approvalBody = requiredElement<HTMLElement>('#approval-body');
-const approvalConfirm = requiredElement<HTMLButtonElement>('#approval-confirm');
+const view = mountSidePanelUi();
+const frame = view.frame;
 
 const binding = await resolveBinding().catch(error => {
   reportStartupFailure(error);
   return suspendStartup();
 });
 const boundTabId = binding.tabId;
-frame.dataset.tabId = String(boundTabId);
 const boundHost = binding.host;
-frame.dataset.host = boundHost;
+view.setBinding(boundTabId, boundHost);
 let boundOrigin = '';
 let boundOriginPattern = '';
 let sandboxReady = false;
@@ -121,8 +113,7 @@ window.addEventListener('message', event => {
   }
   if (shellMessage?.channel === 'harness-shell-v1' && shellMessage.type === 'ready') {
     sandboxReady = true;
-    sandboxStatus.hidden = true;
-    frame.hidden = false;
+    view.setReady();
     flushAuthorizedRead();
     return;
   }
@@ -130,9 +121,7 @@ window.addEventListener('message', event => {
     const detail = typeof (event.data as { error?: unknown }).error === 'string'
       ? (event.data as { error: string }).error
       : '未知启动错误';
-    sandboxStatus.querySelector('strong')!.textContent = 'Harness 启动失败';
-    sandboxStatus.querySelector('span')!.textContent = detail;
-    sandboxStatus.classList.add('failed');
+    view.setFailure('Harness 启动失败', detail);
     return;
   }
   if (shellMessage?.channel === 'harness-shell-v1' && shellMessage.type === 'open-options') {
@@ -173,26 +162,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   void refreshSiteAccess();
 });
 
-siteAccessButton.addEventListener('click', () => {
-  if (!boundOriginPattern) return;
-  siteAccessButton.disabled = true;
-  // Called directly in the trusted button gesture; do not insert an await
-  // before permissions.request or Chrome will reject the prompt.
-  void chrome.permissions.request({ origins: [boundOriginPattern] }).then(
-    granted => {
-      siteAccessButton.disabled = false;
-      if (!granted) return;
-      siteAccess.hidden = true;
-      pendingAuthorizedRead = true;
-      flushAuthorizedRead();
-    },
-    error => {
-      siteAccessButton.disabled = false;
-      siteAccessLabel.textContent = error instanceof Error ? error.message : String(error);
-    },
-  );
-});
-
 function flushAuthorizedRead(): void {
   if (!sandboxReady || !pendingAuthorizedRead) return;
   pendingAuthorizedRead = false;
@@ -222,14 +191,20 @@ async function refreshSiteAccess(): Promise<void> {
   if (!isInspectableUrl(tab.url)) {
     boundOrigin = '';
     boundOriginPattern = '';
-    siteAccess.hidden = true;
+    view.setSiteAccess(null);
     return;
   }
   boundOrigin = new URL(tab.url).origin;
   boundOriginPattern = `${boundOrigin}/*`;
   const granted = await chrome.permissions.contains({ origins: [boundOriginPattern] });
-  siteAccessLabel.textContent = `允许 Harness 读取并修改 ${boundOrigin}`;
-  siteAccess.hidden = granted;
+  view.setSiteAccess(granted ? null : {
+    label: `允许 Harness 读取并修改 ${boundOrigin}`,
+    originPattern: boundOriginPattern,
+    onGranted() {
+      pendingAuthorizedRead = true;
+      flushAuthorizedRead();
+    },
+  });
 }
 
 function replyBrokerError(requestId: string, error: unknown, stream = false): void {
@@ -251,7 +226,7 @@ async function forwardEnvelope(envelope: CapabilityEnvelope): Promise<void> {
   const originAccessAlreadyGranted = approval?.reuseGrantedOrigins && approval.origins
     ? await chrome.permissions.contains({ origins: approval.origins })
     : false;
-  if (approval && !originAccessAlreadyGranted && !await requestApproval(approval)) {
+  if (approval && !originAccessAlreadyGranted && !await view.requestApproval(approval)) {
     frame.contentWindow?.postMessage({
       channel: 'harness-broker-v1',
       requestId: envelope.requestId,
@@ -270,43 +245,9 @@ async function forwardEnvelope(envelope: CapabilityEnvelope): Promise<void> {
   }
 }
 
-let approvalQueue = Promise.resolve();
-
-function requestApproval(request: ApprovalRequest): Promise<boolean> {
-  const result = approvalQueue.then(() => showApproval(request));
-  approvalQueue = result.then(() => undefined, () => undefined);
-  return result;
-}
-
-function showApproval(request: ApprovalRequest): Promise<boolean> {
-  approvalTitle.textContent = request.title;
-  approvalBody.textContent = request.body;
-  approvalConfirm.textContent = request.confirmLabel;
-  approvalConfirm.disabled = false;
-  const origins = request.origins;
-  approvalConfirm.onclick = origins ? event => {
-    event.preventDefault();
-    approvalConfirm.disabled = true;
-    void chrome.permissions.request({ origins }).then(
-      granted => approvalDialog.close(granted ? 'confirm' : 'cancel'),
-      error => { approvalBody.textContent = error instanceof Error ? error.message : String(error); approvalConfirm.disabled = false; },
-    );
-  } : null;
-  approvalDialog.classList.toggle('danger', request.danger === true);
-  approvalDialog.returnValue = '';
-  approvalDialog.showModal();
-  return new Promise(resolve => {
-    approvalDialog.addEventListener('close', () => resolve(approvalDialog.returnValue === 'confirm'), { once: true });
-  });
-}
 function reportStartupFailure(error: unknown): void {
   const detail = error instanceof Error ? error.message : String(error);
-  sandboxStatus.querySelector('strong')!.textContent = 'Harness 无法启动';
-  sandboxStatus.querySelector('span')!.textContent = detail;
-  sandboxStatus.classList.add('failed');
-  sandboxStatus.hidden = false;
-  frame.hidden = true;
-  frame.src = 'about:blank';
+  view.setFailure('Harness 无法启动', detail, true);
   console.error('[harness] side panel startup failed', error);
 }
 

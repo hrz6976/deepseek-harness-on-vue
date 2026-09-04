@@ -116,6 +116,7 @@ const ToolSchema = z.object({
 });
 
 const SessionLlmConfigSchema = z.object({
+  profileId: z.string().trim().max(64),
   model: z.string().trim().min(1).max(200),
   thinking: z.boolean(),
   reasoningEffort: z.enum(['low', 'high', 'max']),
@@ -199,6 +200,7 @@ const CapabilityRequestSchema = z.union([
   z.object({ provider: z.literal('storage'), action: z.literal('remove'), contextId: ContextIdSchema, input: z.object({ keys: z.array(z.string()).max(1_000) }) }),
 
   z.object({ provider: z.literal('llm'), action: z.literal('status'), contextId: ContextIdSchema, input: EmptyInputSchema }),
+  z.object({ provider: z.literal('llm'), action: z.literal('models'), contextId: ContextIdSchema, input: z.object({ profileId: z.string().trim().max(64) }) }),
   z.object({ provider: z.literal('llm'), action: z.literal('cancel'), contextId: ContextIdSchema, input: z.object({ requestId: z.string().min(1) }) }),
   z.object({
     provider: z.literal('llm'),

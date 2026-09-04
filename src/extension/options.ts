@@ -1,65 +1,105 @@
-import { requiredElement } from './required-element';
+import { computed, createApp, reactive, ref } from 'vue';
+import { render } from './options-app.html?vue-template';
+import {
+  LEGACY_LLM_CONFIG_KEY,
+  LLM_PROFILES_KEY,
+  createLlmProfilePreset,
+  normalizeLlmProfiles,
+  type LlmProfilePreset,
+  type StoredLlmProfiles,
+} from './llm-profiles';
 
-interface StoredLlmConfig {
-  baseURL: string;
-  model?: string;
-  apiKey: string;
-}
-
-const CONFIG_KEY = 'secrets.llm';
-const form = requiredElement<HTMLFormElement>('#settings');
-const baseUrlInput = requiredElement<HTMLInputElement>('#base-url');
-const apiKeyInput = requiredElement<HTMLInputElement>('#api-key');
-const statusElement = requiredElement<HTMLElement>('#status');
-const submitButton = requiredElement<HTMLButtonElement>('#submit');
+const config = reactive<StoredLlmProfiles>({
+  version: 1,
+  defaultProfileId: 'deepseek',
+  profiles: [createLlmProfilePreset('deepseek')],
+});
+const selectedId = ref(config.defaultProfileId);
+const draftKeys = reactive<Record<string, string>>({});
+const saving = ref(false);
+const status = ref('');
+const statusState = ref<'success' | 'error' | undefined>();
+const selectedProfile = computed(() => config.profiles.find(profile => profile.id === selectedId.value) ?? null);
 
 void restore();
 
-form.addEventListener('submit', event => {
-  event.preventDefault();
-  void save();
-});
-
 async function restore(): Promise<void> {
-  const stored = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
-  if (!stored) return;
-  baseUrlInput.value = stored.baseURL;
-  apiKeyInput.placeholder = '已有 key；留空则保留';
+  const values = await chrome.storage.local.get([LLM_PROFILES_KEY, LEGACY_LLM_CONFIG_KEY]);
+  const stored = normalizeLlmProfiles(values[LLM_PROFILES_KEY], values[LEGACY_LLM_CONFIG_KEY]);
+  if (stored) Object.assign(config, stored);
+  selectedId.value = config.defaultProfileId;
+}
+
+function selectProfile(id: string): void {
+  if (config.profiles.some(profile => profile.id === id)) selectedId.value = id;
+}
+
+function add(kind: LlmProfilePreset | 'custom'): void {
+  const profile = kind === 'custom'
+    ? { id: nextId(), name: 'Custom provider', baseURL: '', apiKey: '', defaultModel: '' }
+    : createLlmProfilePreset(kind);
+  const existing = config.profiles.find(candidate => candidate.id === profile.id);
+  if (!existing) config.profiles.push(profile);
+  selectedId.value = existing?.id ?? profile.id;
+}
+
+function remove(): void {
+  if (config.profiles.length === 1) return;
+  const index = config.profiles.findIndex(profile => profile.id === selectedId.value);
+  const [removed] = config.profiles.splice(index, 1);
+  delete draftKeys[removed!.id];
+  if (config.defaultProfileId === removed!.id) config.defaultProfileId = config.profiles[0]!.id;
+  selectedId.value = config.profiles[Math.min(index, config.profiles.length - 1)]!.id;
+}
+
+function makeDefault(): void {
+  config.defaultProfileId = selectedId.value;
 }
 
 async function save(): Promise<void> {
-  setStatus('正在保存…', 'progress');
-  submitButton.disabled = true;
+  saving.value = true;
+  status.value = '';
+  statusState.value = undefined;
   try {
-    const endpoint = new URL(baseUrlInput.value);
-    const baseURL = endpoint.href.replace(/\/$/u, '');
-    const pattern = `${endpoint.origin}/*`;
-    // Keep this as the first async browser API in the submit gesture so a new
-    // endpoint can reliably display Chrome's optional-host prompt.
-    const allowed = await chrome.permissions.request({ origins: [pattern] });
-    if (!allowed) throw new Error('未获得该 API origin 的网络权限。');
-    const previous = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as StoredLlmConfig | undefined;
-    const apiKey = apiKeyInput.value || previous?.apiKey;
-    if (!apiKey) throw new Error('请输入 API key。');
-    // Preserve the old global model only as a compatibility fallback. New
-    // requests carry the active task/session model explicitly.
-    const config: StoredLlmConfig = {
-      baseURL,
-      apiKey,
-      ...(previous?.model ? { model: previous.model } : {}),
-    };
-    await chrome.storage.local.set({ [CONFIG_KEY]: config });
-    apiKeyInput.value = '';
-    apiKeyInput.placeholder = '已有 key；留空则保留';
-    setStatus('设置已保存', 'success');
+    const profiles = config.profiles.map(profile => {
+      const endpoint = new URL(profile.baseURL);
+      if (!/^https?:$/u.test(endpoint.protocol) || !profile.name.trim() || !profile.defaultModel.trim()) {
+        throw new Error(`Profile “${profile.name || profile.id}” 配置不完整。`);
+      }
+      return {
+        ...profile,
+        name: profile.name.trim(),
+        baseURL: endpoint.href.replace(/\/+$/u, ''),
+        apiKey: draftKeys[profile.id] || profile.apiKey,
+        defaultModel: profile.defaultModel.trim(),
+      };
+    });
+    const origins = [...new Set(profiles.map(profile => `${new URL(profile.baseURL).origin}/*`))];
+    if (!await chrome.permissions.request({ origins })) throw new Error('未获得全部 Provider endpoint 的网络权限。');
+    const stored = normalizeLlmProfiles({ ...config, profiles })!;
+    for (const id of Object.keys(draftKeys)) delete draftKeys[id];
+    await chrome.storage.local.set({ [LLM_PROFILES_KEY]: stored });
+    Object.assign(config, stored);
+    status.value = '已保存；下次模型请求生效';
+    statusState.value = 'success';
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error), 'error');
+    status.value = error instanceof Error ? error.message : String(error);
+    statusState.value = 'error';
   } finally {
-    submitButton.disabled = false;
+    saving.value = false;
   }
 }
 
-function setStatus(message: string, state: 'progress' | 'success' | 'error'): void {
-  statusElement.textContent = message;
-  statusElement.dataset.state = state;
+function nextId(): string {
+  let index = 1;
+  while (config.profiles.some(profile => profile.id === `profile-${index}`)) index++;
+  return `profile-${index}`;
 }
+
+createApp({
+  render,
+  setup: () => ({
+    add, config, draftKeys, makeDefault, remove, save, saving,
+    selectedId, selectedProfile, selectProfile, status, statusState,
+  }),
+}).mount('#app');

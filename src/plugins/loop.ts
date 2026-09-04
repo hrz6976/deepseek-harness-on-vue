@@ -119,6 +119,7 @@ function apply(ctx: Context): void {
         running.value = true;
         const controller = new AbortController();
         ctrl = controller;
+        let detachFinalCheckpoint = false;
         try {
           const submittedAnnotations = options?.annotations?.length
             ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
@@ -197,6 +198,7 @@ function apply(ctx: Context): void {
               }
               const hint = /fetch/i.test(errMsg) ? ' (network/CORS? browsers block direct third-party API calls — use the /proxy route, see serve.mjs)' : '';
               note(`LLM call failed: ${errMsg}${hint}`);
+              detachFinalCheckpoint = true;
               return;
             }
             const finishReason = normalizedFinishReason(msg);
@@ -296,6 +298,7 @@ function apply(ctx: Context): void {
           }
           note(`reached the failsafe turn limit (${HARD_TURN_LIMIT}) — stopping what looks like a runaway loop`);
         } catch (error: unknown) {
+          detachFinalCheckpoint = true;
           const last = messages.at(-1);
           if (last?.role === 'assistant' && last.status === 'streaming') last.status = 'error'; // close the cursor, never leave it blinking
           note(controller.signal.aborted ? 'stopped' : `loop error: ${errorMessage(error)}`);
@@ -303,10 +306,15 @@ function apply(ctx: Context): void {
           // Normal completion, manual Stop, provider failure, and plugin
           // disposal all converge here. Unfinished assistant placeholders are
           // intentionally filtered by the task store; completed turns remain.
-          await persistCheckpoint();
           running.value = false;
           ctrl = null;
           await ctx.parallel('loop/idle');
+          const checkpoint = persistCheckpoint();
+          // A disconnected broker or manual Stop must not keep the UI waiting
+          // for the final best-effort checkpoint timeout. Normal completion
+          // still waits so a finished answer is durable before run() resolves.
+          if (detachFinalCheckpoint || controller.signal.aborted) void checkpoint;
+          else await checkpoint;
         }
       },
     });

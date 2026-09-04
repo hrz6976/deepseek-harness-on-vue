@@ -86,6 +86,7 @@ export type StorageCapabilityRequest =
 
 export type LlmCapabilityRequest =
   | { provider: 'llm'; action: 'status'; contextId?: string; input: Record<string, never> }
+  | { provider: 'llm'; action: 'models'; contextId?: string; input: { profileId: string } }
   | { provider: 'llm'; action: 'cancel'; contextId?: string; input: { requestId: string } }
   | {
       provider: 'llm';

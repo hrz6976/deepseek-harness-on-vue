@@ -163,13 +163,13 @@ test('loop snapshots the active session model profile into its request', async (
   const task = {
     activeTask: () => ({
       id: 'task-1',
-      llm: { model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' },
+      llm: { profileId: 'opencode-go', model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max' },
     }),
   };
   const { loop, requests } = await mountHarness(doneText('ok'), { task });
   await loop.run('goal');
   assert.deepEqual(requests[0].sessionConfig, {
-    model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max',
+    profileId: 'opencode-go', model: 'deepseek-v4-pro', thinking: true, reasoningEffort: 'max',
   });
 });
 
@@ -450,6 +450,26 @@ test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async
   assert.equal(loop.messages.find(m => m.role === 'assistant')?.status, 'error');
   assert.equal(loop.messages.at(-1).role, 'note');
   assert.equal(loop.running.value, false);
+});
+
+test('loop releases running state when the final checkpoint stalls', async () => {
+  let checkpoints = 0;
+  const { loop } = await mountHarness(async function* () {
+    yield { type: 'error', message: 'Broker connection closed before the request completed.' };
+  }, { task: {
+    activeTask: () => ({ id: 'task-1', llm: { profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
+    async saveCheckpoint() {
+      checkpoints++;
+      if (checkpoints > 1) await new Promise(() => {});
+    },
+  } });
+
+  await Promise.race([
+    loop.run('goal'),
+    sleep(100).then(() => { throw new Error('loop stayed blocked by its final checkpoint'); }),
+  ]);
+  assert.equal(loop.running.value, false);
+  assert.equal(checkpoints, 2);
 });
 
 test('loop: re-entry guard — a second run while running is refused', async () => {

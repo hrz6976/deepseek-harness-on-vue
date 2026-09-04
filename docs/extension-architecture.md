@@ -6,7 +6,7 @@
 
 ```text
 Tab-specific side panel / options / service worker (trusted)
-  ├─ LLM key + OpenAI-compatible SDK
+  ├─ LLM Provider Profiles + OpenAI-compatible SDK
   ├─ official MCP HTTP client
   ├─ OPFS plugin persistence
   └─ validated capability broker

@@ -4,11 +4,12 @@ import { Context, type Fiber } from '@deepseek-ai/cordis';
 import { ref } from 'vue';
 import { z } from 'zod';
 import { createSystemPlugin, runtime } from '@/kernel/cordis';
-import { principalForContext } from '@/kernel/broker';
+import { createBrokerPlugin, principalForContext } from '@/kernel/broker';
 import { mountPlugin, unmountPlugin } from '@/kernel/host';
 import { capabilities } from '@/kernel/capabilities';
 import { UiService, uiKernelPlugin } from '@/kernel/ui';
 import { promptPlugin } from '@/plugins/prompt';
+import { brokerFsPlugin } from '@/extension/broker-fs';
 import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
 import * as pagePlugin from '@/plugins/tools/page';
 import * as capabilityCatalogPlugin from '@/plugins/tools/capability-catalog';
@@ -50,6 +51,42 @@ test('the system loop principal may call the trusted LLM provider', async () => 
   } finally {
     await handle.dispose();
   }
+});
+
+test('the Cordis model profile system plugin has only LLM metadata authority', async () => {
+  let context: Context | null = null;
+  const handle = runtime.plugin(createSystemPlugin('model-profiles', {
+    name: 'model-profiles-principal-test', apply() {},
+  }, value => { context = value; }));
+  try {
+    await handle;
+    assert.ok(context);
+    assert.deepEqual(principalForContext(context), {
+      kind: 'system',
+      id: 'kernel:model-profiles',
+      fiberId: `system:${context.fiber.uid}`,
+      scope: 'global',
+      providers: ['llm'],
+      permissions: ['llm.use'],
+    });
+  } finally {
+    await handle.dispose();
+  }
+});
+
+test('broker workspace restore keeps the workspace system principal', async () => {
+  let caller = '';
+  await applyTestPlugin(createSystemPlugin('broker', createBrokerPlugin({
+    request(principal) {
+      caller = principal.id;
+      return Promise.resolve({});
+    },
+    async *stream() {},
+  })));
+  await applyTestPlugin(createSystemPlugin('workspace', brokerFsPlugin));
+
+  await (runtime.reflect.get('fs') as { ready: Promise<void> }).ready;
+  assert.equal(caller, 'kernel:workspace');
 });
 
 test('Page explicitly contributes tools and prompt through its Cordis Fiber', async () => {

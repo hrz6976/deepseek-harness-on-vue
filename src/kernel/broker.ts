@@ -18,6 +18,7 @@ const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
   'task-runtime': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
   'workspace': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
   'llm': { providers: ['llm'], permissions: ['llm.use'] },
+  'model-profiles': { providers: ['llm'], permissions: ['llm.use'] },
   // Cordis Service tracing preserves the original caller across the llm
   // adapter, so model completions are authorized as kernel:loop.
   'loop': { providers: ['llm'], permissions: ['llm.use'] },

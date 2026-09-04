@@ -1,8 +1,9 @@
 import type { FsService, HarnessMessage, JsonValue } from '@/shared/runtime';
-import { normalizeSessionLlmConfig, type HarnessArtifact, type TaskCheckpoint, type TaskContext, type TaskEvent, type TaskSession, type TaskStatus, type TaskStoreSnapshot } from '@/shared/task-model';
+import { normalizeSessionLlmConfig, type HarnessArtifact, type SessionLlmConfig, type TaskCheckpoint, type TaskContext, type TaskEvent, type TaskSession, type TaskStatus, type TaskStoreSnapshot } from '@/shared/task-model';
 
 const HARNESS_ROOT = '.harness/';
 interface SessionIndex { activeTaskId: string | null; taskIds: string[] }
+type ModelSelection = Pick<SessionLlmConfig, 'profileId' | 'model'>;
 
 export class HarnessTaskStore {
   private readonly eventSequences = new Map<string, number>();
@@ -10,6 +11,8 @@ export class HarnessTaskStore {
   private readonly artifactRoot: string;
   private readonly tombstoneRoot: string;
   private readonly sessionIndex: string;
+  private readonly modelSelectionPath = `${HARNESS_ROOT}model.json`;
+  private selectedModel: ModelSelection = pickModel(normalizeSessionLlmConfig());
 
   constructor(
     private readonly fs: FsService,
@@ -33,6 +36,10 @@ export class HarnessTaskStore {
       .map(id => parseJson<TaskSession | null>(this.fs.read(this.metaPath(id)), null))
       .filter((task): task is TaskSession => task !== null);
     for (const task of tasks) task.llm = normalizeSessionLlmConfig(task.llm);
+    const storedModel = parseJson<ModelSelection | null>(this.fs.read(this.modelSelectionPath), null);
+    const activeModel = tasks.find(task => task.id === index.activeTaskId)?.llm;
+    this.selectedModel = pickModel(normalizeSessionLlmConfig(storedModel ?? activeModel));
+    for (const task of tasks) task.llm = { ...task.llm, ...this.selectedModel };
     const taskIds = new Set(tasks.map(task => task.id));
     const contexts = tasks.flatMap(task => parseJson<TaskContext[]>(this.fs.read(this.contextsPath(task.id)), []));
     for (const task of tasks) {
@@ -56,7 +63,7 @@ export class HarnessTaskStore {
     const timestamp = this.now();
     return {
       id: this.uuid(), title: title.trim() || 'Untitled task', status: 'idle',
-      llm: normalizeSessionLlmConfig(),
+      llm: { ...normalizeSessionLlmConfig(), ...this.selectedModel },
       capabilityIds: [],
       createdAt: timestamp, updatedAt: timestamp,
     };
@@ -100,6 +107,15 @@ export class HarnessTaskStore {
   async persistTask(task: TaskSession): Promise<void> {
     this.assertTaskWritable(task.id);
     await this.writeJson(this.metaPath(task.id), task);
+  }
+
+  setModelSelection(profileId: string, model: string): ModelSelection {
+    this.selectedModel = pickModel(normalizeSessionLlmConfig({ profileId, model }));
+    return { ...this.selectedModel };
+  }
+
+  async persistModelSelection(): Promise<void> {
+    await this.writeJson(this.modelSelectionPath, this.selectedModel);
   }
 
   async persistContexts(taskId: string, contexts: TaskContext[]): Promise<void> {
@@ -185,4 +201,8 @@ function parseJson<T>(source: string | null, fallback: T): T {
   if (!source) return fallback;
   try { return JSON.parse(source) as T; }
   catch { return fallback; }
+}
+
+function pickModel(config: SessionLlmConfig): ModelSelection {
+  return { profileId: config.profileId, model: config.model };
 }

@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crx } from '@crxjs/vite-plugin';
+import { compile } from '@vue/compiler-dom';
 import { defineConfig, transformWithOxc, type Plugin } from 'vite';
 import manifest from './src/extension/manifest.ts';
 import { systemPluginNames } from './src/kernel/system-plugin-names.ts';
@@ -11,6 +12,19 @@ const pluginRoots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
 const onDemand = new Set(['llm']);
 const virtualId = 'virtual:plugin-defaults';
 const resolvedVirtualId = `\0${virtualId}`;
+
+function vueTemplates(): Plugin {
+  return {
+    name: 'harness-vue-templates',
+    enforce: 'pre',
+    async load(id) {
+      const suffix = '?vue-template';
+      if (!id.endsWith(suffix)) return null;
+      const file = id.slice(0, -suffix.length);
+      return compile(await readFile(file, 'utf8'), { mode: 'module' }).code;
+    },
+  };
+}
 
 /**
  * Builtins are authored as TypeScript but remain user-editable JavaScript in
@@ -74,6 +88,7 @@ export default defineConfig(({ mode }) => {
     : { standalone: resolve(projectRoot, 'index.html') };
   return {
     plugins: [
+      vueTemplates(),
       pluginDefaults(),
       ...(extensionBuild ? [crx({ manifest })] : []),
     ],

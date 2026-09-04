@@ -8,6 +8,15 @@ import type { CapabilityEnvelope, CapabilityRequest, CapabilityResponse, Capabil
 import type { PageCommand, PageCommandResult, PageEvent } from '@/shared/page-protocol';
 import { toJsonValue, type JsonValue, type LlmStreamEvent } from '@/shared/runtime';
 import { OpenAiStreamAccumulator, type OpenAiStreamChunk } from './openai-stream';
+import {
+  LEGACY_LLM_CONFIG_KEY,
+  LLM_PROFILES_KEY,
+  normalizeLlmProfiles,
+  resolveLlmProfile,
+  summarizeLlmProfiles,
+  type StoredLlmProfile,
+  type StoredLlmProfiles,
+} from './llm-profiles';
 import { normalizeSessionLlmConfig } from '@/shared/task-model';
 import { McpHost } from './mcp-host';
 import { createSiteSkillRuntime } from './site-skill-runtime';
@@ -21,13 +30,10 @@ import { TrustedCapabilityHost } from './capability-host';
 import { openWebPageInBackground, searchWebInBackground } from './web-browser';
 import { fetchForUserScript, isUserScriptNetworkRequest } from './user-script-network';
 
-interface StoredLlmConfig { baseURL: string; model?: string; apiKey: string }
 type DeepSeekThinkingParams = {
   thinking: { type: 'enabled' | 'disabled' };
   reasoning_effort?: 'low' | 'high' | 'max';
 };
-const LLM_CONFIG_KEY = 'secrets.llm';
-
 const ports = new Map<chrome.runtime.Port, number>();
 const activeLlmStreams = new Map<string, AbortController>();
 const mcpHost = new McpHost();
@@ -68,11 +74,18 @@ capabilityHost.register('llm', {
       cancelLlmStream(context.tabId, request.input.requestId);
       return null;
     }
-    const config = await readLlmConfig();
+    const config = await readLlmProfiles();
+    if (request.action === 'models') {
+      if (!config) throw new Error('LLM 尚未配置。');
+      const profile = resolveLlmProfile(config, request.input.profileId);
+      if (!profile) throw new Error(`模型 Profile “${request.input.profileId}” 不存在。`);
+      const page = await openAiClient(profile).models.list();
+      return [...new Set(page.data.map(model => model.id).filter(Boolean))].sort();
+    }
     return toJsonValue(config ? {
       configured: true,
-      baseURL: config.baseURL,
-      ...(config.model ? { legacyDefaultModel: config.model } : {}),
+      defaultProfileId: config.defaultProfileId,
+      profiles: summarizeLlmProfiles(config),
     } : { configured: false });
   },
   stream: (request, context) => streamLlmCapability(request, context.signal),
@@ -275,7 +288,14 @@ async function* streamLlmCapability(
   signal?: AbortSignal,
 ): AsyncIterable<JsonValue> {
   if (request.action !== 'complete') throw new Error(`LLM action "${request.action}" is not streamable.`);
-  for await (const event of streamLlm(request.input.request, signal)) yield toJsonValue(event);
+  const keepAlive = () => { void chrome.runtime.getPlatformInfo().catch(() => undefined); };
+  keepAlive();
+  const heartbeat = setInterval(keepAlive, 20_000);
+  try {
+    for await (const event of streamLlm(request.input.request, signal)) yield toJsonValue(event);
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 async function* streamLlm(
@@ -283,18 +303,12 @@ async function* streamLlm(
   signal?: AbortSignal,
 ): AsyncIterable<LlmStreamEvent> {
   if (signal?.aborted) return;
-  const config = await readLlmConfig();
+  const config = await readLlmProfiles();
   if (!config) throw new Error('LLM 尚未配置；请打开扩展设置填写 API endpoint、model 和 key。');
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
-    dangerouslyAllowBrowser: true,
-    // One provider-owned deadline is easier to reason about than an SDK retry
-    // racing a second sandbox timeout. Agent turns are not transparently
-    // replayed; a timeout is surfaced and the user/loop decides whether to retry.
-    maxRetries: 0,
-    timeout: 120_000,
-  });
+  const sessionConfig = normalizeSessionLlmConfig(request.sessionConfig);
+  const profile = resolveLlmProfile(config, sessionConfig.profileId);
+  if (!profile) throw new Error(`模型 Profile “${sessionConfig.profileId}” 不存在；请重新选择或打开扩展设置。`);
+  const client = openAiClient(profile);
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: 'system', content: request.systemPrompt },
   ];
@@ -331,13 +345,11 @@ async function* streamLlm(
       parameters: tool.parameters,
     },
   }));
-  const sessionConfig = normalizeSessionLlmConfig(request.sessionConfig
-    ?? (config.model ? { model: config.model } : undefined));
   const isDeepSeekModel = sessionConfig.model.toLowerCase().startsWith('deepseek-');
   const completionRequest: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & Partial<DeepSeekThinkingParams> = {
     model: sessionConfig.model,
     messages,
-    max_tokens: modelLimitsFor(sessionConfig.model).requestOutputTokens,
+    max_tokens: modelLimitsFor(sessionConfig.model, {}, profile.id).requestOutputTokens,
     ...(tools.length ? { tools } : {}),
     ...(isDeepSeekModel ? {
       thinking: { type: sessionConfig.thinking ? 'enabled' : 'disabled' },
@@ -354,16 +366,28 @@ async function* streamLlm(
   yield accumulator.done();
 }
 
+function openAiClient(profile: StoredLlmProfile): OpenAI {
+  return new OpenAI({
+    apiKey: profile.apiKey || 'local',
+    baseURL: profile.baseURL,
+    dangerouslyAllowBrowser: true,
+    // One provider-owned deadline is easier to reason about than an SDK retry
+    // racing a second sandbox timeout. Agent turns are not transparently
+    // replayed; a timeout is surfaced and the user/loop decides whether to retry.
+    maxRetries: 0,
+    timeout: 120_000,
+  });
+}
+
 function cancelLlmStream(tabId: number, requestId: string): void {
   activeLlmStreams.get(llmStreamKey(tabId, requestId))?.abort();
 }
 
 const llmStreamKey = (tabId: number, requestId: string) => `${tabId}:${requestId}`;
 
-async function readLlmConfig(): Promise<StoredLlmConfig | null> {
-  const value = (await chrome.storage.local.get(LLM_CONFIG_KEY))[LLM_CONFIG_KEY] as StoredLlmConfig | undefined;
-  if (!value?.apiKey || !value.baseURL) return null;
-  return value;
+async function readLlmProfiles(): Promise<StoredLlmProfiles | null> {
+  const values = await chrome.storage.local.get([LLM_PROFILES_KEY, LEGACY_LLM_CONFIG_KEY]);
+  return normalizeLlmProfiles(values[LLM_PROFILES_KEY], values[LEGACY_LLM_CONFIG_KEY]);
 }
 
 function assertPublicStorageKeys(keys: string[]): void {

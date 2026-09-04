@@ -88,20 +88,7 @@
       @stop="stop"
       @clear-annotations="clearAnnotations"
     >
-      <template #controls>
-        <n-popover trigger="click" placement="top-end" :show-arrow="false">
-          <template #trigger>
-            <n-button text size="tiny" :disabled="busy" class="session-model-trigger">
-              <span>{{ sessionModelLabel }}</span><n-icon class="session-model-chevron"><ChevronDown /></n-icon>
-            </n-button>
-          </template>
-          <div class="session-model-popover">
-            <label><span>当前会话模型</span><n-select :value="sessionLlmConfig.model" :options="sessionModelOptions" filterable tag size="small" @update:value="setSessionModel" /></label>
-            <label><span>Thinking effort</span><n-select :value="sessionThinkingValue" :options="sessionThinkingOptions" size="small" @update:value="setSessionThinking" /></label>
-            <small>仅用于当前任务，下次发送时生效。DeepSeek 模型会显式发送 thinking 参数。</small>
-          </div>
-        </n-popover>
-      </template>
+      <template #controls><UiContributionsHost region="composer-controls" /></template>
     </sandbox-composer>
 
     <n-drawer v-model:show="inspectorOpen" width="min(380px, 94vw)" placement="right">

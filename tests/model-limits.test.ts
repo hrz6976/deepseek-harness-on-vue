@@ -12,6 +12,19 @@ test('DeepSeek V4 models share the official 1M context profile', () => {
   assert.deepEqual(modelLimitsFor('deepseek-v4-pro'), expected);
 });
 
+test('OpenCode Go context and output windows follow the selected model catalog entry', () => {
+  assert.deepEqual(modelLimitsFor('glm-5.1', {}, 'opencode-go'), {
+    contextWindow: 202_752,
+    maxOutputTokens: 32_768,
+    requestOutputTokens: 32_768,
+  });
+  assert.deepEqual(modelLimitsFor('kimi-k2.6', {}, 'opencode-go'), {
+    contextWindow: 262_144,
+    maxOutputTokens: 65_536,
+    requestOutputTokens: 65_536,
+  });
+});
+
 test('unknown model limits stay conservative and explicit overrides are clamped', () => {
   assert.deepEqual(modelLimitsFor('custom-model'), {
     contextWindow: 131_072,

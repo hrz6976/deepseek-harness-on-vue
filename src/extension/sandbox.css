@@ -269,6 +269,7 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid rgb(49 94 231 
 .session-model-popover .n-base-selection-input,
 .session-model-popover .n-base-selection-input__content { font-size: 12px; font-weight: 400; }
 .session-model-popover small { color: var(--faint); font-size: 10px; font-weight: 400; line-height: 1.5; }
+.session-model-popover small.error { color: var(--danger); }
 
 .drawer-subtitle { margin: -8px 0 14px; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .task-list { display: grid; align-content: start; gap: 7px; }
