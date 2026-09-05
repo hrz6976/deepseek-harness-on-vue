@@ -1,7 +1,8 @@
-// files UI plugin: virtual filesystem browser (OPFS-persisted).
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { defineComponent, ref, computed } from 'vue';
 import { useService } from '@/sdk';
+
+// files UI plugin: virtual filesystem browser (OPFS-persisted).
 
 const FilesPanel = defineComponent({
   name: 'FilesPanel',
@@ -25,4 +26,4 @@ export default {
   name: 'files',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'files', region: 'side', order: 10, component: FilesPanel }); },
-};
+} satisfies Plugin.Object;

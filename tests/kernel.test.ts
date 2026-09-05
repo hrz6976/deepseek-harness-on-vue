@@ -8,9 +8,9 @@ import { useBusOn } from '@/kernel/bus';
 import { translateESM, rewriteImports } from '@/kernel/compile';
 import { normalizePlugin } from '@/kernel/plugin-runtime';
 import { modules, preparePluginModules } from '@/kernel/modules';
-import { UiService, uiKernelPlugin } from '@/kernel/ui';
+import uiKernelPlugin, { UiService } from '@/kernel/ui';
 import { serializeState } from '@/plugins/tools/read-state';
-import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
+import toolsPlugin, { type ToolsRuntime } from '@/plugins/tools';
 import { runtime } from '@/kernel/cordis';
 import { useService } from '@/kernel/services';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
@@ -252,7 +252,7 @@ test('expose capture: cleanup is token-guarded across HMR remount order', async 
 });
 
 test('serializeState: unwraps refs like the expose proxy, drops functions', () => {
-  const s = proxyRefs({ score: ref(3), board: [[0, 1]], roll: () => {} });
+  const s = proxyRefs({ score: ref(3), board: [[0, 1]], roll: () => { } });
   assert.equal(serializeState(s), '{"score":3,"board":[[0,1]]}');
 });
 

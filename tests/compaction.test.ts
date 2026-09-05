@@ -93,7 +93,7 @@ test('runCompaction: splices the prefix into one summary message, keeps the tail
   const messages = [big('a'), asst('old work'), big('b'), { role: 'user', text: 'recent question' }];
   let seenReq;
   const llm = {
-    stream: async function* (req) { seenReq = req; yield { type: 'done', text: 'FRESH SUMMARY', thinking: '', toolCalls: [] }; },
+    stream: async function*(req) { seenReq = req; yield { type: 'done', text: 'FRESH SUMMARY', thinking: '', toolCalls: [] }; },
   };
   const did = await runCompaction(messages, { llm, settings: { ...DEFAULT_SETTINGS, keepRecentTokens: 1 } });
   assert.equal(did, true);
@@ -116,7 +116,7 @@ test('runCompaction: invalidates stale provider usage retained from the old tran
   ];
   const before = estimateContextTokens(messages);
   const llm = {
-    stream: async function* () {
+    stream: async function*() {
       yield { type: 'done', text: 'CHECKPOINT', thinking: '', toolCalls: [] };
     },
   };
@@ -133,14 +133,14 @@ test('runCompaction: invalidates stale provider usage retained from the old tran
 
 test('runCompaction: no-op when the prefix holds nothing summarizable', async () => {
   const messages = [{ role: 'summary', text: 'old' }, { role: 'user', text: 'recent question' }];
-  const llm = { stream: async function* () { throw new Error('must not be called'); } };
+  const llm = { stream: async function*() { throw new Error('must not be called'); } };
   assert.equal(await runCompaction(messages, { llm, settings: { ...DEFAULT_SETTINGS, keepRecentTokens: 1 } }), false);
   assert.equal(messages.length, 2);
 });
 
 test('runCompaction: summarizer failure throws and leaves the log untouched', async () => {
   const messages = [{ role: 'user', text: 'x'.repeat(4000) }, { role: 'user', text: 'recent' }];
-  const llm = { stream: async function* () { yield { type: 'error', message: 'boom' }; } };
+  const llm = { stream: async function*() { yield { type: 'error', message: 'boom' }; } };
   await assert.rejects(() => runCompaction(messages, { llm, settings: { ...DEFAULT_SETTINGS, keepRecentTokens: 1 } }), /boom/);
   assert.equal(messages.length, 2);
   assert.equal(messages[0].role, 'user');
@@ -150,28 +150,28 @@ test('runCompaction: summarizer failure throws and leaves the log untouched', as
 // (this file runs in its own node:test process, so the plugin's global bus
 // listeners and services can't leak into the other test files)
 test('plugin end-to-end: over-threshold log is compacted before the next request', async () => {
-  const { toolsPlugin } = await import('@/plugins/tools');
-  const { promptPlugin } = await import('@/plugins/prompt');
-  const { loopPlugin } = await import('@/plugins/loop');
-  const compactionPlugin = await import('@/plugins/compaction');
+  const { default: toolsPlugin } = await import('@/plugins/tools');
+  const { default: promptPlugin } = await import('@/plugins/prompt');
+  const { default: loopPlugin } = await import('@/plugins/loop');
+  const { default: compactionPlugin } = await import('@/plugins/compaction');
   const { runtime } = await import('@/kernel/cordis');
 
   await applyTestPlugin(toolsPlugin);
   await applyTestPlugin(promptPlugin);
-  await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => {}, remove: async () => {} });
+  await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => { }, remove: async () => { } });
   const requests = [];
   await provideTestService('llm', {
     limits: () => ({ contextWindow: 1000, maxOutputTokens: 100, requestOutputTokens: 100 }),
     stream(req) {
       requests.push(req);
       const isSummarizer = /summarization assistant/.test(req.systemPrompt);
-      return (async function* () {
+      return (async function*() {
         yield { type: 'done', text: isSummarizer ? 'CHECKPOINT' : 'ok', thinking: '', toolCalls: [] };
       })();
     },
   });
   const taskMessages = [];
-  await provideTestService('task', { ready: Promise.resolve(), messages: taskMessages, activeTask: () => null, async appendEvent() {} });
+  await provideTestService('task', { ready: Promise.resolve(), messages: taskMessages, activeTask: () => null, async appendEvent() { } });
   await applyTestPlugin(loopPlugin);
   await applyTestPlugin(compactionPlugin);
   const loop = runtime.reflect.get('loop');

@@ -1,4 +1,4 @@
-import { Context, type Plugin } from '@deepseek-ai/cordis';
+import { Context, type Fiber, type Plugin } from '@deepseek-ai/cordis';
 import { getCurrentInstance, inject } from 'vue';
 
 /**
@@ -10,14 +10,18 @@ import { getCurrentInstance, inject } from 'vue';
  */
 export const runtime = new Context();
 
+// Cordis exposes FiberState as a const enum, not a browser runtime export.
+const fiberStatuses = ['pending', 'loading', 'active', 'failed', 'disposed', 'unloading'] as const;
+export const fiberStatus = (fiber: Fiber) => fiberStatuses[fiber.state];
+
 export function createSystemPlugin(
   name: string,
   plugin: Plugin.Object,
   ready?: (ctx: Context) => void,
 ): Plugin.Object {
   return {
+    ...plugin,
     name: `kernel:${name}`,
-    ...(plugin.inject ? { inject: plugin.inject } : {}),
     apply(ctx, config) {
       ready?.(ctx);
       return plugin.apply(ctx, config);

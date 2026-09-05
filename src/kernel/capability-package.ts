@@ -4,31 +4,32 @@ import { validateCapabilityManifest } from './capabilities';
 
 export const CAPABILITY_PACKAGE_ROOT = '.harness/capabilities/';
 export const PLUGIN_DIR = '.plugins/';
+export const capabilityPackagePath = (id: string) => `${CAPABILITY_PACKAGE_ROOT}${id}/package.json`;
+export interface CapabilityPackage { manifest: CapabilityManifest; source: string; shippedSource?: string }
 
-export function capabilityManifestPath(id: string): string { return `${CAPABILITY_PACKAGE_ROOT}${id}/manifest.json`; }
-export function capabilityIndexPath(id: string): string { return `${CAPABILITY_PACKAGE_ROOT}${id}/index.js`; }
-export function capabilityVersionPath(id: string, version: string): string { return `${CAPABILITY_PACKAGE_ROOT}${id}/versions/${version}.js`; }
-
-export function readCapabilityManifest(fs: FsService, id: string, builtin: boolean): { manifest: CapabilityManifest; source: 'generated' | 'declared' } | null {
-  const source = fs.read(capabilityManifestPath(id));
-  if (!source) return null;
-  let parsed: CapabilityManifest;
-  try {
-    parsed = validateCapabilityManifest(JSON.parse(source) as CapabilityManifest, id);
+/** A single package revision keeps active source and install metadata consistent. */
+export function readCapabilityPackage(fs: FsService, id: string): CapabilityPackage | null {
+  const record = fs.read(capabilityPackagePath(id));
+  if (record) {
+    const value = JSON.parse(record) as CapabilityPackage;
+    if (typeof value.source !== 'string') throw new Error(`Invalid source for capability "${id}"`);
+    return { ...value, manifest: validateCapabilityManifest(value.manifest, id) };
   }
-  catch (error) { throw new Error(`invalid stored manifest for capability "${id}": ${error instanceof Error ? error.message : String(error)}`); }
-  return { manifest: parsed, source: isCompatibilityManifest(parsed, builtin) ? 'generated' : 'declared' };
+  const root = `${CAPABILITY_PACKAGE_ROOT}${id}/`;
+  const legacy = fs.read(`${root}manifest.json`);
+  if (!legacy) return null;
+  const manifest = validateCapabilityManifest(JSON.parse(legacy), id);
+  const source = fs.read(`${root}index.js`) ?? '';
+  return { manifest, source, ...(manifest.description === 'Shipped Harness capability.' && manifest.version === '0.1.0' ? { shippedSource: source } : {}) };
 }
-
-export async function persistCapabilityPackage(fs: FsService, entry: PluginEntry, source: string): Promise<void> {
+export async function persistCapabilityPackage(fs: FsService, entry: PluginEntry, source: string, shippedSource?: string): Promise<void> {
   const manifest = validateCapabilityManifest(entry.manifest, entry.manifest.id);
-  await Promise.all([
-    fs.write(capabilityManifestPath(manifest.id), `${JSON.stringify(manifest, null, 2)}\n`),
-    fs.write(capabilityIndexPath(manifest.id), source),
-    fs.write(capabilityVersionPath(manifest.id, manifest.version), source),
-  ]);
+  await fs.write(capabilityPackagePath(manifest.id), JSON.stringify({ manifest, source, ...(shippedSource === undefined ? {} : { shippedSource }) }));
 }
 
-function isCompatibilityManifest(manifest: CapabilityManifest, builtin: boolean): boolean {
-  return manifest.description === (builtin ? 'Shipped Harness capability.' : 'Agent-created Harness capability.');
+export function installedCapabilityIds(fs: FsService): string[] {
+  return [...new Set(fs.list().flatMap(path => {
+    const match = /^\.plugins\/([^/]+)\.js$|^\.harness\/capabilities\/([^/]+)\/package\.json$/u.exec(path);
+    return match ? [match[1] ?? match[2]!] : [];
+  }))];
 }

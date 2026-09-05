@@ -1,4 +1,4 @@
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { log } from '@/kernel/log';
 import { WorkspaceRuntime } from '@/kernel/workspace-runtime';
 import { workspaceRevision, type WorkspaceCapabilityRequest } from '@/shared/capability-protocol';
@@ -47,11 +47,11 @@ class BrokerFsRuntime extends WorkspaceRuntime {
 
 }
 
-export const brokerFsPlugin = {
-  name: 'broker-fs',
+export default {
+  name: 'workspace',
   inject: ['broker'],
   apply(ctx: Context) {
     new BrokerFsRuntime(ctx);
     ctx.effect(() => () => log('broker fs plugin unmounted', 'warn'), 'broker-fs.log-dispose');
   },
-};
+} satisfies Plugin.Object;

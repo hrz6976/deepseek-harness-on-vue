@@ -1,10 +1,8 @@
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { z } from 'zod';
 
-export const name = 'run-js';
-export const inject = ['tools', 'prompt'];
-
-function run({ code }: { code: string }): Promise<string> {
+function run({ code }: { code: string }, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.resolve('Error: execution cancelled');
   return new Promise(resolve => {
     const source = 'onmessage = async e => {'
       + 'const out = [];'
@@ -16,20 +14,26 @@ function run({ code }: { code: string }): Promise<string> {
       + '}';
     const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
     const worker = new Worker(url);
-    const done = (message: string) => { clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(url); resolve(message); };
+    const cancel = () => done('Error: execution cancelled');
+    const done = (message: string) => { signal?.removeEventListener('abort', cancel); clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(url); resolve(message); };
     const timer = setTimeout(() => done('Error: execution timed out (5s)'), 5000);
     worker.onmessage = event => done(String(event.data));
     worker.onerror = event => done(`Error: ${event.message}`);
+    signal?.addEventListener('abort', cancel, { once: true });
     worker.postMessage(String(code ?? ''));
   });
 }
 
-export function apply(ctx: Context): void {
-  ctx.tools.register({
-    name: 'run_js',
-    description: 'Execute JavaScript in a browser Web Worker and return console output. For verifying logic, calculations, and debugging. Five second timeout.',
-    parameters: z.object({ code: z.string() }),
-    run,
-  });
-  ctx.prompt.register({ name: 'run-js', order: 20, text: 'Use run_js to execute JavaScript when you need to verify logic, compute something, or debug.' });
-}
+export default {
+  name: 'run-js',
+  inject: ['tools', 'prompt'],
+  apply(ctx: Context): void {
+    ctx.tools.register({
+      name: 'run_js',
+      description: 'Execute JavaScript in a browser Web Worker and return console output. For verifying logic, calculations, and debugging. Five second timeout.',
+      parameters: z.object({ code: z.string() }),
+      run: args => run(args, ctx.get('task')?.signal),
+    });
+    ctx.prompt.register({ name: 'run-js', order: 20, text: 'Use run_js to execute JavaScript when you need to verify logic, compute something, or debug.' });
+  },
+} satisfies Plugin.Object;

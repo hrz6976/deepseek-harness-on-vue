@@ -1,8 +1,9 @@
-// syslog UI plugin: renders the kernel log (mount/unmount/HMR events and
-// every self-modification the agent performs — the human-visible audit trail).
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { defineComponent, ref, watch, nextTick } from 'vue';
 import { logEntries as entries } from '@/sdk';
+
+// syslog UI plugin: renders the kernel log (mount/unmount/HMR events and
+// every self-modification the agent performs — the human-visible audit trail).
 
 const SyslogPanel = defineComponent({
   name: 'SyslogPanel',
@@ -22,4 +23,4 @@ export default {
   name: 'syslog',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'syslog', region: 'side', order: 40, component: SyslogPanel }); },
-};
+} satisfies Plugin.Object;

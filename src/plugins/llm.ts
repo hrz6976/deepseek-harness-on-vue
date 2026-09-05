@@ -9,7 +9,7 @@
 // Trust note: cfg (incl. apiKey) is closure-captured; the provided service
 // object exposes no getter to it, so plugin/tool code cannot read the key
 // through the service.
-import type { Context as CordisContext } from '@deepseek-ai/cordis';
+import type { Context as CordisContext, Plugin } from '@deepseek-ai/cordis';
 import { ref } from 'vue';
 import { createProvider } from '@earendil-works/pi-ai';
 import type { AssistantMessage, Context as PiContext, Message, Model, StopReason, Usage } from '@earendil-works/pi-ai';
@@ -55,11 +55,15 @@ export function toPiMessages(messages: HarnessMessage[], modelId: string): Messa
       if (m.thinking) content.push({ type: 'thinking', thinking: m.thinking });
       if (m.text) content.push({ type: 'text', text: m.text });
       for (const tc of m.toolCalls) content.push({ type: 'toolCall', id: tc.id, name: tc.name, arguments: tc.argsObj ?? parseJsonObject(tc.args) });
-      out.push({ role: 'assistant', content, api: 'openai-completions', provider: 'deepseek', model: modelId,
-                 usage: zeroUsage(), stopReason: m.toolCalls.length ? 'toolUse' : 'stop', timestamp: Date.now() });
+      out.push({
+        role: 'assistant', content, api: 'openai-completions', provider: 'deepseek', model: modelId,
+        usage: zeroUsage(), stopReason: m.toolCalls.length ? 'toolUse' : 'stop', timestamp: Date.now()
+      });
       for (const tc of m.toolCalls)
-        out.push({ role: 'toolResult', toolCallId: tc.id, toolName: tc.name,
-                   content: [{ type: 'text', text: tc.result ?? '(aborted, not executed)' }], isError: false, timestamp: Date.now() });
+        out.push({
+          role: 'toolResult', toolCallId: tc.id, toolName: tc.name,
+          content: [{ type: 'text', text: tc.result ?? '(aborted, not executed)' }], isError: false, timestamp: Date.now()
+        });
     }
   }
   return out;
@@ -170,8 +174,10 @@ function makeMockEngine(): (request: LlmRequest) => AsyncIterable<LlmStreamEvent
     // fake but shape-correct usage so compaction is exercisable offline
     const input = Math.ceil((JSON.stringify(messages).length + JSON.stringify(tools).length) / 4);
     const output = Math.ceil(text.length / 4);
-    yield { type: 'done', text, thinking: THINK, toolCalls, finishReason: wantTool ? 'tool_calls' : 'stop',
-            usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output } };
+    yield {
+      type: 'done', text, thinking: THINK, toolCalls, finishReason: wantTool ? 'tool_calls' : 'stop',
+      usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output }
+    };
   };
 }
 
@@ -189,9 +195,9 @@ function setupLlm(ctx: CordisContext, cfg: LlmConfig): void {
   ctx.effect(() => () => log('llm plugin unmounted', 'warn'), 'llm.log-dispose');
 }
 
-// Mounted on demand: settings passes cfg through manager.mount() into the
+// Mounted on demand: the standalone connection service passes cfg through manager.mount() into the
 // Cordis plugin config. The service deliberately exposes no config getter.
 export default {
   name: 'llm',
   apply: (ctx: CordisContext, config: { cfg?: LlmConfig } = {}) => setupLlm(ctx, config.cfg ?? { baseURL: '/proxy', model: 'deepseek-v4-flash' }),
-};
+} satisfies Plugin.Object;

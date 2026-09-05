@@ -30,7 +30,7 @@ test('broker envelope removes Vue proxies before the structured-clone boundary',
   });
 
   assert.doesNotThrow(() => structuredClone(envelope));
-  assert.equal(envelope.principal.id, 'harness-shell');
+  assert.equal(envelope.principal.id, 'kernel:shell');
   assert.doesNotThrow(() => assertCapabilitySession(envelope, 'session-token-with-at-least-32-bytes'));
   assert.throws(() => assertCapabilitySession(envelope, 'forged-session-token-with-32-bytes'), /authentication failed/);
   assert.notEqual(envelope.payload.provider === 'llm' && envelope.payload.action === 'complete'

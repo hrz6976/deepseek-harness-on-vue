@@ -1,7 +1,8 @@
-// preview UI plugin: sandboxed iframe live preview of index.html.
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { defineComponent, ref, computed } from 'vue';
 import { useService } from '@/sdk';
+
+// preview UI plugin: sandboxed iframe live preview of index.html.
 
 const PreviewPanel = defineComponent({
   name: 'PreviewPanel',
@@ -23,4 +24,4 @@ export default {
   name: 'preview',
   inject: ['ui'],
   apply(ctx: Context) { ctx.ui.register({ name: 'preview', region: 'side', order: 20, component: PreviewPanel }); },
-};
+} satisfies Plugin.Object;

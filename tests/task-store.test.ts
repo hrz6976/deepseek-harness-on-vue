@@ -1,7 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive } from 'vue';
-import { HarnessTaskStore, stableCheckpointMessages } from '@/kernel/task-store';
+import { emptyTaskDatabase, HarnessTaskStore, stableCheckpointMessages } from '@/kernel/task-store';
 import { createTaskRuntimePlugin } from '@/plugins/task-runtime';
 import { runtime } from '@/kernel/cordis';
 import type { TaskRuntimeService } from '@/shared/runtime';
@@ -21,44 +21,19 @@ function fakeFs(initial: Record<string, string> = {}) {
   };
 }
 
-test('task store restores task identity independently from page/tab state', async () => {
+test('one snapshot restores task, resources, events and annotated conversation together', async () => {
   const fs = fakeFs();
-  let sequence = 0;
-  const store = new HarnessTaskStore(fs, () => 1_700_000_000_000 + sequence, () => `id-${++sequence}`);
+  const store = new HarnessTaskStore(fs);
+  const state = await store.load();
   const task = store.newTask('Research launch');
-  assert.deepEqual(task.llm, { profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' });
-  const page = store.newContext(task.id, { kind: 'page', title: 'Product', locator: 'https://example.test/product', metadata: { tabId: 7 } });
-  const file = store.newContext(task.id, { kind: 'file', title: 'brief.md', locator: 'brief.md' });
-  const artifact = store.newArtifact(task.id, { kind: 'report', title: 'Launch report', source: { type: 'agent' }, status: 'ready', content: { summary: 'done' } });
-
-  await store.persistTask(task);
-  await store.persistContexts(task.id, [page, file]);
-  await store.persistArtifact(artifact);
-  await store.appendEvent(task.id, 'task/created', { title: task.title });
-  await store.persistCheckpoint(task.id, [{
-    role: 'user', text: 'continue this task', annotations: [{
-      id: 'annotation-1',
-      scope: { tabId: 7, frameId: 0, url: 'https://example.test/product', origin: 'https://example.test' },
-      target: {
-        nodeRef: 'n_4', selector: '#buy',
-        fingerprint: { tag: 'button', text: 'Buy', classes: ['primary'], attributes: {} },
-      },
-      text: '', createdAt: 1,
-    }],
-  }]);
-  await store.persistIndex(task.id, [task]);
-
-  const restoredStore = new HarnessTaskStore(fs);
-  const restored = await restoredStore.load();
-  assert.equal(restored.activeTaskId, task.id);
-  assert.deepEqual(restored.tasks.map(item => item.title), ['Research launch']);
-  assert.deepEqual(restored.contexts.map(item => item.kind), ['page', 'file']);
-  assert.deepEqual(restored.artifacts.map(item => item.title), ['Launch report']);
-  assert.match(fs.read(`.harness/sessions/${task.id}/events.jsonl`)!, /"sequence":1/);
-  const restoredMessage = restoredStore.checkpointMessages(task.id)[0];
-  assert.equal(restoredMessage?.role, 'user');
-  assert.equal(restoredMessage?.role === 'user' ? restoredMessage.annotations?.[0]?.target.selector : null, '#buy');
-  assert.equal(restoredMessage?.role === 'user' ? restoredMessage.annotations?.[0]?.text : null, '');
+  state.tasks.push(task);
+  state.activeTaskId = task.id;
+  state.contexts.push(store.newContext(task.id, { kind: 'page', title: 'Product', locator: 'https://example.test' }));
+  state.artifacts.push(store.newArtifact(task.id, { kind: 'report', title: 'Report', source: { type: 'agent' } }));
+  state.checkpoints[task.id] = [{ role: 'user', text: 'continue' }];
+  await store.save(state);
+  assert.deepEqual(await new HarnessTaskStore(fs).load(), state);
+  assert.deepEqual(fs.list(), ['.harness/tasks.json']);
 });
 
 test('legacy task metadata gains a current per-session model profile', async () => {
@@ -75,92 +50,60 @@ test('legacy task metadata gains a current per-session model profile', async () 
   });
 });
 
-test('each page host has an isolated task list and artifact namespace', async () => {
+test('each host has its own atomic task database', async () => {
   const fs = fakeFs();
-  const github = new HarnessTaskStore(fs, () => 100, () => 'github-task', 'github.com');
-  const yuri = new HarnessTaskStore(fs, () => 200, () => 'yuri-task', 'i-yuri.com');
-  const githubTask = github.newTask('Review repository');
-  const yuriTask = yuri.newTask('Adjust calendar');
-  const githubArtifact = github.newArtifact(githubTask.id, {
-    kind: 'report', title: 'GitHub report', source: { type: 'agent' },
-  });
-  const yuriArtifact = yuri.newArtifact(yuriTask.id, {
-    kind: 'site-skill', title: 'YuriSeason skill', source: { type: 'agent' },
-  });
-  await github.persistTask(githubTask);
-  await github.persistArtifact(githubArtifact);
-  await github.persistIndex(githubTask.id, [githubTask]);
-  await yuri.persistTask(yuriTask);
-  await yuri.persistArtifact(yuriArtifact);
-  await yuri.persistIndex(yuriTask.id, [yuriTask]);
-
-  const restoredGithub = await new HarnessTaskStore(fs, undefined, undefined, 'github.com').load();
-  const restoredYuri = await new HarnessTaskStore(fs, undefined, undefined, 'i-yuri.com').load();
-  assert.deepEqual(restoredGithub.tasks.map(task => task.title), ['Review repository']);
-  assert.deepEqual(restoredGithub.artifacts.map(artifact => artifact.title), ['GitHub report']);
-  assert.deepEqual(restoredYuri.tasks.map(task => task.title), ['Adjust calendar']);
-  assert.deepEqual(restoredYuri.artifacts.map(artifact => artifact.title), ['YuriSeason skill']);
-  assert.ok(fs.list().some(path => path.startsWith('.harness/hosts/github.com/sessions/')));
-  assert.ok(fs.list().some(path => path.startsWith('.harness/hosts/i-yuri.com/sessions/')));
+  for (const host of ['github.com', 'i-yuri.com']) {
+    const store = new HarnessTaskStore(fs, undefined, undefined, host);
+    const state = await store.load();
+    const task = store.newTask(host);
+    state.tasks.push(task);
+    state.activeTaskId = task.id;
+    await store.save(state);
+  }
+  assert.equal((await new HarnessTaskStore(fs, undefined, undefined, 'github.com').load()).tasks[0]?.title, 'github.com');
+  assert.equal((await new HarnessTaskStore(fs, undefined, undefined, 'i-yuri.com').load()).tasks[0]?.title, 'i-yuri.com');
 });
 
-test('task deletion removes the session and its artifact metadata', async () => {
+test('a stale writer cannot resurrect a deleted task or overwrite its resources', async () => {
+  const fs = fakeFs();
+  const owner = new HarnessTaskStore(fs);
+  const state = await owner.load();
+  state.tasks.push(owner.newTask('Delete me'));
+  await owner.save(state);
+  const stale = new HarnessTaskStore(fs);
+  const old = await stale.load();
+  await owner.save(emptyTaskDatabase());
+  await assert.rejects(stale.save(old), /another runtime/);
+  assert.deepEqual((await new HarnessTaskStore(fs).load()).tasks, []);
+});
+
+test('task deletion commits all related metadata without deleting workspace content', async () => {
   const fs = fakeFs({ 'keep.txt': 'keep' });
-  let sequence = 0;
-  const store = new HarnessTaskStore(fs, () => 1_700_000_000_000 + sequence, () => `id-${++sequence}`);
-  const task = store.newTask('Disposable task');
-  const context = store.newContext(task.id, { kind: 'file', title: 'brief.md', locator: 'brief.md' });
-  const artifact = store.newArtifact(task.id, {
-    kind: 'report',
-    title: 'Disposable report',
-    source: { type: 'agent' },
-    status: 'ready',
-    content: { summary: 'temporary' },
-  });
-  await store.persistTask(task);
-  await store.persistContexts(task.id, [context]);
-  await store.persistArtifact(artifact);
-  await store.appendEvent(task.id, 'task/created');
-  await store.persistCheckpoint(task.id, [{ role: 'user', text: 'temporary message' }]);
-
-  await store.deleteTask(task.id);
-
-  assert.equal(fs.list().some(path => path.startsWith(`.harness/sessions/${task.id}/`)), false);
-  assert.equal(fs.list().some(path => path.startsWith(`.harness/artifacts/${artifact.id}/`)), false);
-  assert.notEqual(fs.read(`.harness/tombstones/tasks/${task.id}.json`), null);
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.task;
+  await task.ready;
+  const id = task.activeTask()!.id;
+  await task.addContext({ kind: 'file', title: 'Keep', locator: 'keep.txt' });
+  await task.createArtifact({ kind: 'report', title: 'Report', source: { type: 'agent' } });
+  await task.appendEvent('created');
+  await task.deleteTask(id);
+  const state = await new HarnessTaskStore(fs).load();
+  assert.equal(state.tasks.some(item => item.id === id), false);
+  assert.deepEqual(state.contexts, []);
+  assert.deepEqual(state.artifacts, []);
+  assert.deepEqual(state.events, []);
   assert.equal(fs.read('keep.txt'), 'keep');
-  assert.deepEqual(store.checkpointMessages(task.id), []);
 });
 
-test('a deleted task cannot be resurrected by a stale runtime', async () => {
+test('concurrent task commands preserve event sequence and both updates', async () => {
   const fs = fakeFs();
-  let sequence = 0;
-  const store = new HarnessTaskStore(fs, () => 1_700_000_000_000 + sequence, () => `id-${++sequence}`);
-  const staleStore = new HarnessTaskStore(fs, () => 1_700_000_001_000 + sequence, () => `stale-${++sequence}`);
-  const task = store.newTask('Do not restore me');
-  await store.persistTask(task);
-  await store.persistIndex(task.id, [task]);
-  await staleStore.load();
-
-  await store.deleteTask(task.id);
-  await store.persistIndex(null, []);
-
-  await assert.rejects(staleStore.persistTask({ ...task, title: 'Resurrected' }), /deleted in another Harness panel/);
-  await staleStore.persistIndex(task.id, [task]);
-  const restored = await new HarnessTaskStore(fs).load();
-  assert.equal(restored.tasks.some(candidate => candidate.id === task.id), false);
-  assert.equal(restored.activeTaskId, null);
-});
-
-test('task events are append-only JSONL records', async () => {
-  const fs = fakeFs();
-  let id = 0;
-  const store = new HarnessTaskStore(fs, () => 100 + id, () => `event-${++id}`);
-  await store.appendEvent('task-1', 'first');
-  await store.appendEvent('task-1', 'second', { ok: true });
-  const source = fs.read('.harness/sessions/task-1/events.jsonl')!;
-  assert.equal(source.trim().split('\n').length, 2);
-  assert.match(source, /"type":"first".*\n.*"type":"second"/s);
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  await runtime.task.ready;
+  await Promise.all([runtime.task.appendEvent('first'), runtime.task.appendEvent('second')]);
+  const state = await new HarnessTaskStore(fs).load();
+  assert.deepEqual(state.events.map(event => [event.sequence, event.type]), [[1, 'first'], [2, 'second']]);
 });
 
 test('task checkpoints exclude transient notes and unfinished assistants', async () => {
@@ -222,8 +165,7 @@ test('model selection applies to existing and newly created conversations', asyn
 test('model selection is shared across page-scoped conversation stores', async () => {
   const fs = fakeFs();
   const firstStore = new HarnessTaskStore(fs, undefined, undefined, 'first.example');
-  firstStore.setModelSelection('opencode-go', 'remembered-model');
-  await firstStore.persistModelSelection();
+  await firstStore.selectModel('opencode-go', 'remembered-model');
 
   const otherStore = new HarnessTaskStore(fs, undefined, undefined, 'other.example');
   await otherStore.load();
@@ -273,5 +215,66 @@ test('task runtime clears a ghost running status after the sandbox restarts', as
 
   assert.equal(task.activeTask()?.status, 'idle');
   assert.equal(task.messages[0]?.text, 'keep this prompt');
-  assert.match(fs.read('.harness/sessions/interrupted/events.jsonl')!, /"type":"task\/run-interrupted"/);
+  assert.match(fs.read('.harness/tasks.json')!, /"type":"task\/run-interrupted"/);
+});
+
+test('task runtime rejects switching and clearing during a run, then clears durably after stop', async () => {
+  const fs = fakeFs({ 'keep.txt': 'user content' });
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  const task = runtime.task;
+  await task.ready;
+  const first = task.activeTask()!.id;
+  task.messages.push({ role: 'user', text: 'keep until cleared' });
+  const controller = new AbortController();
+  await task.beginRun(controller);
+  assert.equal(task.signal, controller.signal);
+  await assert.rejects(task.createTask('Forbidden'), /Stop the active run/);
+  await assert.rejects(task.clearConversation(), /Stop the active run/);
+  controller.abort();
+  await task.endRun();
+  assert.equal(task.signal, undefined);
+  await task.clearConversation();
+  assert.deepEqual(task.messages, []);
+  assert.deepEqual((await new HarnessTaskStore(fs).load()).checkpoints[first], []);
+  assert.equal(fs.read('keep.txt'), 'user content');
+});
+
+test('a failed snapshot rolls back visible task changes and leaves durable state intact', async () => {
+  const fs = fakeFs();
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  await runtime.task.ready;
+  const id = runtime.task.activeTask()!.id;
+  const activeTaskId = runtime.task.activeTaskId;
+  const scope = runtime.task.scope();
+  const previous = fs.read('.harness/tasks.json');
+  const write = fs.write;
+  fs.write = async () => { throw new Error('storage unavailable'); };
+  await assert.rejects(runtime.task.renameTask(id, 'Lost edit'), /storage unavailable/);
+  assert.equal(runtime.task.activeTask()?.title, 'New task');
+  await assert.rejects(runtime.task.createTask('Unsaved task'), /storage unavailable/);
+  assert.equal(activeTaskId.value, id);
+  assert.equal(runtime.task.tasks.length, 1);
+  assert.equal(runtime.task.scope(), scope);
+  assert.equal(fs.read('.harness/tasks.json'), previous);
+  fs.write = write;
+  await runtime.task.renameTask(id, 'Saved edit');
+  assert.equal((await new HarnessTaskStore(fs).load()).tasks[0]?.title, 'Saved edit');
+  const created = await runtime.task.createTask('Saved task');
+  assert.equal(activeTaskId.value, created.id);
+  assert.equal((await new HarnessTaskStore(fs).load()).activeTaskId, created.id);
+});
+
+test('a pending task transition cannot race another transition or run', async () => {
+  const fs = fakeFs();
+  await provideTestService('fs', fs);
+  await applyTestPlugin(createTaskRuntimePlugin());
+  await runtime.task.ready;
+  const pending = runtime.task.createTask('Next');
+  await assert.rejects(runtime.task.createTask('Race'), /transition/);
+  await assert.rejects(runtime.task.beginRun(new AbortController()), /transition/);
+  await pending;
+  assert.equal(runtime.task.activeTask()?.title, 'Next');
+  assert.equal(runtime.task.scope().fiber.name, `task:${runtime.task.activeTask()!.id}`);
 });

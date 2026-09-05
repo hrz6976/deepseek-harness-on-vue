@@ -2,9 +2,9 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ref } from 'vue';
 import { runtime } from '@/kernel/cordis';
-import { promptPlugin } from '@/plugins/prompt';
-import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
-import { apply as applyMcp, inject as mcpInject, name as mcpName } from '@/plugins/tools/mcp';
+import promptPlugin from '@/plugins/prompt';
+import toolsPlugin, { type ToolsRuntime } from '@/plugins/tools';
+import mcpPlugin from '@/plugins/tools/mcp';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 afterEach(async () => { await cleanupTestRuntime(); });
@@ -31,7 +31,7 @@ test('MCP loads a Draft-07 remote tool and keeps creation guidance distinct', as
       return null;
     },
   });
-  await applyTestPlugin({ name: mcpName, inject: mcpInject, apply: applyMcp });
+  await applyTestPlugin(mcpPlugin);
 
   const tools = runtime.reflect.get('tools') as ToolsRuntime;
   assert.equal(tools.load('mcp'), true);

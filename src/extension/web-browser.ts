@@ -95,51 +95,46 @@ export function extractReadablePage(maxChars: number): Omit<WebPageResponse, 'ty
   };
 }
 
-export async function searchWebInBackground(ownerTabId: number, query: string, limit = 5): Promise<WebSearchResponse> {
-  const boundedLimit = Math.max(1, Math.min(10, Math.trunc(limit)));
+async function withTemporaryTab<T>(ownerTabId: number, url: string | undefined, signal: AbortSignal | undefined, read: (tabId: number) => Promise<T>): Promise<T> {
+  signal?.throwIfAborted();
   const owner = await chrome.tabs.get(ownerTabId);
-  const tab = await chrome.tabs.create({ active: false, windowId: owner.windowId });
-  if (tab.id == null) throw new Error('Chrome did not create a search tab.');
-  try {
-    await chrome.search.query({ text: query, tabId: tab.id });
-    const loaded = await waitForPublicPage(tab.id);
-    const [{ result = [] } = {}] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id }, func: extractSearchResults, args: [boundedLimit],
-    });
-    return {
-      type: 'search_results',
-      query,
-      searchUrl: loaded.url ?? '',
-      pageTitle: loaded.title ?? '',
-      results: result,
-    };
-  } finally {
-    await chrome.tabs.remove(tab.id).catch(() => undefined);
-  }
+  signal?.throwIfAborted();
+  const tab = await chrome.tabs.create({ ...(url ? { url } : {}), active: false, windowId: owner.windowId });
+  if (tab.id == null) throw new Error('Chrome did not create a temporary web tab.');
+  const close = () => { void chrome.tabs.remove(tab.id!).catch(() => undefined); };
+  signal?.addEventListener('abort', close, { once: true });
+  try { signal?.throwIfAborted(); return await read(tab.id); }
+  finally { signal?.removeEventListener('abort', close); await chrome.tabs.remove(tab.id).catch(() => undefined); }
 }
-
-export async function openWebPageInBackground(ownerTabId: number, url: string, maxChars = 20_000): Promise<WebPageResponse> {
+export function searchWebInBackground(ownerTabId: number, query: string, limit = 5, signal?: AbortSignal): Promise<WebSearchResponse> {
+  return withTemporaryTab(ownerTabId, undefined, signal, async tabId => {
+    await chrome.search.query({ text: query, tabId });
+    const loaded = await waitForPublicPage(tabId, signal);
+    signal?.throwIfAborted();
+    const [{ result = [] } = {}] = await chrome.scripting.executeScript({
+      target: { tabId }, func: extractSearchResults, args: [Math.max(1, Math.min(10, Math.trunc(limit)))],
+    });
+    return { type: 'search_results', query, searchUrl: loaded.url ?? '', pageTitle: loaded.title ?? '', results: result };
+  });
+}
+export function openWebPageInBackground(ownerTabId: number, url: string, maxChars = 20_000, signal?: AbortSignal): Promise<WebPageResponse> {
   const target = new URL(url);
   if (!/^https?:$/u.test(target.protocol)) throw new Error('web_open accepts only http(s) URLs.');
-  const boundedMaxChars = Math.max(1_000, Math.min(60_000, Math.trunc(maxChars)));
-  const owner = await chrome.tabs.get(ownerTabId);
-  const tab = await chrome.tabs.create({ url: target.href, active: false, windowId: owner.windowId });
-  if (tab.id == null) throw new Error('Chrome did not create a reader tab.');
-  try {
-    await waitForPublicPage(tab.id);
+  return withTemporaryTab(ownerTabId, target.href, signal, async tabId => {
+    await waitForPublicPage(tabId, signal);
+    signal?.throwIfAborted();
     const [{ result } = {}] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id }, func: extractReadablePage, args: [boundedMaxChars],
+      target: { tabId }, func: extractReadablePage, args: [Math.max(1_000, Math.min(60_000, Math.trunc(maxChars)))],
     });
     if (!result) throw new Error('The page did not return readable content.');
     return { type: 'page', ...result };
-  } finally {
-    await chrome.tabs.remove(tab.id).catch(() => undefined);
-  }
+  });
 }
 
-async function waitForPublicPage(tabId: number, timeoutMs = 20_000): Promise<chrome.tabs.Tab> {
+async function waitForPublicPage(tabId: number, signal?: AbortSignal, timeoutMs = 20_000): Promise<chrome.tabs.Tab> {
   const ready = (tab: chrome.tabs.Tab) => tab.status === 'complete' && /^https?:/u.test(tab.url ?? '');
   const current = await chrome.tabs.get(tabId);
+  signal?.throwIfAborted();
   if (ready(current)) return current;
   return await new Promise<chrome.tabs.Tab>((resolve, reject) => {
     const timer = setTimeout(() => finish(undefined, new Error('Timed out waiting for the web page.')), timeoutMs);
@@ -149,12 +144,15 @@ async function waitForPublicPage(tabId: number, timeoutMs = 20_000): Promise<chr
     const onRemoved = (removedTabId: number) => {
       if (removedTabId === tabId) finish(undefined, new Error('The temporary web tab was closed before it loaded.'));
     };
+    const cancel = () => finish(undefined, new Error('Web request cancelled.'));
     const finish = (tab?: chrome.tabs.Tab, error?: Error) => {
+      signal?.removeEventListener('abort', cancel);
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(onUpdated);
       chrome.tabs.onRemoved.removeListener(onRemoved);
       if (error) reject(error); else resolve(tab!);
     };
+    signal?.addEventListener('abort', cancel, { once: true });
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.onRemoved.addListener(onRemoved);
   });

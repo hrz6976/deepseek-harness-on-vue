@@ -1,10 +1,9 @@
 import { computed, createApp, reactive, ref } from 'vue';
 import { render } from './options-app.html?vue-template';
 import {
-  LEGACY_LLM_CONFIG_KEY,
-  LLM_PROFILES_KEY,
+  readLlmProfiles,
+  saveLlmProfiles,
   createLlmProfilePreset,
-  normalizeLlmProfiles,
   type LlmProfilePreset,
   type StoredLlmProfiles,
 } from './llm-profiles';
@@ -24,8 +23,7 @@ const selectedProfile = computed(() => config.profiles.find(profile => profile.i
 void restore();
 
 async function restore(): Promise<void> {
-  const values = await chrome.storage.local.get([LLM_PROFILES_KEY, LEGACY_LLM_CONFIG_KEY]);
-  const stored = normalizeLlmProfiles(values[LLM_PROFILES_KEY], values[LEGACY_LLM_CONFIG_KEY]);
+  const stored = await readLlmProfiles();
   if (stored) Object.assign(config, stored);
   selectedId.value = config.defaultProfileId;
 }
@@ -61,24 +59,8 @@ async function save(): Promise<void> {
   status.value = '';
   statusState.value = undefined;
   try {
-    const profiles = config.profiles.map(profile => {
-      const endpoint = new URL(profile.baseURL);
-      if (!/^https?:$/u.test(endpoint.protocol) || !profile.name.trim() || !profile.defaultModel.trim()) {
-        throw new Error(`Profile “${profile.name || profile.id}” 配置不完整。`);
-      }
-      return {
-        ...profile,
-        name: profile.name.trim(),
-        baseURL: endpoint.href.replace(/\/+$/u, ''),
-        apiKey: draftKeys[profile.id] || profile.apiKey,
-        defaultModel: profile.defaultModel.trim(),
-      };
-    });
-    const origins = [...new Set(profiles.map(profile => `${new URL(profile.baseURL).origin}/*`))];
-    if (!await chrome.permissions.request({ origins })) throw new Error('未获得全部 Provider endpoint 的网络权限。');
-    const stored = normalizeLlmProfiles({ ...config, profiles })!;
+    const stored = await saveLlmProfiles(config, draftKeys);
     for (const id of Object.keys(draftKeys)) delete draftKeys[id];
-    await chrome.storage.local.set({ [LLM_PROFILES_KEY]: stored });
     Object.assign(config, stored);
     status.value = '已保存；下次模型请求生效';
     statusState.value = 'success';

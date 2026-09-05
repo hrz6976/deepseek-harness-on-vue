@@ -1,37 +1,23 @@
 import { Service, type Context } from '@deepseek-ai/cordis';
 import { capabilityForContext } from '@/kernel/capabilities';
+import { SYSTEM_PLUGINS } from './builtin-plugins';
 import { systemContextId } from '@/kernel/cordis';
-import { permissionIds, type PrincipalGrant } from '@/shared/capability-policy';
+import { permissionIds } from '@/shared/capability-policy';
 import type {
   CapabilityPrincipal,
   CapabilityRequest,
 } from '@/shared/capability-protocol';
-import type { BrokerService, JsonValue, TaskRuntimeService } from '@/shared/runtime';
+import type { BrokerService, JsonValue } from '@/shared/runtime';
 
 export interface BrokerTransport {
-  request(principal: CapabilityPrincipal, request: CapabilityRequest): Promise<JsonValue>;
+  request(principal: CapabilityPrincipal, request: CapabilityRequest, signal?: AbortSignal): Promise<JsonValue>;
   stream(principal: CapabilityPrincipal, request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue>;
 }
-
-const SYSTEM_GRANTS: Record<string, PrincipalGrant> = {
-  'manager': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
-  'task-runtime': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
-  'workspace': { providers: ['workspace'], permissions: ['workspace.read', 'workspace.write'] },
-  'llm': { providers: ['llm'], permissions: ['llm.use'] },
-  'model-profiles': { providers: ['llm'], permissions: ['llm.use'] },
-  // Cordis Service tracing preserves the original caller across the llm
-  // adapter, so model completions are authorized as kernel:loop.
-  'loop': { providers: ['llm'], permissions: ['llm.use'] },
-  'shell': {
-    providers: ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web'],
-    permissions: ['*'],
-  },
-};
 
 export function principalForContext(ctx: Context): CapabilityPrincipal {
   const entry = capabilityForContext(ctx);
   if (entry) {
-    const task = ctx.reflect.get('task') as TaskRuntimeService | undefined;
+    const task = ctx.get('task');
     const active = entry.manifest.scope === 'task' ? task?.activeTask() : null;
     if (entry.manifest.scope === 'task' && !active?.capabilityIds.includes(entry.manifest.id)) {
       throw new Error(`Task-scoped capability "${entry.manifest.id}" is not attached to the active task.`);
@@ -50,7 +36,7 @@ export function principalForContext(ctx: Context): CapabilityPrincipal {
 
   const systemId = systemContextId(ctx);
   if (systemId) {
-    const grant = SYSTEM_GRANTS[systemId] ?? { providers: [], permissions: [] };
+    const grant = SYSTEM_PLUGINS[systemId]?.grant ?? { providers: [], permissions: [] };
     return {
       kind: 'system',
       id: `kernel:${systemId}`,
@@ -64,7 +50,7 @@ export function principalForContext(ctx: Context): CapabilityPrincipal {
   throw new Error(`Broker access denied for unregistered Fiber <${ctx.fiber.name}>.`);
 }
 
-export function systemPrincipal(id = 'harness-shell'): CapabilityPrincipal {
+export function systemPrincipal(id = 'kernel:shell'): CapabilityPrincipal {
   return {
     kind: 'system',
     id,
@@ -81,8 +67,8 @@ class BrokerRuntime extends Service implements BrokerService {
     super(ctx, 'broker');
   }
 
-  request(request: CapabilityRequest): Promise<JsonValue> {
-    return this.transport.request(principalForContext(this.ctx), request);
+  request(request: CapabilityRequest, signal?: AbortSignal): Promise<JsonValue> {
+    return this.transport.request(principalForContext(this.ctx), request, signal ?? (capabilityForContext(this.ctx) ? this.ctx.get('task')?.signal : undefined));
   }
 
   stream(request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue> {
@@ -92,7 +78,7 @@ class BrokerRuntime extends Service implements BrokerService {
 
 export function createBrokerPlugin(transport: BrokerTransport) {
   return {
-    name: 'broker-runtime',
+    name: 'broker',
     apply(ctx: Context) {
       new BrokerRuntime(ctx, transport);
     },

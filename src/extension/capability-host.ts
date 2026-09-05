@@ -34,6 +34,7 @@ export class TrustedCapabilityHost {
   }
 
   async request(request: CapabilityRequest, context: CapabilityHostContext): Promise<JsonValue> {
+    context.signal?.throwIfAborted();
     assertPrincipalAuthorized(context.principal, request);
     const provider = this.#providers.get(request.provider);
     if (!provider?.request) throw new Error(`Capability provider "${request.provider}" does not support request action "${request.action}".`);
@@ -41,6 +42,7 @@ export class TrustedCapabilityHost {
   }
 
   stream(request: CapabilityRequest, context: CapabilityHostContext): AsyncIterable<JsonValue> {
+    context.signal?.throwIfAborted();
     assertPrincipalAuthorized(context.principal, request);
     const provider = this.#providers.get(request.provider);
     if (!provider?.stream) throw new Error(`Capability provider "${request.provider}" does not support streaming action "${request.action}".`);

@@ -1,197 +1,20 @@
-// compaction plugin: keeps the conversation inside the model's context
-// window. All POLICY lives here — the loop only exposes two generic
-// interception points ('loop/turn-start' before each request is assembled,
-// 'loop/llm-error' after a failed stream) and hands over its canonical
-// messages array; this plugin decides when and how to shrink it.
-//
-// The recipe is pi-coding-agent's, simplified for our flat message model:
-//   - context size = last provider-reported usage + chars/4 for what follows
-//   - trigger when size > contextWindow - requestOutputTokens - safetyTokens
-//   - keep the most recent ~keepRecentTokens, summarize
-//     everything older with ONE tool-less llm.stream() call into a structured
-//     checkpoint, and splice it in as a single { role: 'summary' } message
-//   - a provider "context length exceeded" error triggers the same compaction
-//     plus a one-shot retry (detected with pi-ai's isContextOverflow patterns)
-// pi additionally splits oversized turns and merges via a separate UPDATE
-// prompt; we don't need the former (tool calls and their results live INSIDE
-// each assistant message, so every top-level boundary is a valid cut) and we
-// fold the latter into the single prompt (an old checkpoint rides along in
-// the serialized transcript and the prompt says to merge it).
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { isContextOverflow } from '@earendil-works/pi-ai';
-import { errorMessage, log, modelLimitsFor, normalizeSessionLlmConfig, userMessageTextForModel } from '@/sdk';
+import { errorMessage, log, modelLimitsFor, normalizeSessionLlmConfig } from '@/sdk';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import type { ModelLimits } from '@/shared/model-limits';
-import type { HarnessMessage, LlmRequest, LlmService } from '@/shared/runtime';
-import type { SessionLlmConfig } from '@/shared/task-model';
+import type { HarnessMessage } from '@/shared/runtime';
+import { DEFAULT_SETTINGS, estimateContextTokens, runCompaction, compactionThreshold } from './compaction/algorithm';
 
-export interface CompactionSettings { enabled: boolean; safetyTokens: number; keepRecentTokens: number }
-interface TurnStartRequest { messages: HarnessMessage[]; signal: AbortSignal }
-interface LlmErrorRequest extends TurnStartRequest { message: string; retry: boolean }
+export { DEFAULT_SETTINGS, estimateMessageTokens, estimateContextTokens, findCutIndex, serializeTranscript, runCompaction, compactionThreshold } from './compaction/algorithm';
 
-export const DEFAULT_SETTINGS = { enabled: true, safetyTokens: 32_000, keepRecentTokens: 128_000 };
-const TOOL_RESULT_MAX = 2000; // chars per tool result in the transcript sent to the summarizer
-const ARGS_MAX = 300;
-
-// ---- pure helpers (unit-tested in tests/compaction.test.js) -----------------
-
-export function estimateMessageTokens(message: HarnessMessage): number {
-  const m = message;
-  if (m.role === 'note') return 0;
-  let chars = (m.role === 'user' ? userMessageTextForModel(m) : m.text).length
-    + (m.role === 'assistant' ? m.thinking.length : 0);
-  if (m.role === 'assistant') {
-    for (const tc of m.toolCalls) chars += tc.name.length + tc.args.length + String(tc.result ?? '').length;
-  }
-  return Math.ceil(chars / 4);
-}
-
-// Last reported provider usage is ground truth for everything up to and
-// including that assistant message; chars/4 estimates only what came after.
-// Before the first response lands this is a pure estimate that ignores the
-// system prompt and tool schemas — fine, the threshold only matters once
-// real usage numbers exist.
-export function estimateContextTokens(messages: HarnessMessage[]): number {
-  let last = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    const usage = m.role === 'assistant' ? m.usage : undefined;
-    if (m.role === 'assistant' && m.status === 'done' && usage && (usage.totalTokens || usage.input)) { last = i; break; }
-  }
-  let tokens = 0;
-  if (last >= 0) {
-    const message = messages[last]!;
-    const usage = message.role === 'assistant' ? message.usage : undefined;
-    if (usage) tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-  }
-  for (let i = last + 1; i < messages.length; i++) tokens += estimateMessageTokens(messages[i]!);
-  return tokens;
-}
-
-// Walk backwards accumulating estimated tokens until >= keepRecentTokens;
-// the message where we cross the budget is the first KEPT message. Returns 0
-// (nothing to compact) when the whole log fits in the budget.
-export function findCutIndex(messages: HarnessMessage[], keepRecentTokens: number): number {
-  let acc = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    acc += estimateMessageTokens(messages[i]!);
-    if (acc >= keepRecentTokens) return i;
-  }
-  return 0;
-}
-
-const trunc = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n)}\n[... ${s.length - n} more characters truncated]`);
-
-// Role-tagged plain text, NOT a message list — the summarizer must see a
-// document to describe, never a conversation to continue (pi does the same).
-// Thinking is deliberately dropped: bulky, and never part of later context.
-export function serializeTranscript(messages: HarnessMessage[]): string {
-  const parts = [];
-  for (const m of messages) {
-    if (m.role === 'summary') parts.push(`[Previous context checkpoint]: ${m.text}`);
-    else if (m.role === 'user') parts.push(`[User]: ${userMessageTextForModel(m)}`);
-    else if (m.role === 'assistant') {
-      if (m.text) parts.push(`[Assistant]: ${m.text}`);
-      for (const tc of m.toolCalls ?? []) {
-        parts.push(`[Tool call]: ${tc.name}(${trunc(tc.args ?? '{}', ARGS_MAX)})`);
-        if (tc.result != null) parts.push(`[Tool result]: ${trunc(String(tc.result), TOOL_RESULT_MAX)}`);
-      }
-    }
-  }
-  return parts.join('\n\n');
-}
-
-// Prompts adapted from pi-coding-agent's compaction module.
-const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding agent, then produce a structured summary following the exact format specified.
-
-<page_annotations> blocks are explicit user input tied to page targets. Preserve their target selectors and notes as user requirements; an empty note intentionally identifies the target without additional text.
-
-Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
-
-const SUMMARIZATION_PROMPT = `The conversation above is to be summarized into a context checkpoint that another LLM will use to continue the work.
-
-Use this EXACT format:
-
-## Goal
-[What is the user trying to accomplish? Can be multiple items.]
-
-## Constraints & Preferences
-- [Constraints or preferences stated by the user, or "(none)"]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-### In Progress
-- [ ] [Current work]
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
-## Critical Context
-- [Data, file contents, or references needed to continue, or "(none)"]
-
-If a [Previous context checkpoint] appears at the start of the conversation, PRESERVE its still-relevant content and merge the new information into it.
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
-
-// The compaction itself: pick the cut, summarize the prefix, splice.
-// Bypasses the 'llm/request' waterfall on purpose — plugins that rewrite
-// AGENT requests must not touch the summarizer's request.
-export async function runCompaction(
-  messages: HarnessMessage[],
-  { llm, settings, signal = new AbortController().signal, sessionConfig }: {
-    llm: LlmService;
-    settings: CompactionSettings;
-    signal?: AbortSignal;
-    sessionConfig?: SessionLlmConfig;
-  },
-): Promise<boolean> {
-  const cut = findCutIndex(messages, settings.keepRecentTokens);
-  const prefix = messages.slice(0, cut);
-  if (!prefix.some(m => m.role === 'user' || m.role === 'assistant')) return false; // nothing new to fold in
-  const tokensBefore = estimateContextTokens(messages);
-  let summary = '';
-  const req: LlmRequest = {
-    systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-    messages: [{ role: 'user', text: `<conversation>\n${serializeTranscript(prefix)}\n</conversation>\n\n${SUMMARIZATION_PROMPT}` }],
-    tools: [],
-    sessionConfig: { ...normalizeSessionLlmConfig(sessionConfig), thinking: false },
-    signal,
-  };
-  for await (const ev of llm.stream(req)) {
-    if (ev.type === 'done') summary = ev.text;
-    else if (ev.type === 'error') throw new Error(ev.message);
-  }
-  if (!summary.trim()) throw new Error('summarizer returned empty text');
-  messages.splice(0, cut, { role: 'summary', text: summary, tokensBefore });
-  // Provider usage on retained assistant turns was measured against the
-  // pre-compaction transcript. Keeping it would make the compacted log appear
-  // just as large as before and retrigger compaction on every following turn.
-  // The next real model response will establish a fresh provider baseline.
-  for (const message of messages) {
-    if (message.role === 'assistant') delete message.usage;
-  }
-  return true;
-}
-
-export function compactionThreshold(limits: ModelLimits, safetyTokens: number): number {
-  return Math.max(1, limits.contextWindow - limits.requestOutputTokens - Math.max(0, safetyTokens));
-}
-
-// ---- the plugin -------------------------------------------------------------
-
-export const name = 'compaction';
-
-export function apply(ctx: Context): void {
+export default {
+  name: 'compaction',
+  apply(ctx: Context): void {
     const settings = reactive({ ...DEFAULT_SETTINGS });
     const compacting = ref(false);
-    const getLlm = () => ctx.reflect.get('llm') as LlmService | undefined;
-    const getTask = () => ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+    const getLlm = () => ctx.get('llm');
+    const getTask = () => ctx.get('task');
     const sessionConfig = () => getTask()?.activeTask()?.llm;
     const currentLimits = () => getLlm()?.limits(sessionConfig())
       ?? modelLimitsFor(normalizeSessionLlmConfig(sessionConfig()).model);
@@ -217,7 +40,7 @@ export function apply(ctx: Context): void {
     // Auto-trigger between turns, before the loop assembles the next request.
     // Failure falls through uncompacted — worst case the request overflows,
     // which the loop/llm-error hook below then catches.
-    ctx.on('loop/turn-start', async (arg: TurnStartRequest, next: (value: TurnStartRequest) => unknown) => {
+    ctx.on('loop/turn-start', async (arg, next) => {
       const llm = getLlm();
       if (settings.enabled && llm) {
         if (estimateContextTokens(arg.messages) > compactionThreshold(currentLimits(), settings.safetyTokens)) {
@@ -231,7 +54,7 @@ export function apply(ctx: Context): void {
 
     // Provider rejected the request as too long (estimate was off, or another
     // plugin inflated the request): compact and ask the loop for its one retry.
-    ctx.on('loop/llm-error', async (arg: LlmErrorRequest, next: (value: LlmErrorRequest) => unknown) => {
+    ctx.on('loop/llm-error', async (arg, next) => {
       const overflowMessage = { role: 'assistant', stopReason: 'error', errorMessage: arg.message } as unknown as AssistantMessage;
       if (settings.enabled && isContextOverflow(overflowMessage)) {
         try {
@@ -258,4 +81,5 @@ export function apply(ctx: Context): void {
       },
     });
     ctx.effect(() => () => log('compaction plugin unmounted', 'warn'), 'compaction.log-dispose');
-}
+  },
+} satisfies Plugin.Object;

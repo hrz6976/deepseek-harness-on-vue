@@ -2,14 +2,16 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { capabilities, capabilityHealth, recordCapabilityContribution, validateCapabilityManifest } from '@/kernel/capabilities';
 import { mountPlugin } from '@/kernel/host';
-import { capabilityIndexPath, capabilityManifestPath, capabilityVersionPath, persistCapabilityPackage, readCapabilityManifest } from '@/kernel/capability-package';
+import { capabilityPackagePath, persistCapabilityPackage, readCapabilityPackage } from '@/kernel/capability-package';
 import { TrustedCapabilityHost } from '@/extension/capability-host';
 import { reactive, ref } from 'vue';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
-import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
+import toolsPlugin, { type ToolsRuntime } from '@/plugins/tools';
+import promptPlugin from '@/plugins/prompt';
+import uiPlugin from '@/kernel/ui';
 import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import { principalForContext } from '@/kernel/broker';
-import { fsPlugin } from '@/plugins/fs';
+import fsPlugin from '@/plugins/fs';
 import { z } from 'zod';
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -28,22 +30,54 @@ test('capability manifests validate identity, version, provider and unique permi
   assert.throws(() => validateCapabilityManifest({ ...valid, permissions: [{ id: 'mcp.read' }, { id: 'mcp.read' }] }), /must be unique/);
 });
 
-test('generated manifests learn contributions and Fiber disposal clears the registry', async () => {
-  await mountPlugin('temporary-tool', { apply() {} });
+test('runtime inventory owns contributions and Fiber disposal clears the registry', async () => {
+  await mountPlugin('temporary-tool', { apply() { } });
   const entry = capabilities.get('temporary-tool')!;
   const dispose = recordCapabilityContribution('temporary-tool', 'tools', 'task_search');
   assert.deepEqual(entry.contributions.tools, ['task_search']);
-  assert.deepEqual(entry.manifest.contributes.tools, ['task_search']);
+  assert.equal('contributes' in entry.manifest, false);
   assert.equal(capabilityHealth(entry).state, 'healthy');
   dispose();
   assert.deepEqual(entry.contributions.tools, []);
-  assert.equal(capabilityHealth(entry).state, 'degraded');
+  assert.equal(capabilityHealth(entry).state, 'healthy');
   await entry.fiber?.dispose();
   assert.equal(capabilities.has('temporary-tool'), false);
 });
 
-test('declared manifests expose missing and undeclared runtime contributions', async () => {
-  await mountPlugin('declared', { apply() {} }, {
+test('disposing a replaced registration leaves the current tool, prompt, panel and inventory intact', async () => {
+  await applyTestPlugin(toolsPlugin);
+  await applyTestPlugin(promptPlugin);
+  await applyTestPlugin(uiPlugin);
+  const oldDisposers: Array<() => Promise<void>> = [];
+  const newDisposers: Array<() => Promise<void>> = [];
+  const entry = await mountPlugin('replacing', {
+    inject: ['tools', 'prompt', 'ui'],
+    apply(ctx) {
+      for (const [revision, disposers] of [['old', oldDisposers], ['new', newDisposers]] as const) {
+        disposers.push(ctx.tools.register({ name: 'sample', description: revision, parameters: z.object({}), run: () => revision }));
+        disposers.push(ctx.prompt.register({ name: 'sample', text: revision }));
+        disposers.push(ctx.ui.register({ name: 'sample', region: 'main', component: { template: `<div>${revision}</div>` } }));
+      }
+    },
+  }, { builtin: true });
+  await entry.fiber?.await();
+  for (const dispose of oldDisposers) await dispose();
+  assert.equal(await runtime.tools.call('sample', {}), 'new');
+  assert.equal(runtime.prompt.assemble(), 'new');
+  assert.deepEqual(entry.contributions.tools, ['sample']);
+  assert.deepEqual(entry.contributions.prompts, ['sample']);
+  assert.deepEqual(entry.contributions.panels, ['sample']);
+  assert.equal(capabilityHealth(entry).state, 'healthy');
+  for (const dispose of newDisposers) await dispose();
+  assert.deepEqual(runtime.tools.schemas(), []);
+  assert.equal(runtime.prompt.assemble(), '');
+  assert.deepEqual(entry.contributions.tools, []);
+  assert.deepEqual(entry.contributions.prompts, []);
+  assert.deepEqual(entry.contributions.panels, []);
+});
+
+test('legacy contribution declarations do not create a second runtime inventory', async () => {
+  await mountPlugin('declared', { apply() { } }, {
     manifest: {
       id: 'declared', version: '1.0.0', title: 'Declared', scope: 'workspace',
       contributes: { tools: ['expected'] }, requires: {}, permissions: [],
@@ -52,27 +86,26 @@ test('declared manifests expose missing and undeclared runtime contributions', a
   const entry = capabilities.get('declared')!;
   recordCapabilityContribution('declared', 'tools', 'surprise');
   const health = capabilityHealth(entry);
-  assert.equal(health.state, 'degraded');
-  assert.deepEqual(health.missing.tools, ['expected']);
-  assert.deepEqual(health.undeclared.tools, ['surprise']);
+  assert.equal(health.state, 'healthy');
+  assert.deepEqual(entry.contributions.tools, ['surprise']);
+  assert.equal('contributes' in entry.manifest, false);
 });
 
-test('capability packages persist manifest, live source and a version snapshot', async () => {
+test('capability packages commit manifest and live source in one package revision', async () => {
   const files = reactive(new Map<string, string>());
   const fs = {
     files, ready: Promise.resolve(), read: (path: string) => files.get(path) ?? null, list: () => [...files.keys()],
     async write(path: string, content: string) { files.set(path, content); },
     async remove(path: string) { files.delete(path); },
   };
-  await mountPlugin('package-demo', { apply() {} });
+  await mountPlugin('package-demo', { apply() { } });
   const entry = capabilities.get('package-demo')!;
   recordCapabilityContribution('package-demo', 'tools', 'package_tool');
   const source = 'export default { setup() { return () => null } }';
   await persistCapabilityPackage(fs, entry, source);
-  assert.equal(fs.read(capabilityIndexPath('package-demo')), source);
-  assert.equal(fs.read(capabilityVersionPath('package-demo', '0.1.0')), source);
-  assert.match(fs.read(capabilityManifestPath('package-demo'))!, /"package_tool"/);
-  assert.equal(readCapabilityManifest(fs, 'package-demo', false)?.source, 'generated');
+  assert.equal(readCapabilityPackage(fs, 'package-demo')?.source, source);
+  assert.doesNotMatch(fs.read(capabilityPackagePath('package-demo'))!, /"package_tool"/);
+  assert.deepEqual(fs.list(), [capabilityPackagePath('package-demo')]);
 });
 
 test('trusted providers enforce declared provider, permission, and task identity', async () => {

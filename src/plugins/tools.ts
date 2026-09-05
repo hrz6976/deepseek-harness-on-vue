@@ -1,4 +1,4 @@
-import { Service, type Context } from '@deepseek-ai/cordis';
+import { Service, type Context, type Plugin } from '@deepseek-ai/cordis';
 import { CfWorkerJsonSchemaValidator, type CfWorkerSchemaDraft } from '@modelcontextprotocol/sdk/validation/cfworker';
 import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
 import { shallowReactive } from 'vue';
@@ -27,7 +27,6 @@ interface RuntimeToolDefinition {
 interface ToolEntry {
   definition: RuntimeToolDefinition;
   owner: string;
-  token: object;
 }
 
 // MCP tools keep their native JSON Schema dialect. Reuse the official SDK's
@@ -118,18 +117,17 @@ export class ToolsRuntime extends Service {
     if (previous && previous.owner !== owner) {
       throw new Error(`duplicate tool "${name}": already contributed by plugin [${previous.owner}]`);
     }
-    const token = {};
     const entry: ToolEntry = {
       definition,
       owner,
-      token,
     };
 
     return this.ctx.effect(() => {
       this.entries.set(name, entry);
       const disposeContribution = recordCapabilityContribution(owner, 'tools', name);
       return () => {
-        if (this.entries.get(name)?.token === token) this.entries.delete(name);
+        if (this.entries.get(name) !== entry) return;
+        this.entries.delete(name);
         disposeContribution();
       };
     }, `tools.register(${JSON.stringify(name)})`);
@@ -147,7 +145,7 @@ export class ToolsRuntime extends Service {
   }
 
   private groupKey(group: ToolAvailability): string {
-    const task = this.ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+    const task = this.ctx.get('task');
     if (group.scope === 'task') return `task:${task?.activeTaskId.value ?? 'none'}:${group.id}`;
     if (group.scope === 'site') {
       const active = task?.activeTask();
@@ -190,7 +188,7 @@ export class ToolsRuntime extends Service {
       .find(candidate => candidate.availability?.id === id)?.availability;
     if (!definition) return false;
     if (definition.scope === 'task' || definition.scope === 'site') {
-      const task = this.ctx.reflect.get('task') as import('../shared/runtime').TaskRuntimeService | undefined;
+      const task = this.ctx.get('task');
       if (!task?.activeTaskId.value || this.groupKey(definition).includes(':none:')) return false;
     }
     this.loadedGroups.add(this.groupKey(definition));
@@ -204,9 +202,7 @@ export class ToolsRuntime extends Service {
   }
 }
 
-export const toolsPlugin = {
+export default {
   name: 'tools',
-  apply(ctx: Context) {
-    new ToolsRuntime(ctx);
-  },
-};
+  apply(ctx) { new ToolsRuntime(ctx); },
+} satisfies Plugin.Object;

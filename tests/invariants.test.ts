@@ -10,9 +10,9 @@ import { z } from 'zod';
 import { useBusOn } from '@/kernel/bus';
 import { runtime } from '@/kernel/cordis';
 import { useTool } from '@/kernel/contrib';
-import { toolsPlugin } from '@/plugins/tools';
-import { promptPlugin } from '@/plugins/prompt';
-import { createSnapshotBuffer, loopPlugin } from '@/plugins/loop';
+import toolsPlugin from '@/plugins/tools';
+import promptPlugin from '@/plugins/prompt';
+import loopPlugin, { createSnapshotBuffer } from '@/plugins/loop';
 import { toHarnessFinishReason, toPiMessages } from '@/plugins/llm';
 import { translateESM, compilePlugin } from '@/kernel/compile';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
@@ -26,7 +26,7 @@ async function mountHarness(script, options = {}) {
   const requests = [];
   await applyTestPlugin(toolsPlugin);
   await applyTestPlugin(promptPlugin);
-  await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => {}, remove: async () => {} });
+  await provideTestService('fs', { ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [], write: async () => { }, remove: async () => { } });
   await provideTestService('llm', {
     stream(req) {
       requests.push({
@@ -39,7 +39,7 @@ async function mountHarness(script, options = {}) {
   });
   const task = {
     ready: Promise.resolve(), messages: [], activeTask: () => null,
-    async appendEvent() {}, async saveCheckpoint() {}, ...options.task,
+    async appendEvent() { }, async saveCheckpoint() { }, ...options.task,
   };
   await provideTestService('task', task);
   await applyTestPlugin(loopPlugin);
@@ -61,7 +61,7 @@ const finishEvent = text => ({
   type: 'done', text, thinking: '', finishReason: 'stop', toolCalls: [],
 });
 
-const doneText = text => async function* () { yield finishEvent(text); };
+const doneText = text => async function*() { yield finishEvent(text); };
 
 const notesOf = loop => loop.messages.filter(m => m.role === 'note').map(m => m.text);
 
@@ -94,10 +94,12 @@ test('toPiMessages: user annotations are included in model context', () => {
 
 test('toPiMessages: every toolCall is followed by a matching toolResult', () => {
   const out = toPiMessages([
-    { role: 'assistant', text: '', thinking: '', toolCalls: [
-      { id: 'c1', name: 'run_js', argsObj: { code: '1' }, args: '{"code":"1"}', result: '1' },
-      { id: 'c2', name: 'run_js', args: '{"code":"2"}' }, // no result: aborted mid-round
-    ] },
+    {
+      role: 'assistant', text: '', thinking: '', toolCalls: [
+        { id: 'c1', name: 'run_js', argsObj: { code: '1' }, args: '{"code":"1"}', result: '1' },
+        { id: 'c2', name: 'run_js', args: '{"code":"2"}' }, // no result: aborted mid-round
+      ]
+    },
   ], 'm');
   assert.equal(out.length, 3); // assistant + 2 toolResults
   assert.equal(out[1].role, 'toolResult');
@@ -175,10 +177,12 @@ test('loop snapshots the active session model profile into its request', async (
 
 test('loop publishes Cordis busy and idle lifecycle events', async () => {
   const events = [];
-  await applyTestPlugin({ name: 'loop-lifecycle-observer', apply(ctx) {
-    ctx.on('loop/busy', () => { events.push('busy'); });
-    ctx.on('loop/idle', () => { events.push('idle'); });
-  } });
+  await applyTestPlugin({
+    name: 'loop-lifecycle-observer', apply(ctx) {
+      ctx.on('loop/busy', () => { events.push('busy'); });
+      ctx.on('loop/idle', () => { events.push('idle'); });
+    }
+  });
   const { loop } = await mountHarness(doneText('ok'));
   await loop.run('goal');
   assert.deepEqual(events, ['busy', 'idle']);
@@ -190,7 +194,7 @@ test('loop: length is incomplete, audited, and continued with an internal direct
     activeTask: () => ({ id: 'task-1' }),
     async appendEvent(type, data) { events.push({ type, data }); },
   };
-  const { loop, requests } = await mountHarness(async function* (req, turn) {
+  const { loop, requests } = await mountHarness(async function*(req, turn) {
     if (turn === 1) {
       yield {
         type: 'done', responseId: 'response-1', text: '让我先构造 pre', thinking: '',
@@ -229,7 +233,7 @@ test('loop: length is incomplete, audited, and continued with an internal direct
 });
 
 test('loop: length continuation stops after three retries instead of spinning', async () => {
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: 'partial', thinking: '', toolCalls: [], finishReason: 'length' };
   });
 
@@ -246,7 +250,7 @@ test('loop: tool_calls without a valid call is a protocol error', async () => {
     activeTask: () => ({ id: 'task-1' }),
     async appendEvent(type, data) { events.push({ type, data }); },
   };
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: '', thinking: '', toolCalls: [], finishReason: 'tool_calls' };
   }, { task });
 
@@ -259,7 +263,7 @@ test('loop: tool_calls without a valid call is a protocol error', async () => {
 });
 
 test('loop: an empty stop ends once with a clear provider error', async () => {
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: '', thinking: '', toolCalls: [], finishReason: 'stop' };
   });
 
@@ -271,7 +275,7 @@ test('loop: an empty stop ends once with a clear provider error', async () => {
 });
 
 test('loop: an omitted terminal state ends once as a protocol error', async () => {
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: 'provider omitted finish reason', thinking: '', toolCalls: [] };
   });
 
@@ -288,7 +292,7 @@ test('loop: a prose stop is a valid terminal answer without keyword heuristics o
     activeTask: () => ({ id: 'task-1' }),
     async appendEvent(type, data) { events.push({ type, data }); },
   };
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: '你好，有什么可以帮你？', thinking: '', toolCalls: [], finishReason: 'stop' };
   }, { task });
 
@@ -301,7 +305,7 @@ test('loop: a prose stop is a valid terminal answer without keyword heuristics o
 });
 
 test('loop: a failed tool result may be followed by a normal terminal explanation', async () => {
-  const { loop, requests } = await mountHarness(async function* (req, turn) {
+  const { loop, requests } = await mountHarness(async function*(req, turn) {
     if (turn === 1) {
       yield {
         type: 'done', text: '', thinking: '', finishReason: 'tool_calls',
@@ -329,7 +333,7 @@ test('loop: a failed tool result may be followed by a normal terminal explanatio
 
 // --------------------------------------------------- loop: truncation / veto --
 test('loop: tool results truncate at 8000 chars before entering history', async () => {
-  const { loop } = await mountHarness(async function* (req, turn) {
+  const { loop } = await mountHarness(async function*(req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'big', argsObj: {}, args: '{}' }] };
     else yield finishEvent('finished');
   });
@@ -343,7 +347,7 @@ test('loop: tool results truncate at 8000 chars before entering history', async 
 
 test('loop: tools/pre-execute veto blocks the call, tool body never runs', async () => {
   let ran = false;
-  const { loop } = await mountHarness(async function* (req, turn) {
+  const { loop } = await mountHarness(async function*(req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'guarded', argsObj: {}, args: '{}' }] };
     else yield finishEvent('finished');
   });
@@ -358,7 +362,7 @@ test('loop: tools/pre-execute veto blocks the call, tool body never runs', async
 
 // ------------------------------------------- loop: per-request snapshot race --
 test('loop: mid-turn tool removal — in-flight turn uses the snapshot, next request drops it', async () => {
-  const { loop, requests } = await mountHarness(async function* (req, turn) {
+  const { loop, requests } = await mountHarness(async function*(req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 't1', name: 'doomed', argsObj: {}, args: '{}' }] };
     else yield finishEvent('finished');
   });
@@ -376,7 +380,7 @@ test('loop: mid-turn tool removal — in-flight turn uses the snapshot, next req
 
 // ------------------------------------------------------- loop: turn failsafe --
 test('loop: a model that never stops calling tools hits the failsafe turn limit', async () => {
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 'x', name: 'poke', argsObj: {}, args: '{}' }] };
   });
   const dispose = useTool({ name: 'poke', description: '', parameters: z.object({}), run: () => 'ok' });
@@ -402,7 +406,7 @@ test('loop/turn-start: fires before the request; splices to the log shape it', a
 
 test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async () => {
   let fired = 0;
-  const { loop, requests } = await mountHarness(async function* () {
+  const { loop, requests } = await mountHarness(async function*() {
     yield { type: 'error', message: 'maximum context length is 131072 tokens' };
   });
   const off = useBusOn('loop/llm-error', (arg, next) => { fired++; return next({ ...arg, retry: true }); });
@@ -417,15 +421,17 @@ test('loop/llm-error: a recovery listener gets exactly ONE retry per run', async
 // ------------------------------------------------------------ loop: control --
 test('loop: stop mid-stream — loop exits with a "stopped" note, no stuck cursor', async () => {
   const checkpoints = [];
-  const { loop } = await mountHarness(async function* (req) {
+  const { loop } = await mountHarness(async function*(req) {
     while (!req.signal.aborted) {
       yield { type: 'update', text: 'working…', thinking: '', toolCalls: [] };
       await sleep(5);
     }
-  }, { task: {
-    activeTask: () => ({ id: 'task-1', llm: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
-    async saveCheckpoint() { checkpoints.push(loop.messages.map(message => ({ ...message }))); },
-  } });
+  }, {
+    task: {
+      activeTask: () => ({ id: 'task-1', llm: { model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
+      async saveCheckpoint() { checkpoints.push(loop.messages.map(message => ({ ...message }))); },
+    }
+  });
   const p = loop.run('goal');
   await sleep(30);
   assert.equal(checkpoints[0]?.[0]?.text, 'goal', 'the submitted prompt is durable before streaming finishes');
@@ -439,7 +445,7 @@ test('loop: stop mid-stream — loop exits with a "stopped" note, no stuck curso
 });
 
 test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async () => {
-  const { loop } = await mountHarness(async function* () {
+  const { loop } = await mountHarness(async function*() {
     yield { type: 'error', message: 'fetch failed' };
   });
   await loop.run('goal');
@@ -454,15 +460,17 @@ test('loop: LLM error lands as a note (with CORS hint on fetch failures)', async
 
 test('loop releases running state when the final checkpoint stalls', async () => {
   let checkpoints = 0;
-  const { loop } = await mountHarness(async function* () {
+  const { loop } = await mountHarness(async function*() {
     yield { type: 'error', message: 'Broker connection closed before the request completed.' };
-  }, { task: {
-    activeTask: () => ({ id: 'task-1', llm: { profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
-    async saveCheckpoint() {
-      checkpoints++;
-      if (checkpoints > 1) await new Promise(() => {});
-    },
-  } });
+  }, {
+    task: {
+      activeTask: () => ({ id: 'task-1', llm: { profileId: '', model: 'deepseek-v4-flash', thinking: true, reasoningEffort: 'high' } }),
+      async saveCheckpoint() {
+        checkpoints++;
+        if (checkpoints > 1) await new Promise(() => { });
+      },
+    }
+  });
 
   await Promise.race([
     loop.run('goal'),
@@ -473,7 +481,7 @@ test('loop releases running state when the final checkpoint stalls', async () =>
 });
 
 test('loop: re-entry guard — a second run while running is refused', async () => {
-  const { loop } = await mountHarness(async function* (req) {
+  const { loop } = await mountHarness(async function*(req) {
     while (!req.signal.aborted) { yield { type: 'update', text: '…', thinking: '', toolCalls: [] }; await sleep(5); }
   });
   const p = loop.run('first');
@@ -519,7 +527,7 @@ test('loop: tool calls and results are persisted as audit events', async () => {
     activeTask: () => ({ id: 'task-1' }),
     async appendEvent(type, data) { events.push({ type, data }); },
   };
-  const { loop } = await mountHarness(async function* (req, turn) {
+  const { loop } = await mountHarness(async function*(req, turn) {
     if (turn === 1) yield { type: 'done', text: '', thinking: '', toolCalls: [{ id: 'call-1', name: 'inspect', argsObj: { target: 'main' }, args: '{"target":"main"}' }] };
     else yield finishEvent('finished');
   }, { task });

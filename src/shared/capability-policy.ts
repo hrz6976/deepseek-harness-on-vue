@@ -6,6 +6,7 @@ import type {
 } from '@/shared/capability-protocol';
 
 function requiredPermission(request: CapabilityRequest): string {
+  if (request.provider === 'runtime') return 'capability.manage';
   if (request.provider === 'workspace') {
     return request.action === 'list' ? 'workspace.read' : 'workspace.write';
   }

@@ -1,324 +1,283 @@
-// loop plugin: the agent loop. Streaming consumption, unbounded tool rounds
-// (with a high failsafe), the five waterfall interception points, Abort-
-// Controller real stop, prompt assembly from the prompt registry, and the
-// per-request snapshot. Context-size POLICY does not live here — the loop
-// fires 'loop/turn-start' / 'loop/llm-error' and the compaction plugin acts.
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { reactive, ref } from 'vue';
 import { errorMessage, log, parseJsonObject } from '@/sdk';
-import type { ToolGuardRequest } from '@/kernel/bus';
-import type { AssistantHarnessMessage, HarnessMessage, JsonObject, LlmRequest, LlmStreamEvent } from '@/shared/runtime';
+import type { ToolInvocation, SafePointReason } from '@/shared/plugin-events';
+import type { AssistantHarnessMessage, HarnessMessage, JsonObject, LlmRequest } from '@/shared/runtime';
 import { normalizeSessionLlmConfig } from '@/shared/task-model';
+import { AGENT_CORE_PROMPT } from './loop/prompt';
+import { applySnapshot, createSnapshotBuffer } from './loop/stream';
 
 // Failsafe kill switch ONLY, not a control mechanism: Stop aborts for real,
 // and the compaction plugin keeps context bounded. This exists so a wedged
 // engine/tool pair can't spin forever.
 const HARD_TURN_LIMIT = 500;
 const TOOL_RESULT_LIMIT = 8000; // chars; unbounded tool output would blow up the context
-const STREAM_RENDER_INTERVAL_MS = 50;
 const MAX_TRUNCATION_CONTINUATIONS = 3;
 const CONTINUATION_DIRECTIVE = '[Harness continuation] The previous assistant response was truncated by the model output limit. Continue the same work from where it stopped without repeating the partial response. If an action is needed, call the tool now; otherwise provide the actual final answer.';
-type AssistantSnapshot = Extract<LlmStreamEvent, { type: 'update' | 'done' }>;
 type TurnOutcome = 'completed' | 'tool-calls' | 'incomplete' | 'protocol-error' | 'filtered' | 'resource-error' | 'llm-error' | 'aborted';
-type SafePointReason = 'recovery-retry' | 'truncation-continuation' | 'tool-calls-complete';
-export const AGENT_CORE_PROMPT = `You are Harness, an autonomous coding and page agent running inside a browser. You and the user share a persistent virtual workspace (OPFS), and your job is to collaborate with them until their goal is genuinely handled.
+function applyLoop(ctx: Context): void {
+  // Logic contribution: the prompt registration belongs to this Fiber and
+  // vanishes automatically when the loop plugin unloads.
+  ctx.prompt.register({
+    name: 'persona', order: -200, text: AGENT_CORE_PROMPT,
+  });
 
-# Working with the user
+  const task = ctx.task;
+  const messages = task.messages;
+  const running = ref(false);
+  let ctrl: AbortController | null = null;
 
-Understand the requested outcome, constraints, and authorization before acting. Match the user's language and level of technical detail. Be direct, natural, and helpful without generic praise, unnecessary ceremony, or excessive formatting. Lead with the result or decision; include reasoning only when it helps the user evaluate the work.
-
-Adapt to the request type:
-- For answers, explanations, reviews, audits, and plans, inspect the relevant state and report an evidence-backed result. Do not make changes unless the user also asks for them.
-- For diagnosis, determine and explain the cause. Do not implement a fix unless the request also asks for a fix or clearly includes implementation.
-- For changes, builds, fixes, and implementation, perform the complete in-scope work and use the best available non-destructive verification. Do not stop at a proposal when the user asked for an outcome.
-
-Make reasonable assumptions when they stay within the requested scope and are easy to correct. Ask one focused question only when a missing choice would materially change the result, authorize a new kind of action, or cannot be resolved from available context. If the user corrects the direction, incorporate the correction instead of defending an earlier plan.
-
-# Autonomy and persistence
-
-Use tools whenever inspection, editing, construction, verification, or continuation is needed. Call the tool in the same response instead of narrating work for a future turn. Use only tools and capabilities that actually exist; discover or load relevant capabilities when that mechanism is available, and never invent a successful call or unavailable authority.
-
-Continue through multi-step work until the requested outcome is complete or progress genuinely requires user input, unavailable capability, or external state. Exhaust safe in-scope checks and alternatives before declaring a blocker. A request such as "finish" or "do not stop" requires persistence toward the goal but does not expand the authorized scope.
-
-Safe, reversible work within the user's scope does not need repeated confirmation. Reading state, inspecting files, editing requested workspace content, running available non-destructive checks, and applying policy-approved temporary previews are normal implementation steps. Ask before persistent host-page installation, external writes, destructive or difficult-to-recover actions, costly operations, or a material expansion of scope unless the current request already clearly authorizes the exact action. Follow any stricter tool- or host-page-specific approval boundary even when the broader task is authorized.
-
-# Workspace discipline
-
-Inspect relevant files and state before editing. Preserve existing user work, including changes unrelated to the request, and avoid broad rewrites when a focused change is sufficient. Make the smallest coherent change that fully solves the problem; do not omit required behavior merely to keep the diff small.
-
-Treat tool results and the current workspace as the source of truth. Do not assume a file, capability, command, provider, or page state exists because it would be convenient. Do not claim that work was saved, persisted, executed, or accepted unless the observed result proves it.
-
-Be cautious with deletion, overwriting, and other difficult-to-recover operations. Resolve the exact target before acting, keep the action inside the requested scope, and prefer a recoverable alternative when practical. Never use a broad or unresolved path as a destructive target.
-
-# Verification and completion
-
-After changes, verify the affected behavior in proportion to risk with the best checks actually available: inspect the resulting state, run targeted validation, exercise the changed path, or compare before and after evidence. If a full check is unavailable or too costly, run the strongest smaller check and state the remaining limitation.
-
-Never claim that code works, a test or build passed, a page looks correct, or a task is complete without supporting tool evidence. Distinguish observed facts from inference. When evidence conflicts with an expectation, investigate the conflict rather than explaining it away.
-
-Work quietly: do not narrate routine tool calls, repeat observations, or announce every next step. When finished, return the actual answer. Lead with the outcome, then include only the evidence, material caveats, changed artifacts, and next action that help the user. If user input is required, ask the exact question directly.`;
-const name = 'loop';
-const inject = ['tools', 'prompt', 'fs', 'task'];
-
-function apply(ctx: Context): void {
-    // Logic contribution: the prompt registration belongs to this Fiber and
-    // vanishes automatically when the loop plugin unloads.
-    ctx.prompt.register({
-      name: 'persona', order: -200, text: AGENT_CORE_PROMPT,
+  const note = (text: string): void => { messages.push({ role: 'note', text }); };
+  const recordTaskEvent = async (type: string, data: JsonObject): Promise<void> => {
+    try {
+      if (task.activeTask()) await task.appendEvent(type, data);
+    } catch (error) {
+      // Audit persistence must never prevent the actual tool call.
+      log(`task event ${type} was not persisted: ${errorMessage(error)}`, 'warn');
+    }
+  };
+  const recordTurnEnd = async (turn: number, message: AssistantHarnessMessage, outcome: TurnOutcome, toolCallCount = message.toolCalls.length): Promise<void> => {
+    await recordTaskEvent('turn/end', {
+      turn,
+      responseId: message.responseId ?? null,
+      finishReason: normalizedFinishReason(message),
+      outcome,
+      toolCallCount,
+      usage: message.usage ? JSON.parse(JSON.stringify(message.usage)) as JsonObject : null,
     });
+  };
+  const persistCheckpoint = async (): Promise<void> => {
+    try {
+      if (task.activeTask()) await task.saveCheckpoint();
+    } catch (error) {
+      // A checkpoint failure must not replace the model/tool outcome, but it
+      // must remain visible in diagnostics because it weakens crash recovery.
+      log(`task checkpoint was not persisted: ${errorMessage(error)}`, 'warn');
+    }
+  };
+  const safePoint = async (turn: number, reason: SafePointReason): Promise<void> => {
+    // Persist only protocol-stable messages before capabilities are allowed
+    // to reload. Closing the side panel after this point can restore the
+    // completed tool round instead of falling back to the previous run.
+    await persistCheckpoint();
+    await ctx.parallel('loop/safe-point', { turn, reason });
+  };
 
-    const task = ctx.task;
-    const messages = task.messages;
-    const running = ref(false);
-    let ctrl: AbortController | null = null;
-
-    const note = (text: string): void => { messages.push({ role: 'note', text }); };
-    const recordTaskEvent = async (type: string, data: JsonObject): Promise<void> => {
+  ctx.provide('loop', {
+    running,
+    stop: () => { ctrl?.abort(); },
+    async run(goal: string, options) {
+      if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
+      if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
+      await task.ready;
+      if (running.value) { note('a task is already running — stop it first'); return; }
+      running.value = true;
+      const controller = new AbortController();
+      ctrl = controller;
+      let detachFinalCheckpoint = false;
+      let ownsRun = false;
       try {
-        if (task.activeTask()) await task.appendEvent(type, data);
-      } catch (error) {
-        // Audit persistence must never prevent the actual tool call.
-        log(`task event ${type} was not persisted: ${errorMessage(error)}`, 'warn');
-      }
-    };
-    const recordTurnEnd = async (turn: number, message: AssistantHarnessMessage, outcome: TurnOutcome, toolCallCount = message.toolCalls.length): Promise<void> => {
-      await recordTaskEvent('turn/end', {
-        turn,
-        responseId: message.responseId ?? null,
-        finishReason: normalizedFinishReason(message),
-        outcome,
-        toolCallCount,
-        usage: message.usage ? JSON.parse(JSON.stringify(message.usage)) as JsonObject : null,
-      });
-    };
-    const persistCheckpoint = async (): Promise<void> => {
-      try {
-        if (task.activeTask()) await task.saveCheckpoint();
-      } catch (error) {
-        // A checkpoint failure must not replace the model/tool outcome, but it
-        // must remain visible in diagnostics because it weakens crash recovery.
-        log(`task checkpoint was not persisted: ${errorMessage(error)}`, 'warn');
-      }
-    };
-    const safePoint = async (turn: number, reason: SafePointReason): Promise<void> => {
-      // Persist only protocol-stable messages before capabilities are allowed
-      // to reload. Closing the side panel after this point can restore the
-      // completed tool round instead of falling back to the previous run.
-      await persistCheckpoint();
-      await ctx.parallel('loop/safe-point', { turn, reason });
-    };
+        await task.beginRun(controller, goal);
+        ownsRun = true;
+        const submittedAnnotations = options?.annotations?.length
+          ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
+          : undefined;
+        messages.push({ role: 'user', text: goal, ...(submittedAnnotations ? { annotations: submittedAnnotations } : {}) });
+        // The prompt is durable before the first provider request. If the
+        // sandbox is destroyed while streaming, reopening the panel still
+        // restores the submitted turn rather than an empty conversation.
+        await persistCheckpoint();
+        // Keep one model profile across every internal reasoning/tool sub-turn
+        // in this run. A selector change applies atomically to the next run.
+        const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);
+        await ctx.parallel('loop/busy');
+        let recovered = false; // one recovery retry per run, granted via loop/llm-error
+        let truncationContinuations = 0;
+        let pendingDirective: string | null = null;
+        for (let turn = 0;turn < HARD_TURN_LIMIT;turn++) {
+          if (controller.signal.aborted) { note('stopped'); return; }
+          // Providers may be replaced transactionally at the previous safe
+          // point. Never retain a disposed service object across turns.
+          const llm = ctx.get('llm');
+          if (!llm) { note('llm service not ready'); return; }
+          // interception point: plugins act on the canonical log between
+          // turns — compaction splices old messages into a summary here,
+          // BEFORE the streaming placeholder is pushed and the request built.
+          await ctx.waterfall('loop/turn-start', { messages, signal: controller.signal }, (value: { messages: HarnessMessage[]; signal: AbortSignal }) => value);
+          if (controller.signal.aborted) { note('stopped'); return; }
+          const msg = reactive<AssistantHarnessMessage>({ role: 'assistant', text: '', thinking: '', toolCalls: [], status: 'streaming' });
+          messages.push(msg);
 
-    ctx.provide('loop', {
-      running,
-      stop: () => { ctrl?.abort(); },
-      async run(goal: string, options) {
-        if (running.value) { note('a task is already running — stop it first'); return; } // re-entry guard: two loops would fight over ctrl
-        if (!ctx.reflect.get('llm')) { note('llm service not ready'); return; }
-        await task.ready;
-        if (running.value) { note('a task is already running — stop it first'); return; }
-        running.value = true;
-        const controller = new AbortController();
-        ctrl = controller;
-        let detachFinalCheckpoint = false;
-        try {
-          const submittedAnnotations = options?.annotations?.length
-            ? JSON.parse(JSON.stringify(options.annotations)) as NonNullable<import('@/shared/runtime').UserMessage['annotations']>
-            : undefined;
-          messages.push({ role: 'user', text: goal, ...(submittedAnnotations ? { annotations: submittedAnnotations } : {}) });
-          // The prompt is durable before the first provider request. If the
-          // sandbox is destroyed while streaming, reopening the panel still
-          // restores the submitted turn rather than an empty conversation.
-          await persistCheckpoint();
-          // Keep one model profile across every internal reasoning/tool sub-turn
-          // in this run. A selector change applies atomically to the next run.
-          const sessionConfig = normalizeSessionLlmConfig(task.activeTask()?.llm);
-          await ctx.parallel('loop/busy');
-          let recovered = false; // one recovery retry per run, granted via loop/llm-error
-          let truncationContinuations = 0;
-          let pendingDirective: string | null = null;
-          for (let turn = 0; turn < HARD_TURN_LIMIT; turn++) {
-            if (controller.signal.aborted) { note('stopped'); return; }
-            // Providers may be replaced transactionally at the previous safe
-            // point. Never retain a disposed service object across turns.
-            const llm = ctx.reflect.get('llm') as import('../shared/runtime').LlmService | undefined;
-            if (!llm) { note('llm service not ready'); return; }
-            // interception point: plugins act on the canonical log between
-            // turns — compaction splices old messages into a summary here,
-            // BEFORE the streaming placeholder is pushed and the request built.
-            await ctx.waterfall('loop/turn-start', { messages, signal: controller.signal }, (value: { messages: HarnessMessage[]; signal: AbortSignal }) => value);
-            if (controller.signal.aborted) { note('stopped'); return; }
-            const msg = reactive<AssistantHarnessMessage>({ role: 'assistant', text: '', thinking: '', toolCalls: [], status: 'streaming' });
-            messages.push(msg);
+          // Per-request snapshot: freeze the assembled prompt AND the tool
+          // dispatch table now. The model answers against exactly this
+          // request; an HMR reload or v-if removing a tool mid-turn must
+          // not race the model's selection of it.
+          const toolsSnap = ctx.tools.snapshot();
+          const requestMessages = messages.filter(message => message.role !== 'note'
+            && (message.role !== 'assistant' || message.status === 'done'));
+          if (pendingDirective) requestMessages.push({ role: 'user', text: pendingDirective });
+          pendingDirective = null;
+          const req = await ctx.waterfall('llm/request', { // interception point: plugins may rewrite the request
+            systemPrompt: ctx.prompt.assemble(),
+            // invariant: only completed assistant turns reach the canonical
+            // history. Incomplete/error/streaming turns are protocol state,
+            // not model conversation history.
+            messages: requestMessages,
+            tools: toolsSnap.schemas,
+            sessionConfig,
+            signal: controller.signal,
+          }, (value: LlmRequest) => value);
 
-            // Per-request snapshot: freeze the assembled prompt AND the tool
-            // dispatch table now. The model answers against exactly this
-            // request; an HMR reload or v-if removing a tool mid-turn must
-            // not race the model's selection of it.
-            const toolsSnap = ctx.tools.snapshot();
-            const requestMessages = messages.filter(message => message.role !== 'note'
-              && (message.role !== 'assistant' || message.status === 'done'));
-            if (pendingDirective) requestMessages.push({ role: 'user', text: pendingDirective });
-            pendingDirective = null;
-            const req = await ctx.waterfall('llm/request', { // interception point: plugins may rewrite the request
-              systemPrompt: ctx.prompt.assemble(),
-              // invariant: only completed assistant turns reach the canonical
-              // history. Incomplete/error/streaming turns are protocol state,
-              // not model conversation history.
-              messages: requestMessages,
-              tools: toolsSnap.schemas,
-              sessionConfig,
-              signal: controller.signal,
-            }, (value: LlmRequest) => value);
-
-            let errMsg = null;
-            const snapshots = createSnapshotBuffer(snapshot => applySnapshot(msg, snapshot));
-            try {
-              for await (const ev of llm.stream(req)) {
-                if (ev.type === 'update' || ev.type === 'done') {
-                  snapshots.push(ev);
-                } else if (ev.type === 'error') {
-                  msg.status = 'error';
-                  errMsg = ev.message || 'unknown LLM error';
-                }
+          let errMsg = null;
+          const snapshots = createSnapshotBuffer(snapshot => applySnapshot(msg, snapshot));
+          try {
+            for await (const ev of llm.stream(req)) {
+              if (ev.type === 'update' || ev.type === 'done') {
+                snapshots.push(ev);
+              } else if (ev.type === 'error') {
+                msg.status = 'error';
+                errMsg = ev.message || 'unknown LLM error';
               }
-            } finally {
-              snapshots.flush();
             }
-            if (errMsg != null) {
-              await recordTurnEnd(turn + 1, msg, 'llm-error');
-              // interception point: plugins may recover (compaction handles
-              // context-overflow errors) by setting retry — one grant per run.
-              const rec = await ctx.waterfall('loop/llm-error', { message: errMsg, messages, signal: controller.signal, retry: false }, (value: { message: string; messages: HarnessMessage[]; signal: AbortSignal; retry: boolean }) => value);
-              if (rec.retry && !recovered && !controller.signal.aborted) {
-                recovered = true;
-                note('retrying after recovery');
-                await safePoint(turn + 1, 'recovery-retry');
-                turn--;
-                continue;
-              }
-              const hint = /fetch/i.test(errMsg) ? ' (network/CORS? browsers block direct third-party API calls — use the /proxy route, see serve.mjs)' : '';
-              note(`LLM call failed: ${errMsg}${hint}`);
-              detachFinalCheckpoint = true;
-              return;
-            }
-            const finishReason = normalizedFinishReason(msg);
-            const toolCallCount = msg.toolCalls.length;
-            if (controller.signal.aborted) {
-              msg.status = 'incomplete';
-              await recordTurnEnd(turn + 1, msg, 'aborted', toolCallCount);
-              note('stopped');
-              return;
-            }
-
-            if (finishReason === 'length') {
-              // A truncated tool call can have valid-looking JSON while still
-              // being incomplete. Discard every call from this turn and never
-              // execute or checkpoint the partial response.
-              msg.status = 'incomplete';
-              msg.toolCalls = [];
-              await recordTurnEnd(turn + 1, msg, 'incomplete', toolCallCount);
-              if (truncationContinuations >= MAX_TRUNCATION_CONTINUATIONS) {
-                note(`LLM output remained incomplete after ${MAX_TRUNCATION_CONTINUATIONS} automatic continuations. Increase the model output limit or shorten the task.`);
-                return;
-              }
-              truncationContinuations++;
-              pendingDirective = CONTINUATION_DIRECTIVE;
-              await safePoint(turn + 1, 'truncation-continuation');
+          } finally {
+            snapshots.flush();
+          }
+          if (errMsg != null) {
+            await recordTurnEnd(turn + 1, msg, 'llm-error');
+            // interception point: plugins may recover (compaction handles
+            // context-overflow errors) by setting retry — one grant per run.
+            const rec = await ctx.waterfall('loop/llm-error', { message: errMsg, messages, signal: controller.signal, retry: false }, (value: { message: string; messages: HarnessMessage[]; signal: AbortSignal; retry: boolean }) => value);
+            if (rec.retry && !recovered && !controller.signal.aborted) {
+              recovered = true;
+              note('retrying after recovery');
+              await safePoint(turn + 1, 'recovery-retry');
+              turn--;
               continue;
             }
+            const hint = /fetch/i.test(errMsg) ? ' (network/CORS? browsers block direct third-party API calls — use the /proxy route, see serve.mjs)' : '';
+            note(`LLM call failed: ${errMsg}${hint}`);
+            detachFinalCheckpoint = true;
+            return;
+          }
+          const finishReason = normalizedFinishReason(msg);
+          const toolCallCount = msg.toolCalls.length;
+          if (controller.signal.aborted) {
+            msg.status = 'incomplete';
+            await recordTurnEnd(turn + 1, msg, 'aborted', toolCallCount);
+            note('stopped');
+            return;
+          }
 
-            if ((finishReason === 'tool_calls' && toolCallCount === 0)
-              || (toolCallCount > 0 && msg.toolCalls.some(call => !isValidToolCall(call)))) {
-              msg.status = 'error';
-              await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
-              note('LLM protocol error: the response declared or contained tool calls, but no complete valid call was available.');
+          if (finishReason === 'length') {
+            // A truncated tool call can have valid-looking JSON while still
+            // being incomplete. Discard every call from this turn and never
+            // execute or checkpoint the partial response.
+            msg.status = 'incomplete';
+            msg.toolCalls = [];
+            await recordTurnEnd(turn + 1, msg, 'incomplete', toolCallCount);
+            if (truncationContinuations >= MAX_TRUNCATION_CONTINUATIONS) {
+              note(`LLM output remained incomplete after ${MAX_TRUNCATION_CONTINUATIONS} automatic continuations. Increase the model output limit or shorten the task.`);
               return;
             }
-            if (finishReason === 'content_filter') {
-              msg.status = 'error';
-              await recordTurnEnd(turn + 1, msg, 'filtered', toolCallCount);
-              note('LLM response was stopped by the provider content filter.');
-              return;
-            }
-            if (finishReason === 'insufficient_system_resource') {
-              msg.status = 'error';
-              await recordTurnEnd(turn + 1, msg, 'resource-error', toolCallCount);
-              note('LLM provider stopped the response because system resources were insufficient. Please retry.');
-              return;
-            }
+            truncationContinuations++;
+            pendingDirective = CONTINUATION_DIRECTIVE;
+            await safePoint(turn + 1, 'truncation-continuation');
+            continue;
+          }
 
-            if (!toolCallCount) {
-              if (finishReason === 'stop') {
-                if (!msg.text.trim()) {
-                  msg.status = 'error';
-                  await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
-                  note('LLM returned an empty final response.');
-                  return;
-                }
-                msg.status = 'done';
-                await recordTurnEnd(turn + 1, msg, 'completed', toolCallCount);
+          if ((finishReason === 'tool_calls' && toolCallCount === 0)
+            || (toolCallCount > 0 && msg.toolCalls.some(call => !isValidToolCall(call)))) {
+            msg.status = 'error';
+            await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
+            note('LLM protocol error: the response declared or contained tool calls, but no complete valid call was available.');
+            return;
+          }
+          if (finishReason === 'content_filter') {
+            msg.status = 'error';
+            await recordTurnEnd(turn + 1, msg, 'filtered', toolCallCount);
+            note('LLM response was stopped by the provider content filter.');
+            return;
+          }
+          if (finishReason === 'insufficient_system_resource') {
+            msg.status = 'error';
+            await recordTurnEnd(turn + 1, msg, 'resource-error', toolCallCount);
+            note('LLM provider stopped the response because system resources were insufficient. Please retry.');
+            return;
+          }
+
+          if (!toolCallCount) {
+            if (finishReason === 'stop') {
+              if (!msg.text.trim()) {
+                msg.status = 'error';
+                await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
+                note('LLM returned an empty final response.');
                 return;
               }
-              msg.status = 'error';
-              await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
-              note(`LLM protocol error: unhandled finish reason ${finishReason}.`);
+              msg.status = 'done';
+              await recordTurnEnd(turn + 1, msg, 'completed', toolCallCount);
               return;
             }
-
-            msg.status = 'done';
-            await recordTurnEnd(turn + 1, msg, 'tool-calls', toolCallCount);
-
-            for (const tc of msg.toolCalls) {
-              if (controller.signal.aborted) { note('stopped'); return; }
-              tc.status = 'running';
-              const pre = await ctx.waterfall('tools/pre-execute', { name: tc.name, args: tc.argsObj ?? parseJsonObject(tc.args) } as ToolGuardRequest, (value: ToolGuardRequest) => value); // interception point: veto seam
-              await recordTaskEvent('tool/call-started', {
-                callId: tc.id,
-                name: pre.name,
-                args: pre.args,
-              });
-              let result;
-              if (pre?.veto) result = `Error: tool call vetoed by a plugin: ${pre.veto}`;
-              else result = await toolsSnap.call(pre.name, pre.args); // dispatch against the snapshot the model saw
-              tc.result = String(result).slice(0, TOOL_RESULT_LIMIT);
-              tc.status = 'done';
-              await recordTaskEvent('tool/call-completed', {
-                callId: tc.id,
-                name: pre.name,
-                outcome: tc.result.startsWith('Error:') ? 'failed' : 'completed',
-                result: tc.result,
-              });
-              await ctx.waterfall('tools/post-execute', { name: tc.name, result: tc.result, args: pre.args }, (value: { name: string; result: string; args: JsonObject }) => value); // interception point: observe/transform results
-            }
-            // All calls selected from this request's frozen tool table, plus
-            // their pre/post hooks, have settled. Capability HMR may now swap
-            // contributors without changing the task, broker, or loop Fiber;
-            // the next iteration takes a fresh tool and hook generation.
-            await safePoint(turn + 1, 'tool-calls-complete');
+            msg.status = 'error';
+            await recordTurnEnd(turn + 1, msg, 'protocol-error', toolCallCount);
+            note(`LLM protocol error: unhandled finish reason ${finishReason}.`);
+            return;
           }
-          note(`reached the failsafe turn limit (${HARD_TURN_LIMIT}) — stopping what looks like a runaway loop`);
-        } catch (error: unknown) {
-          detachFinalCheckpoint = true;
-          const last = messages.at(-1);
-          if (last?.role === 'assistant' && last.status === 'streaming') last.status = 'error'; // close the cursor, never leave it blinking
-          note(controller.signal.aborted ? 'stopped' : `loop error: ${errorMessage(error)}`);
-        } finally {
-          // Normal completion, manual Stop, provider failure, and plugin
-          // disposal all converge here. Unfinished assistant placeholders are
-          // intentionally filtered by the task store; completed turns remain.
-          running.value = false;
-          ctrl = null;
-          await ctx.parallel('loop/idle');
-          const checkpoint = persistCheckpoint();
-          // A disconnected broker or manual Stop must not keep the UI waiting
-          // for the final best-effort checkpoint timeout. Normal completion
-          // still waits so a finished answer is durable before run() resolves.
-          if (detachFinalCheckpoint || controller.signal.aborted) void checkpoint;
-          else await checkpoint;
+
+          msg.status = 'done';
+          await recordTurnEnd(turn + 1, msg, 'tool-calls', toolCallCount);
+
+          for (const tc of msg.toolCalls) {
+            if (controller.signal.aborted) { note('stopped'); return; }
+            tc.status = 'running';
+            const pre = await ctx.waterfall('tools/pre-execute', { name: tc.name, args: tc.argsObj ?? parseJsonObject(tc.args) } as ToolInvocation, (value: ToolInvocation) => value); // interception point: veto seam
+            await recordTaskEvent('tool/call-started', {
+              callId: tc.id,
+              name: pre.name,
+              args: pre.args,
+            });
+            controller.signal.throwIfAborted();
+            let result;
+            if (pre?.veto) result = `Error: tool call vetoed by a plugin: ${pre.veto}`;
+            else result = await toolsSnap.call(pre.name, pre.args); // dispatch against the snapshot the model saw
+            tc.result = String(result).slice(0, TOOL_RESULT_LIMIT);
+            tc.status = 'done';
+            await recordTaskEvent('tool/call-completed', {
+              callId: tc.id,
+              name: pre.name,
+              outcome: tc.result.startsWith('Error:') ? 'failed' : 'completed',
+              result: tc.result,
+            });
+            await ctx.waterfall('tools/post-execute', { name: tc.name, result: tc.result, args: pre.args }, (value: { name: string; result: string; args: JsonObject }) => value); // interception point: observe/transform results
+          }
+          // All calls selected from this request's frozen tool table, plus
+          // their pre/post hooks, have settled. Capability HMR may now swap
+          // contributors without changing the task, broker, or loop Fiber;
+          // the next iteration takes a fresh tool and hook generation.
+          await safePoint(turn + 1, 'tool-calls-complete');
         }
-      },
-    });
-    ctx.effect(() => () => { ctrl?.abort(); log('loop plugin unmounted', 'warn'); }, 'loop.dispose');
+        note(`reached the failsafe turn limit (${HARD_TURN_LIMIT}) — stopping what looks like a runaway loop`);
+      } catch (error: unknown) {
+        detachFinalCheckpoint = true;
+        const last = messages.at(-1);
+        if (last?.role === 'assistant' && last.status === 'streaming') last.status = 'error'; // close the cursor, never leave it blinking
+        note(controller.signal.aborted ? 'stopped' : `loop error: ${errorMessage(error)}`);
+      } finally {
+        // Normal completion, manual Stop, provider failure, and plugin
+        // disposal all converge here. Unfinished assistant placeholders are
+        // intentionally filtered by the task store; completed turns remain.
+        const checkpoint = (ownsRun ? task.endRun() : Promise.resolve()).catch(error => log(`task completion was not persisted: ${errorMessage(error)}`, 'warn'));
+        ctrl = null;
+        try { await ctx.parallel('loop/idle'); }
+        finally { running.value = false; }
+        // A disconnected broker or manual Stop must not keep the UI waiting
+        // for the final best-effort checkpoint timeout. Normal completion
+        // still waits so a finished answer is durable before run() resolves.
+        if (detachFinalCheckpoint || controller.signal.aborted) void checkpoint;
+        else await checkpoint;
+      }
+    },
+  });
+  ctx.effect(() => () => { ctrl?.abort(); log('loop plugin unmounted', 'warn'); }, 'loop.dispose');
 }
 
 function normalizedFinishReason(message: AssistantHarnessMessage): NonNullable<AssistantHarnessMessage['finishReason']> {
@@ -335,41 +294,11 @@ function isValidToolCall(call: AssistantHarnessMessage['toolCalls'][number]): bo
   }
 }
 
-export const loopPlugin = { name, inject, apply };
+export { AGENT_CORE_PROMPT } from './loop/prompt';
+export { createSnapshotBuffer } from './loop/stream';
 
-function applySnapshot(message: AssistantHarnessMessage, snapshot: AssistantSnapshot): void {
-  if (snapshot.responseId) message.responseId = snapshot.responseId;
-  if (message.text !== snapshot.text) message.text = snapshot.text;
-  if (message.thinking !== snapshot.thinking) message.thinking = snapshot.thinking;
-  const previousById = new Map(message.toolCalls.filter(call => call.id).map(call => [call.id, call]));
-  message.toolCalls = snapshot.toolCalls.map((call, index) => ({
-    ...call,
-    ...((previousById.get(call.id) ?? message.toolCalls[index])?.result
-      ? { result: (previousById.get(call.id) ?? message.toolCalls[index])!.result }
-      : {}),
-    status: (previousById.get(call.id) ?? message.toolCalls[index])?.status ?? 'pending',
-  }));
-  if (snapshot.finishReason) message.finishReason = snapshot.finishReason;
-  if (snapshot.type === 'done' && snapshot.usage) message.usage = snapshot.usage;
-}
-
-export function createSnapshotBuffer(commit: (snapshot: AssistantSnapshot) => void) {
-  let pending: AssistantSnapshot | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const flush = () => {
-    if (timer != null) clearTimeout(timer);
-    timer = null;
-    if (!pending) return;
-    const snapshot = pending;
-    pending = null;
-    commit(snapshot);
-  };
-  return {
-    push(snapshot: AssistantSnapshot) {
-      pending = snapshot;
-      if (snapshot.type === 'done') return flush();
-      timer ??= setTimeout(flush, STREAM_RENDER_INTERVAL_MS);
-    },
-    flush,
-  };
-}
+export default {
+  name: 'loop',
+  inject: ['tools', 'prompt', 'task'],
+  apply: applyLoop,
+} satisfies Plugin.Object;

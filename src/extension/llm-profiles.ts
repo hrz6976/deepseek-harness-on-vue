@@ -127,3 +127,21 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown> : null;
 }
+
+/** Trusted host storage; call permission requests directly from the user's save action. */
+export async function readLlmProfiles(): Promise<StoredLlmProfiles | null> {
+  const values = await chrome.storage.local.get([LLM_PROFILES_KEY, LEGACY_LLM_CONFIG_KEY]);
+  return normalizeLlmProfiles(values[LLM_PROFILES_KEY], values[LEGACY_LLM_CONFIG_KEY]);
+}
+
+export async function saveLlmProfiles(config: StoredLlmProfiles, draftKeys: Record<string, string>): Promise<StoredLlmProfiles> {
+  const stored = normalizeLlmProfiles({
+    ...config,
+    profiles: config.profiles.map(profile => ({ ...profile, apiKey: draftKeys[profile.id] || profile.apiKey })),
+  });
+  if (!stored || stored.profiles.length !== config.profiles.length) throw new Error('Provider 配置不完整，或包含无效、重复的 ID。');
+  const origins = [...new Set(stored.profiles.map(profile => `${new URL(profile.baseURL).origin}/*`))];
+  if (!await chrome.permissions.request({ origins })) throw new Error('未获得全部 Provider endpoint 的网络权限。');
+  await chrome.storage.local.set({ [LLM_PROFILES_KEY]: stored });
+  return stored;
+}

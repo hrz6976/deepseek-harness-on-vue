@@ -1,3 +1,4 @@
+import { acquireRuntimeLease } from '@/kernel/runtime-lease';
 // Standalone entry. The root app and framework services are bundled. Shipped
 // UI/task capabilities are source defaults seeded into OPFS. Editable names
 // use the same HMR path as agent-created capabilities; protected names remain
@@ -9,8 +10,10 @@ import { modules } from '@/kernel/modules';
 import { startHarnessRuntime } from '@/kernel/runtime-supervisor';
 import { cordisContextKey } from '@/kernel/cordis';
 import { UiContributionsHost } from '@/kernel/ui';
-import { fsPlugin } from '@/plugins/fs';
+import fsPlugin from '@/plugins/fs';
 import defaults from 'virtual:plugin-defaults';
+import { ModelConnection } from './model-connection';
+import { log } from '@/kernel/log';
 
 const { createApp } = Vue;
 const plugins = Vue.computed(() => [...capabilities.values()]);
@@ -46,10 +49,15 @@ const App = Vue.defineComponent({
 
 globalThis.__harness = Object.freeze({ modules });
 
+const releaseRuntime = await acquireRuntimeLease('standalone').catch(error => {
+  document.getElementById('app')!.textContent = error instanceof Error ? error.message : String(error);
+  throw error;
+});
+window.addEventListener('pagehide', releaseRuntime, { once: true });
 const runtime = startHarnessRuntime({
   defaults,
   infrastructure: [
-    { name: 'workspace', plugin: fsPlugin },
+    fsPlugin,
   ],
 });
 const app = createApp(App);
@@ -57,7 +65,9 @@ const app = createApp(App);
 // them with zero imports.
 app.component('UiContributionsHost', UiContributionsHost);
 const shellContext = await runtime.shellContext;
+await runtime.ready;
+new ModelConnection(shellContext);
+await shellContext.modelConnection.restore().catch(error => log(`Model connection failed: ${String(error)}`, 'err'));
 app.provide(cordisContextKey, shellContext);
 
 app.mount('#app');
-void runtime.ready;

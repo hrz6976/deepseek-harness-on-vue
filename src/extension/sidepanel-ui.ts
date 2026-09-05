@@ -49,12 +49,14 @@ export function mountSidePanelUi() {
   }
 
   function confirmApproval(): void {
+    const current = approvalResolve;
     const origins = state.approvalRequest?.origins;
     if (!origins) return dialog.close('confirm');
     state.approvalBusy = true;
     void chrome.permissions.request({ origins: [...origins] }).then(
-      granted => dialog.close(granted ? 'confirm' : 'cancel'),
+      granted => { if (approvalResolve === current) dialog.close(granted ? 'confirm' : 'cancel'); },
       error => {
+        if (approvalResolve !== current) return;
         const reason = error instanceof Error ? error : new Error(String(error));
         state.approvalError = reason.message;
         state.approvalBusy = false;
@@ -85,14 +87,17 @@ export function mountSidePanelUi() {
   const frame = sandboxFrame.value!;
   const dialog = approvalDialog.value!;
 
-  function showApproval(request: ApprovalRequest): Promise<boolean> {
+  function showApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     state.approvalRequest = request;
     state.approvalError = '';
     state.approvalBusy = false;
     dialog.returnValue = '';
     dialog.showModal();
     return new Promise((resolve, reject) => {
-      approvalResolve = (approved, error) => error ? reject(error) : resolve(approved);
+      const cancel = () => { dialog.close('cancel'); };
+      signal?.addEventListener('abort', cancel, { once: true });
+      approvalResolve = (approved, error) => { signal?.removeEventListener('abort', cancel); error ? reject(error) : resolve(approved); };
     });
   }
 
@@ -112,8 +117,8 @@ export function mountSidePanelUi() {
       state.siteAccessVisible = !!request;
       if (request) state.siteAccessLabel = request.label;
     },
-    requestApproval(request: ApprovalRequest): Promise<boolean> {
-      const result = approvalQueue.then(() => showApproval(request));
+    requestApproval(request: ApprovalRequest, signal?: AbortSignal): Promise<boolean> {
+      const result = approvalQueue.then(() => showApproval(request, signal));
       approvalQueue = result.then(() => undefined, () => undefined);
       return result;
     },

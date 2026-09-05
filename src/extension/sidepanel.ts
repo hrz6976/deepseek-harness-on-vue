@@ -1,4 +1,7 @@
-import { assertCapabilitySession, parseCapabilityEnvelope } from '@/shared/broker-schema';
+import { RequestLifecycle } from '@/shared/request-lifecycle';
+import { CapabilityGrants } from './capability-grants';
+import { acquireRuntimeLease } from '@/kernel/runtime-lease';
+import { BrokerCancellationSchema, assertCapabilitySession, parseCapabilityEnvelope } from '@/shared/broker-schema';
 import type { CapabilityEnvelope, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
 import { assertPrincipalAuthorized } from '@/shared/capability-policy';
 import { approvalForRequest } from './approval-policy';
@@ -19,6 +22,8 @@ const binding = await resolveBinding().catch(error => {
 const boundTabId = binding.tabId;
 const boundHost = binding.host;
 view.setBinding(boundTabId, boundHost);
+const releaseRuntime = await acquireRuntimeLease(boundHost).catch(error => { reportStartupFailure(error); return suspendStartup(); });
+window.addEventListener('pagehide', releaseRuntime, { once: true });
 let boundOrigin = '';
 let boundOriginPattern = '';
 let sandboxReady = false;
@@ -29,6 +34,9 @@ let brokerSessionIssued = false;
 let port: chrome.runtime.Port | null = null;
 let portConnected = false;
 const activeBrokerRequests = new Map<string, boolean>();
+const requests = new RequestLifecycle();
+const grantsKey = 'harness.capability-grants';
+const grants = new CapabilityGrants((await chrome.storage.local.get(grantsKey))[grantsKey] as ConstructorParameters<typeof CapabilityGrants>[0]);
 const opfs = new OpfsStore();
 opfs.onChange(() => {
   frame.contentWindow?.postMessage({ channel: 'harness-shell-v1', type: 'workspace-changed' }, '*');
@@ -62,10 +70,12 @@ function connect(): chrome.runtime.Port {
     const streamChunk = message as Partial<CapabilityStreamChunk>;
     if (streamChunk.stream === true && streamChunk.done === true && typeof streamChunk.requestId === 'string') {
       activeBrokerRequests.delete(streamChunk.requestId);
+      requests.finish(streamChunk.requestId);
     }
     const response = message as Partial<CapabilityResponse>;
     if (typeof response.requestId === 'string' && typeof response.ok === 'boolean') {
       activeBrokerRequests.delete(response.requestId);
+      requests.finish(response.requestId);
     }
     frame.contentWindow?.postMessage(message, '*');
   });
@@ -81,6 +91,7 @@ function disconnectPort(disconnectedPort: chrome.runtime.Port): void {
     replyBrokerError(requestId, new Error('Broker connection closed before the request completed. Please retry.'), stream);
   }
   activeBrokerRequests.clear();
+  requests.close();
 }
 
 function postEnvelope(envelope: CapabilityEnvelope): void {
@@ -129,20 +140,17 @@ window.addEventListener('message', event => {
     return;
   }
   try {
-    const envelope = parseCapabilityEnvelope(event.data);
-    assertCapabilitySession(envelope, brokerSessionToken);
-    if (localCapabilityHost.has(envelope.payload.provider)) {
-      void localCapabilityHost.request(envelope.payload, { tabId: boundTabId, principal: envelope.principal }).then(
-        value => frame.contentWindow?.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, ok: true, value } satisfies CapabilityResponse, '*'),
-        error => frame.contentWindow?.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, ok: false, error: error instanceof Error ? error.message : String(error) } satisfies CapabilityResponse, '*'),
-      );
+    const cancellation = BrokerCancellationSchema.safeParse(event.data);
+    if (cancellation.success) {
+      if (cancellation.data.session !== brokerSessionToken) throw new Error('Invalid broker session.');
+      requests.cancel(cancellation.data.requestId);
       return;
     }
-    void forwardEnvelope(envelope).catch(error => replyBrokerError(
-      envelope.requestId,
-      error,
-      envelope.payload.provider === 'llm' && envelope.payload.action === 'complete',
-    ));
+    const envelope = parseCapabilityEnvelope(event.data);
+    assertCapabilitySession(envelope, brokerSessionToken);
+    envelope.principal = grants.resolve(envelope.principal);
+    void forwardEnvelope(envelope).catch(error => replyBrokerError(envelope.requestId, error,
+      envelope.payload.provider === 'llm' && envelope.payload.action === 'complete'));
   } catch (error) {
     const candidate = event.data as { requestId?: unknown } | null;
     replyBrokerError(typeof candidate?.requestId === 'string' ? candidate.requestId : 'invalid-request', error);
@@ -222,24 +230,48 @@ function replyBrokerError(requestId: string, error: unknown, stream = false): vo
 
 async function forwardEnvelope(envelope: CapabilityEnvelope): Promise<void> {
   assertPrincipalAuthorized(envelope.principal, envelope.payload);
-  const approval = approvalForRequest(envelope.payload);
-  const originAccessAlreadyGranted = approval?.reuseGrantedOrigins && approval.origins
-    ? await chrome.permissions.contains({ origins: approval.origins })
-    : false;
-  if (approval && !originAccessAlreadyGranted && !await view.requestApproval(approval)) {
-    frame.contentWindow?.postMessage({
-      channel: 'harness-broker-v1',
-      requestId: envelope.requestId,
-      ok: false,
-      error: 'User declined the trusted-shell approval prompt.',
-    } satisfies CapabilityResponse, '*');
-    return;
-  }
+  const signal = requests.start(envelope.requestId, envelope.deadline);
   const isStream = envelope.payload.provider === 'llm' && envelope.payload.action === 'complete';
+  signal.addEventListener('abort', () => {
+    activeBrokerRequests.delete(envelope.requestId);
+    port?.postMessage({ channel: 'harness-broker-v1', session: brokerSessionToken, requestId: envelope.requestId, cancel: true });
+    replyBrokerError(envelope.requestId, new Error('Broker request cancelled.'), isStream);
+  }, { once: true });
   try {
-    postEnvelope(envelope);
-    activeBrokerRequests.set(envelope.requestId, isStream);
+    const request = envelope.payload;
+    if (request.provider === 'runtime') {
+      const manifest = request.input.manifest;
+      await grants.authorize(manifest, () => view.requestApproval({
+        title: `允许插件 ${manifest.title} 使用这些权限？`,
+        body: manifest.permissions.map(item => `${item.id}${item.reason ? `: ${item.reason}` : ''}`).join('\n'), confirmLabel: '授权插件',
+      }, signal), async value => navigator.locks.request(grantsKey, async () => {
+        signal.throwIfAborted();
+        const current = (await chrome.storage.local.get(grantsKey))[grantsKey] as Record<string, unknown> | undefined;
+        signal.throwIfAborted();
+        await chrome.storage.local.set({ [grantsKey]: { ...current, [value.id]: value } });
+      }));
+      signal.throwIfAborted();
+      frame.contentWindow?.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, ok: true, value: null }, '*');
+      requests.finish(envelope.requestId);
+      return;
+    }
+    const approval = approvalForRequest(request);
+    const alreadyGranted = approval?.reuseGrantedOrigins && approval.origins
+      ? await chrome.permissions.contains({ origins: approval.origins }) : false;
+    signal.throwIfAborted();
+    if (approval && !alreadyGranted && !await view.requestApproval(approval, signal)) throw new Error('User declined the trusted-shell approval prompt.');
+    signal.throwIfAborted();
+    if (localCapabilityHost.has(request.provider)) {
+      const value = await localCapabilityHost.request(request, { tabId: boundTabId, principal: envelope.principal, signal });
+      signal.throwIfAborted();
+      frame.contentWindow?.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, ok: true, value }, '*');
+      requests.finish(envelope.requestId);
+    } else {
+      activeBrokerRequests.set(envelope.requestId, isStream);
+      postEnvelope(envelope);
+    }
   } catch (error) {
+    requests.finish(envelope.requestId);
     activeBrokerRequests.delete(envelope.requestId);
     throw error;
   }

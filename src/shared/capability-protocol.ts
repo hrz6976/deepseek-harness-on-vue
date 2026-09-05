@@ -3,13 +3,10 @@ import type { PageCommand, SiteSkill } from './page-protocol';
 import type { HarnessMessage, JsonObject, JsonValue, ToolSchema } from './runtime';
 import type { SessionLlmConfig } from './task-model';
 
-const uniqueNames = (label: string) => z.array(z.string().trim().min(1))
-  .refine(items => new Set(items).size === items.length, `${label} entries must be unique`);
-
 export const CapabilityScopeSchema = z.enum(['task', 'workspace', 'site', 'global']);
 
 export const CapabilityProviderSchema = z.enum(
-  ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web'],
+  ['page', 'workspace', 'site-skill', 'storage', 'llm', 'mcp', 'web', 'runtime'],
   { error: issue => `unknown capability provider "${String(issue.input)}"` },
 );
 export type CapabilityProvider = z.infer<typeof CapabilityProviderSchema>;
@@ -29,15 +26,7 @@ export const CapabilityManifestSchema = z.object({
   title: z.string().trim().min(1, 'capability manifest title is required'),
   description: z.string().trim().min(1).optional(),
   scope: CapabilityScopeSchema,
-  contributes: z.object({
-    tools: uniqueNames('contributes.tools').optional(),
-    panels: uniqueNames('contributes.panels').optional(),
-    prompts: uniqueNames('contributes.prompts').optional(),
-    services: uniqueNames('contributes.services').optional(),
-    workflows: uniqueNames('contributes.workflows').optional(),
-  }),
   requires: z.object({
-    capabilities: uniqueNames('requires.capabilities').optional(),
     providers: z.array(CapabilityProviderSchema)
       .refine(items => new Set(items).size === items.length, 'requires.providers entries must be unique')
       .optional(),
@@ -87,7 +76,6 @@ export type StorageCapabilityRequest =
 export type LlmCapabilityRequest =
   | { provider: 'llm'; action: 'status'; contextId?: string; input: Record<string, never> }
   | { provider: 'llm'; action: 'models'; contextId?: string; input: { profileId: string } }
-  | { provider: 'llm'; action: 'cancel'; contextId?: string; input: { requestId: string } }
   | {
       provider: 'llm';
       action: 'complete';
@@ -106,6 +94,7 @@ export type WebCapabilityRequest =
   | { provider: 'web'; action: 'open'; contextId?: string; input: { url: string; maxChars?: number } };
 
 export type CapabilityRequest =
+  | { provider: 'runtime'; action: 'authorize'; input: { manifest: CapabilityManifest } }
   | PageCapabilityRequest
   | WorkspaceCapabilityRequest
   | SiteSkillCapabilityRequest
@@ -118,6 +107,7 @@ export interface CapabilityEnvelope<T = CapabilityRequest> {
   channel: 'harness-broker-v1';
   session: string;
   requestId: string;
+  deadline?: number;
   principal: CapabilityPrincipal;
   payload: T;
 }

@@ -128,6 +128,7 @@
           <article v-for="artifact in activeArtifacts" :key="artifact.id" class="artifact-row">
             <div><n-tag size="tiny" :bordered="false">{{ artifact.kind }}</n-tag><strong>{{ artifact.title }}</strong></div>
             <small>v{{ artifact.version }} · {{ artifact.status }} · {{ artifact.verification.status }}</small><code v-if="artifact.contentPath">{{ artifact.contentPath }}</code>
+            <section v-if="artifact.kind === 'report' && typeof artifact.content?.text === 'string'" class="markdown-body" v-html="renderMarkdown(artifact.content.text)"></section>
           </article>
         </div>
 
@@ -136,7 +137,7 @@
             <article v-for="card in capabilityCards" :key="card.entry.manifest.id" class="capability-row">
               <div><strong>{{ card.entry.manifest.title }}</strong><n-tag size="tiny" :bordered="false">{{ card.health.state }}</n-tag><n-tag size="tiny" :bordered="false">{{ card.policy.source }} · {{ card.policy.reload }}</n-tag></div>
               <p>{{ card.entry.manifest.scope }} scope · v{{ card.entry.manifest.version }}</p>
-              <small>{{ card.entry.contributions.tools.length }} tools · {{ card.entry.contributions.services.length }} services · {{ card.entry.contributions.events.length }} events</small>
+              <small>{{ card.entry.contributions.tools.length }} tools · {{ card.entry.contributions.panels.length }} panels · {{ card.entry.contributions.prompts.length }} prompts</small>
               <div v-if="card.entry.manifest.scope === 'task'" class="capability-controls">
                 <n-button size="tiny" secondary @click="disableCapability(card.entry.manifest.id)">停用</n-button>
                 <n-popconfirm positive-text="删除" negative-text="取消" @positive-click="removeCapability(card.entry.manifest.id)">

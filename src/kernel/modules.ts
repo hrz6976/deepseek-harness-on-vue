@@ -7,6 +7,7 @@ import * as Vue from 'vue';
 import * as Cordis from '@deepseek-ai/cordis';
 import * as Zod from 'zod';
 import * as sdk from '@/sdk';
+import type { PublicPluginModule } from '@/shared/plugin-modules';
 
 let pi: typeof import('@earendil-works/pi-ai') | undefined;
 let openaiCompletions: typeof import('@earendil-works/pi-ai/api/openai-completions.lazy') | undefined;
@@ -25,7 +26,7 @@ export const modules = Object.freeze({
     return loaded('@earendil-works/pi-ai/api/openai-completions.lazy', openaiCompletions);
   },
   '@harness/sdk': sdk,
-});
+} satisfies Record<PublicPluginModule, unknown>);
 
 export async function preparePluginModules(source: string): Promise<void> {
   const imports = (specifier: string) => new RegExp(

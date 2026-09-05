@@ -34,11 +34,34 @@ test('sandbox broker aborts a silent LLM stream immediately and forwards cancell
 
     controller.abort();
     assert.deepEqual(await next, { value: undefined, done: true });
-    const cancellation = sent.find(message => (message as CapabilityEnvelope).payload?.provider === 'llm'
-      && (message as CapabilityEnvelope).payload?.action === 'cancel') as CapabilityEnvelope;
-    assert.equal(cancellation.payload.provider === 'llm' && cancellation.payload.action === 'cancel'
-      ? cancellation.payload.input.requestId
-      : null, completion.requestId);
+    const cancellation = sent.find(message => (message as { cancel?: boolean }).cancel) as { requestId: string };
+    assert.equal(cancellation.requestId, completion.requestId);
+  } finally {
+    browserWindow.close();
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('ordinary broker requests cancel immediately and late replies cannot revive them', async () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const browserWindow = new Window({ url: 'chrome-extension://test/sandbox.html' });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: browserWindow });
+  try {
+    const sent: unknown[] = [];
+    const broker = createSandboxBroker({ postMessage: message => sent.push(message) } as never);
+    broker.handleMessage({ channel: 'harness-shell-v1', type: 'broker-session', token: 'session-token-with-at-least-32-bytes' });
+    const controller = new AbortController();
+    const result = broker.request({ provider: 'workspace', action: 'list', input: {} }, controller.signal);
+    const envelope = sent.find(message => (message as CapabilityEnvelope).payload) as CapabilityEnvelope;
+    controller.abort();
+    await assert.rejects(result, /abort/i);
+    assert.ok(sent.some(message => (message as { cancel?: boolean; requestId?: string }).cancel && (message as { requestId: string }).requestId === envelope.requestId));
+    broker.handleMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, ok: true, value: 'late' });
+    const next = broker.request({ provider: 'workspace', action: 'list', input: {} });
+    const nextEnvelope = sent.at(-1) as CapabilityEnvelope;
+    broker.handleMessage({ channel: 'harness-broker-v1', requestId: nextEnvelope.requestId, ok: true, value: { 'file.txt': 'ok' } });
+    assert.deepEqual(await next, { 'file.txt': 'ok' });
   } finally {
     browserWindow.close();
     if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);

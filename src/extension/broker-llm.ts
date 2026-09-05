@@ -1,4 +1,4 @@
-import { Service, type Context } from '@deepseek-ai/cordis';
+import { Service, type Context, type Plugin } from '@deepseek-ai/cordis';
 import { ref } from 'vue';
 import { modelLimitsFor } from '@/shared/model-limits';
 import type { LlmRequest, LlmService, LlmStreamEvent } from '@/shared/runtime';
@@ -22,12 +22,14 @@ class BrokerLlmRuntime extends Service implements LlmService {
       for await (const value of this.ctx.broker.stream({
         provider: 'llm',
         action: 'complete',
-        input: { request: {
-          systemPrompt: request.systemPrompt,
-          messages: request.messages,
-          tools: request.tools,
-          sessionConfig: request.sessionConfig,
-        } },
+        input: {
+          request: {
+            systemPrompt: request.systemPrompt,
+            messages: request.messages,
+            tools: request.tools,
+            sessionConfig: request.sessionConfig,
+          }
+        },
       }, request.signal)) {
         const event = value as unknown as LlmStreamEvent;
         if (event.type === 'done' || event.type === 'update' || event.type === 'error') yield event;
@@ -40,10 +42,10 @@ class BrokerLlmRuntime extends Service implements LlmService {
   }
 }
 
-export const brokerLlmPlugin = {
-  name: 'broker-llm',
+export default {
+  name: 'llm',
   inject: ['broker'],
   apply(ctx: Context) {
     new BrokerLlmRuntime(ctx);
   },
-};
+} satisfies Plugin.Object;

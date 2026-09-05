@@ -29,16 +29,14 @@ import {
   World,
 } from '@vicons/tabler';
 import { useService } from '@/kernel/services';
-import { useBusOn, useToolGuard } from '@/kernel/bus';
-import { usePromptSection } from '@/kernel/contrib';
 import { UiContributionsHost } from '@/kernel/ui';
 import { modules } from '@/kernel/modules';
 import { startHarnessRuntime } from '@/kernel/runtime-supervisor';
 import { cordisContextKey, runtime } from '@/kernel/cordis';
-import { brokerFsPlugin } from './broker-fs';
-import { brokerLlmPlugin } from './broker-llm';
-import { modelProfilesPlugin } from './model-profiles';
-import { guardPageAgentTool, PAGE_AGENT_BOUNDARY_PROMPT } from './agent-policy';
+import brokerFsPlugin from './broker-fs';
+import brokerLlmPlugin from './broker-llm';
+import modelProfilesPlugin from './model-profiles';
+import pagePolicyPlugin from './page-policy';
 import { canSubmitPageMessage, takeAnnotationSubmission } from './annotation-context';
 import { SandboxComposer } from './sandbox-composer';
 import { createSandboxBroker } from './sandbox-broker';
@@ -48,9 +46,8 @@ import defaults from 'virtual:plugin-defaults';
 import {
   type Annotation,
   type PageEvent,
-  type PageSnapshot,
 } from '@/shared/page-protocol';
-import { MAX_MESSAGE_ANNOTATIONS, type TaskRuntimeService, type ToolCall } from '@/shared/runtime';
+import { MAX_MESSAGE_ANNOTATIONS, type ToolCall } from '@/shared/runtime';
 import type { TaskContext } from '@/shared/task-model';
 import { appendTimeline, displayMessageText, useTimelineView } from './sandbox-timeline';
 import { renderMarkdown } from '@/shared/markdown';
@@ -73,14 +70,11 @@ const appMenuOptions = [
 ];
 
 const sandboxBroker = createSandboxBroker(parent);
-const broker = sandboxBroker.request;
 
 const runtimeReady = ref(false);
 const runtimeFailure = ref('');
 const annotations = ref<Annotation[]>([]);
-const REQUIRED_RUNTIME_SERVICES = ['fs', 'llm', 'modelProfiles', 'tools', 'prompt', 'loop', 'task'] as const;
 let siteAuthorizedHandler: ((origin: string) => void) | null = null;
-let workspaceChangedHandler: (() => void) | null = null;
 let lastSnapshotSignature = '';
 let lastSnapshotAt = 0;
 
@@ -89,7 +83,7 @@ window.addEventListener('message', event => {
   if (sandboxBroker.handleMessage(event.data)) return;
   const shellMessage = event.data as { channel?: unknown; type?: unknown; origin?: unknown };
   if (shellMessage.channel === 'harness-shell-v1' && shellMessage.type === 'workspace-changed') {
-    workspaceChangedHandler?.();
+    runtime.emit('workspace/invalidated');
     return;
   }
   if (shellMessage.channel === 'harness-shell-v1' && shellMessage.type === 'site-authorized-and-read' && typeof shellMessage.origin === 'string') {
@@ -118,10 +112,7 @@ const App = {
     const actionBusy = ref(false);
     const loopService = useService('loop');
     const taskService = useService('task');
-    const fsService = useService('fs');
-    const managerService = useService('manager');
-    let workspaceRefreshTimer: number | null = null;
-    const unsavedPagePatch = ref(false);
+    const pageSession = useService('pageSession');
     const timelineView = useTimelineView(
       () => taskService.value?.messages ?? [],
       () => taskService.value?.activeTaskId.value,
@@ -130,57 +121,25 @@ const App = {
     const busy = computed(() => actionBusy.value || running.value);
     const runtimeLabel = computed(() => runtimeFailure.value ? '异常' : runtimeReady.value ? '就绪' : '启动中');
     const inspectorState = useSandboxInspector(
-      taskService, loopService, fsService, managerService, broker, pushError,
+      pushError,
       () => parent.postMessage({ channel: 'harness-shell-v1', type: 'open-options' }, '*'),
     );
-    usePromptSection({ name: 'extension-page-boundary', order: -100, text: PAGE_AGENT_BOUNDARY_PROMPT });
-    usePromptSection({
-      name: 'extension-page-persistence',
-      order: -90,
-      text: () => unsavedPagePatch.value
-        ? 'The current host-page customization is still temporary. Let the user inspect and refine it across turns. End each refinement with one short question: continue adjusting, or if satisfied, install it as a page plugin? Call page_recipe_save only after explicit approval to persist.'
-        : '',
-    });
-    useToolGuard(guardPageAgentTool);
-    useBusOn('tools/post-execute', async (
-      event: { name: string; result: string; args?: Record<string, unknown> },
-      next: (value: { name: string; result: string; args?: Record<string, unknown> }) => unknown,
-    ) => {
-      const succeeded = !String(event.result).startsWith('Error:');
-      if (event.name === 'page_patch_apply' && succeeded) unsavedPagePatch.value = true;
-      if ((event.name === 'page_recipe_save' || event.name === 'page_patch_revert') && succeeded) unsavedPagePatch.value = false;
-      return next(event);
-    });
-    useBusOn('page/event', (event: PageEvent) => { void inspectorState.recordPageArtifact(event); });
-
     async function snapshot(): Promise<void> {
       await run(async () => {
-        const result = await broker({ provider: 'page', action: 'command', input: { command: { type: 'page/snapshot', options: { maxNodes: 400, maxDepth: 8 } } } });
-        const pageResult = result as { ok?: boolean; value?: PageSnapshot; error?: string };
-        if (!pageResult.ok || !pageResult.value) throw new Error(pageResult.error ?? 'Snapshot failed.');
-        inspectorState.currentPageUrl.value = pageResult.value.scope.url;
-        const nodeCount = countNodes(pageResult.value.nodes);
-        const task = taskService.value;
-        if (task) {
-          await task.addContext({
-            kind: 'page', title: pageResult.value.title || new URL(pageResult.value.scope.url).host,
-            locator: pageResult.value.scope.url,
-            metadata: { tabId: pageResult.value.scope.tabId, frameId: pageResult.value.scope.frameId, nodeCount, truncated: pageResult.value.truncated },
-          });
-          await task.appendEvent('context/read', { kind: 'page', url: pageResult.value.scope.url, nodeCount });
-        }
-        const signature = `${pageResult.value.scope.url}\n${pageResult.value.title}\n${nodeCount}`;
+        const { page, nodeCount } = await pageSession.value!.snapshot();
+        inspectorState.currentPageUrl.value = page.scope.url;
+        const signature = `${page.scope.url}\n${page.title}\n${nodeCount}`;
         const now = Date.now();
         if (signature === lastSnapshotSignature && now - lastSnapshotAt < 2_000) return null;
         lastSnapshotSignature = signature;
         lastSnapshotAt = now;
-        return `已读取「${pageResult.value.title}」：${nodeCount} 个节点${pageResult.value.truncated ? '（已截断）' : ''}。`;
+        return `已读取「${page.title}」：${nodeCount} 个节点${page.truncated ? '（已截断）' : ''}。`;
       });
     }
 
     async function picker(): Promise<void> {
       await run(async () => {
-        await broker({ provider: 'page', action: 'command', input: { command: { type: 'page/picker-start' } } });
+        await pageSession.value!.startPicker();
         return '元素选择器已开启；点击页面元素即可添加批注。';
       });
     }
@@ -204,29 +163,14 @@ const App = {
       }
       const submittedAnnotations = takeAnnotationSubmission(annotations.value);
       timelineView.resumeTimelineFollow();
-      const task = taskService.value;
-      const taskId = task?.activeTask()?.id;
       actionBusy.value = true;
       try {
-        if (task && taskId) {
-          if (task.activeTask()?.title === 'New task') await task.renameTask(task.activeTask()!.id, text.slice(0, 48));
-          await task.setStatus(taskId, 'running');
-          await task.appendEvent('task/run-started', { prompt: text });
-        }
         await loop.run(text, { annotations: submittedAnnotations });
-        if (task && taskId) settleTaskRun(task, taskId, 'idle', 'task/run-finished');
       } catch (error) {
-        if (task && taskId) settleTaskRun(task, taskId, 'failed', 'task/run-failed');
         pushError(`发送失败：${error instanceof Error ? error.message : String(error)}`);
       } finally {
         actionBusy.value = false;
       }
-    }
-
-    function settleTaskRun(task: TaskRuntimeService, taskId: string, status: 'idle' | 'failed', event: string): void {
-      void task.setStatus(taskId, status)
-        .then(() => task.activeTask()?.id === taskId ? task.appendEvent(event) : undefined)
-        .catch(error => console.warn(`[harness] ${event} was not persisted`, error));
     }
 
     function stop(): void {
@@ -250,29 +194,10 @@ const App = {
       }
     }
 
-    const handleSiteAuthorized = (_origin: string): void => {
-      void snapshot();
-    };
-    const handleWorkspaceChanged = (): void => {
-      if (workspaceRefreshTimer != null) window.clearTimeout(workspaceRefreshTimer);
-      workspaceRefreshTimer = window.setTimeout(() => {
-        workspaceRefreshTimer = null;
-        // `useService()` resolves through this component's trusted shell
-        // Context. Reading the raw global service map here would call the
-        // broker as Cordis <root> and correctly fail principal validation.
-        void (async () => {
-          await fsService.value?.refresh?.();
-          if (loopService.value?.running.value) return;
-          await taskService.value?.refresh();
-        })().catch(error => pushError(`Workspace 刷新失败：${error instanceof Error ? error.message : String(error)}`));
-      }, 100);
-    };
+    const handleSiteAuthorized = () => { void snapshot(); };
     siteAuthorizedHandler = handleSiteAuthorized;
-    workspaceChangedHandler = handleWorkspaceChanged;
     onUnmounted(() => {
       if (siteAuthorizedHandler === handleSiteAuthorized) siteAuthorizedHandler = null;
-      if (workspaceChangedHandler === handleWorkspaceChanged) workspaceChangedHandler = null;
-      if (workspaceRefreshTimer != null) window.clearTimeout(workspaceRefreshTimer);
     });
 
     return {
@@ -287,9 +212,6 @@ const App = {
   template: appTemplate,
 };
 
-const runtimeDefaults = Object.fromEntries(Object.entries(defaults)
-  .filter(([name]) => !['chat', 'files', 'preview', 'settings', 'syslog'].includes(name)));
-
 globalThis.__harness = Object.freeze({
   modules,
 });
@@ -297,19 +219,19 @@ globalThis.__harness = Object.freeze({
 async function initializeRuntime(): Promise<void> {
   const taskScopeHost = await sandboxBroker.session;
   const runtime = startHarnessRuntime({
-    defaults: runtimeDefaults,
+    defaults,
     taskScope: taskScopeHost,
     infrastructure: [
-      { name: 'broker', plugin: sandboxBroker.plugin },
-      { name: 'workspace', plugin: brokerFsPlugin },
-      { name: 'model-profiles', plugin: modelProfilesPlugin },
-      { name: 'llm', plugin: brokerLlmPlugin },
+      sandboxBroker.plugin,
+      brokerFsPlugin,
+      modelProfilesPlugin,
+      brokerLlmPlugin,
+      pagePolicyPlugin,
     ],
-    requiredServices: [...REQUIRED_RUNTIME_SERVICES],
+    requiredServices: ['llm', 'modelProfiles'],
   });
   const shellContext = await runtime.shellContext;
   await runtime.ready;
-  if (missingRuntimeServices().length) throw new Error(describeMissingRuntimeServices());
   const app = Vue.createApp(App);
   app.component('UiContributionsHost', UiContributionsHost);
   app.provide(cordisContextKey, shellContext);
@@ -334,14 +256,6 @@ function reportBootFailure(error: unknown): void {
     type: 'boot-error',
     error: runtimeFailure.value,
   }, '*');
-}
-
-function describeMissingRuntimeServices(): string {
-  return `核心服务未挂载：${missingRuntimeServices().join('、')}`;
-}
-
-function missingRuntimeServices(): string[] {
-  return REQUIRED_RUNTIME_SERVICES.filter(name => !runtime.reflect.get(name));
 }
 
 function summarizeEvent(event: PageEvent): string | null {
@@ -374,10 +288,6 @@ function updateAnnotationContext(event: PageEvent): boolean {
     return false;
   }
   return true;
-}
-
-function countNodes(nodes: PageSnapshot['nodes']): number {
-  return nodes.reduce((sum, node) => sum + 1 + countNodes(node.children ?? []), 0);
 }
 
 const CONTEXT_KIND_LABELS: Record<TaskContext['kind'], string> = {

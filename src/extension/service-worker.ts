@@ -1,7 +1,8 @@
+import { RequestLifecycle } from '@/shared/request-lifecycle';
 import OpenAI from 'openai';
 import { ZodError } from 'zod';
 import contentScriptFile from './content-script?script&iife';
-import { parseCapabilityEnvelope } from '@/shared/broker-schema';
+import { BrokerCancellationSchema, parseCapabilityEnvelope } from '@/shared/broker-schema';
 import { userMessageTextForModel } from '@/shared/message-annotations';
 import { modelLimitsFor } from '@/shared/model-limits';
 import type { CapabilityEnvelope, CapabilityRequest, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
@@ -9,13 +10,10 @@ import type { PageCommand, PageCommandResult, PageEvent } from '@/shared/page-pr
 import { toJsonValue, type JsonValue, type LlmStreamEvent } from '@/shared/runtime';
 import { OpenAiStreamAccumulator, type OpenAiStreamChunk } from './openai-stream';
 import {
-  LEGACY_LLM_CONFIG_KEY,
-  LLM_PROFILES_KEY,
-  normalizeLlmProfiles,
+  readLlmProfiles,
   resolveLlmProfile,
   summarizeLlmProfiles,
   type StoredLlmProfile,
-  type StoredLlmProfiles,
 } from './llm-profiles';
 import { normalizeSessionLlmConfig } from '@/shared/task-model';
 import { McpHost } from './mcp-host';
@@ -35,7 +33,7 @@ type DeepSeekThinkingParams = {
   reasoning_effort?: 'low' | 'high' | 'max';
 };
 const ports = new Map<chrome.runtime.Port, number>();
-const activeLlmStreams = new Map<string, AbortController>();
+const requestsByPort = new WeakMap<chrome.runtime.Port, RequestLifecycle>();
 const mcpHost = new McpHost();
 const capabilityHost = new TrustedCapabilityHost();
 const siteSkills = createSiteSkillRuntime(executePageCommand, emitPageEvent);
@@ -45,10 +43,10 @@ capabilityHost.register('workspace', {
   request: async () => { throw new Error('Workspace requests must be handled by the trusted side-panel provider.'); },
 });
 capabilityHost.register('page', {
-  request: (request, context) => executePageCommand(request.input.command, context.tabId),
+  request: (request, context) => executePageCommand(request.input.command, context.tabId, context.signal),
 });
 capabilityHost.register('site-skill', {
-  request: (request, context) => siteSkills.request(request, context.tabId),
+  request: (request, context) => siteSkills.request(request, context.tabId, context.signal),
 });
 capabilityHost.register('storage', {
   request: async request => {
@@ -68,12 +66,8 @@ capabilityHost.register('storage', {
   },
 });
 capabilityHost.register('llm', {
-  request: async (request, context) => {
+  request: async request => {
     if (request.action === 'complete') throw new Error('LLM completion requests use the streaming provider path.');
-    if (request.action === 'cancel') {
-      cancelLlmStream(context.tabId, request.input.requestId);
-      return null;
-    }
     const config = await readLlmProfiles();
     if (request.action === 'models') {
       if (!config) throw new Error('LLM 尚未配置。');
@@ -91,12 +85,12 @@ capabilityHost.register('llm', {
   stream: (request, context) => streamLlmCapability(request, context.signal),
 });
 capabilityHost.register('mcp', {
-  request: (request, context) => mcpHost.request(request, context.tabId),
+  request: (request, context) => mcpHost.request(request, context.tabId, context.signal),
 });
 capabilityHost.register('web', {
   request: async (request, context) => toJsonValue(request.action === 'search'
-    ? await searchWebInBackground(context.tabId, request.input.query, request.input.limit)
-    : await openWebPageInBackground(context.tabId, request.input.url, request.input.maxChars)),
+    ? await searchWebInBackground(context.tabId, request.input.query, request.input.limit, context.signal)
+    : await openWebPageInBackground(context.tabId, request.input.url, request.input.maxChars, context.signal)),
 });
 
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
@@ -108,11 +102,10 @@ chrome.runtime.onConnect.addListener(port => {
   const tabId = parseSidePanelPortName(port.name);
   if (tabId == null) return;
   ports.set(port, tabId);
+  requestsByPort.set(port, new RequestLifecycle());
   port.onDisconnect.addListener(() => {
     ports.delete(port);
-    for (const [key, controller] of activeLlmStreams) {
-      if (key.startsWith(`${tabId}:`)) controller.abort();
-    }
+    requestsByPort.get(port)?.close();
   });
   port.onMessage.addListener(message => {
     void replyToPort(port, tabId, message);
@@ -207,71 +200,37 @@ async function configureTabPanel(tabId: number, url: string | undefined): Promis
 }
 
 async function replyToPort(port: chrome.runtime.Port, tabId: number, value: unknown): Promise<void> {
+  const requests = requestsByPort.get(port)!;
+  const cancellation = BrokerCancellationSchema.safeParse(value);
+  if (cancellation.success) { requests.cancel(cancellation.data.requestId); return; }
   let envelope: CapabilityEnvelope;
+  try { envelope = parseCapabilityEnvelope(value); }
+  catch (error) { port.postMessage(response(readRequestId(value), false, undefined, formatError(error))); return; }
+  const { requestId, payload, principal } = envelope;
+  const streaming = payload.provider === 'llm' && payload.action === 'complete';
+  const send = (message: CapabilityResponse | CapabilityStreamChunk) => { if (ports.has(port)) port.postMessage(message); };
   try {
-    envelope = parseCapabilityEnvelope(value);
-  } catch (error) {
-    const requestId = readRequestId(value);
-    port.postMessage(response(requestId, false, undefined, formatError(error)));
-    return;
-  }
-
-  if (envelope.payload.provider === 'llm' && envelope.payload.action === 'complete') {
-    const controller = new AbortController();
-    const streamKey = llmStreamKey(tabId, envelope.requestId);
-    activeLlmStreams.set(streamKey, controller);
-    // Confirm that the envelope crossed the side-panel/service-worker boundary.
-    // This is transport acknowledgement only; it is not a model stream event.
-    port.postMessage({
-      channel: 'harness-broker-v1',
-      requestId: envelope.requestId,
-      stream: true,
-      done: false,
-    } satisfies CapabilityStreamChunk);
-    let receivedModelEvent = false;
-    try {
-      for await (const value of capabilityHost.stream(envelope.payload, {
-        tabId, principal: envelope.principal, signal: controller.signal,
-      })) {
-        receivedModelEvent = true;
+    const signal = requests.start(requestId, envelope.deadline);
+    const context = { tabId, principal, signal };
+    if (streaming) {
+      send({ channel: 'harness-broker-v1', requestId, stream: true, done: false });
+      for await (const value of capabilityHost.stream(payload, context)) {
+        signal.throwIfAborted();
         const event = value as unknown as LlmStreamEvent;
-        const terminal = event.type === 'done' || event.type === 'error';
-        port.postMessage({
-          channel: 'harness-broker-v1',
-          requestId: envelope.requestId,
-          stream: true,
-          done: terminal,
-          value,
-        } satisfies CapabilityStreamChunk);
-        if (terminal) return;
+        const done = event.type === 'done' || event.type === 'error';
+        send({ channel: 'harness-broker-v1', requestId, stream: true, done, value });
+        if (done) return;
       }
-      port.postMessage({ channel: 'harness-broker-v1', requestId: envelope.requestId, stream: true, done: true } satisfies CapabilityStreamChunk);
-    } catch (error) {
-      if (controller.signal.aborted) {
-        port.postMessage({
-          channel: 'harness-broker-v1', requestId: envelope.requestId, stream: true, done: true,
-        } satisfies CapabilityStreamChunk);
-        return;
-      }
-      port.postMessage({
-        channel: 'harness-broker-v1',
-        requestId: envelope.requestId,
-        stream: true,
-        done: true,
-        error: `${receivedModelEvent ? 'LLM stream failed' : 'LLM request failed before the first response chunk'}: ${formatError(error)}`,
-      } satisfies CapabilityStreamChunk);
-    } finally {
-      if (activeLlmStreams.get(streamKey) === controller) activeLlmStreams.delete(streamKey);
+      send({ channel: 'harness-broker-v1', requestId, stream: true, done: true });
+    } else {
+      const result = await capabilityHost.request(payload, context);
+      signal.throwIfAborted();
+      send(response(requestId, true, result));
     }
-    return;
-  }
-
-  try {
-    const result = await capabilityHost.request(envelope.payload, { tabId, principal: envelope.principal });
-    port.postMessage(response(envelope.requestId, true, result));
   } catch (error) {
-    port.postMessage(response(envelope.requestId, false, undefined, formatError(error)));
-  }
+    send(streaming ? { channel: 'harness-broker-v1', requestId, stream: true, done: true, error: formatError(error) }
+      : response(requestId, false, undefined, formatError(error)));
+  } finally { requests.finish(requestId); }
 }
 
 function emitPageEvent(event: PageEvent): void {
@@ -379,32 +338,25 @@ function openAiClient(profile: StoredLlmProfile): OpenAI {
   });
 }
 
-function cancelLlmStream(tabId: number, requestId: string): void {
-  activeLlmStreams.get(llmStreamKey(tabId, requestId))?.abort();
-}
-
-const llmStreamKey = (tabId: number, requestId: string) => `${tabId}:${requestId}`;
-
-async function readLlmProfiles(): Promise<StoredLlmProfiles | null> {
-  const values = await chrome.storage.local.get([LLM_PROFILES_KEY, LEGACY_LLM_CONFIG_KEY]);
-  return normalizeLlmProfiles(values[LLM_PROFILES_KEY], values[LEGACY_LLM_CONFIG_KEY]);
-}
 
 function assertPublicStorageKeys(keys: string[]): void {
-  if (keys.some(key => key.startsWith('secrets.'))) {
+  if (keys.some(key => key.startsWith('secrets.') || key === 'harness.capability-grants')) {
     throw new Error('Sandbox code cannot access trusted secret storage.');
   }
 }
 
-async function executePageCommand(command: PageCommand, tabId: number): Promise<JsonValue> {
+async function executePageCommand(command: PageCommand, tabId: number, signal?: AbortSignal): Promise<JsonValue> {
+  signal?.throwIfAborted();
   const tab = await chrome.tabs.get(tabId);
   if (!isInspectableUrl(tab.url)) throw new Error('This tab is no longer an inspectable http(s) page.');
-  if (command.type === 'page/eval') return siteSkills.evaluate(tabId, command.code, command.world);
+  signal?.throwIfAborted();
+  if (command.type === 'page/eval') return siteSkills.evaluate(tabId, command.code, command.world, signal);
 
   await chrome.scripting.executeScript({
     target: { tabId },
     files: [contentScriptFile],
   });
+  signal?.throwIfAborted();
   const result = await chrome.tabs.sendMessage(tabId, {
     channel: 'harness-page-v1',
     command,

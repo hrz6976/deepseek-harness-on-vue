@@ -6,14 +6,50 @@ import {
   normalizeLlmProfiles,
   resolveLlmProfile,
   summarizeLlmProfiles,
+  readLlmProfiles,
+  saveLlmProfiles,
+  LLM_PROFILES_KEY,
 } from '@/extension/llm-profiles';
-import { modelProfilesPlugin } from '@/extension/model-profiles';
+import modelProfilesPlugin from '@/extension/model-profiles';
 import { createBrokerPlugin } from '@/kernel/broker';
 import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import type { ModelProfilesService, UiContribution } from '@/shared/runtime';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
 afterEach(async () => { await cleanupTestRuntime(); });
+
+test('trusted profile persistence keeps drafts on denial or write failure and is shared with model reads', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'chrome');
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'chrome', previous); else Reflect.deleteProperty(globalThis, 'chrome'); });
+  const values: Record<string, unknown> = {};
+  let approved = false;
+  let permissionRequests = 0;
+  let failWrite = false;
+  Object.defineProperty(globalThis, 'chrome', { configurable: true, value: {
+    permissions: { async request() { permissionRequests++; return approved; } },
+    storage: { local: {
+      async get() { return values; },
+      async set(next: Record<string, unknown>) { if (failWrite) throw new Error('disk full'); Object.assign(values, next); },
+    } },
+  } });
+  const config = { version: 1 as const, defaultProfileId: 'deepseek', profiles: [createLlmProfilePreset('deepseek')] };
+  const drafts = { deepseek: 'test-key' };
+  for (const profiles of [[], [config.profiles[0], config.profiles[0]], [{ ...config.profiles[0], baseURL: 'ftp://example.test' }]]) {
+    await assert.rejects(saveLlmProfiles({ ...config, profiles }, drafts), /Provider 配置/);
+  }
+  assert.equal(permissionRequests, 0);
+  await assert.rejects(saveLlmProfiles(config, drafts), /网络权限/);
+  assert.equal(values[LLM_PROFILES_KEY], undefined);
+  approved = true;
+  failWrite = true;
+  await assert.rejects(saveLlmProfiles(config, drafts), /disk full/);
+  assert.equal(drafts.deepseek, 'test-key');
+  assert.equal(config.profiles[0]!.apiKey, '');
+  failWrite = false;
+  const saved = await saveLlmProfiles(config, drafts);
+  assert.equal(saved.profiles[0]!.apiKey, 'test-key');
+  assert.deepEqual(await readLlmProfiles(), saved);
+});
 
 test('OpenCode Go preset targets its OpenAI-compatible chat endpoint', () => {
   assert.deepEqual(createLlmProfilePreset('opencode-go'), {
@@ -71,10 +107,10 @@ test('Cordis model profile system service owns the sanitized reactive catalog', 
         profiles: [{ id: 'opencode-go', name: 'OpenCode Go', defaultModel: 'deepseek-v4-flash' }],
       };
     },
-    async *stream() {},
+    async *stream() { },
   })));
   await provideTestService('ui', {
-    register(definition: UiContribution) { contribution = definition; return async () => {}; },
+    register(definition: UiContribution) { contribution = definition; return async () => { }; },
     listState: () => [],
     readState: () => null,
   });

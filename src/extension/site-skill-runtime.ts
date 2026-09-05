@@ -34,9 +34,10 @@ export function createSiteSkillRuntime(
       : [];
   }
 
-  async function save(skill: SiteSkill): Promise<SiteSkill> {
+  async function save(skill: SiteSkill, signal?: AbortSignal): Promise<SiteSkill> {
     return queueUserScriptMutation(async () => {
       const skills = await list();
+      signal?.throwIfAborted();
       const existing = skills.find(item => item.id === skill.id);
       const saved: SiteSkill = isSiteUserScript(skill)
         ? { ...skill, createdAt: existing?.createdAt ?? skill.createdAt, updatedAt: Date.now() }
@@ -61,9 +62,10 @@ export function createSiteSkillRuntime(
     });
   }
 
-  async function remove(id: string, tabId: number): Promise<null> {
+  async function remove(id: string, tabId: number, signal?: AbortSignal): Promise<null> {
     return queueUserScriptMutation(async () => {
       const skills = await list();
+      signal?.throwIfAborted();
       const existing = skills.find(skill => skill.id === id);
       const nextSkills = skills.filter(skill => skill.id !== id);
       if (existing && isSiteUserScript(existing)) await unregisterUserScript(existing.id);
@@ -75,12 +77,13 @@ export function createSiteSkillRuntime(
     });
   }
 
-  async function apply(id: string, tabId: number): Promise<JsonValue> {
+  async function apply(id: string, tabId: number, signal?: AbortSignal): Promise<JsonValue> {
     const skill = (await list()).find(item => item.id === id);
+    signal?.throwIfAborted();
     if (!skill) throw new Error(`Recipe "${id}" does not exist.`);
     if (isSiteUserScript(skill)) {
       if (!skill.enabled) throw new Error(`User script "${id}" is disabled.`);
-      return evaluate(tabId, skill.source, 'USER_SCRIPT');
+      return evaluate(tabId, skill.source, 'USER_SCRIPT', signal);
     }
     if (!skill.operations?.length && !skill.liveRules?.length) throw new Error(`Recipe "${id}" has no declarative operations or live rules.`);
     const result: Record<string, JsonValue> = {};
@@ -97,12 +100,12 @@ export function createSiteSkillRuntime(
     return result;
   }
 
-  async function request(request: SiteSkillRequest, tabId: number): Promise<JsonValue> {
+  async function request(request: SiteSkillRequest, tabId: number, signal?: AbortSignal): Promise<JsonValue> {
     switch (request.action) {
       case 'list': return toJsonValue(await list());
       case 'inspect': return inspectUserScriptRegistration(request.input.id);
       case 'save': {
-        const saved = await save(request.input.skill);
+        const saved = await save(request.input.skill, signal);
         if (isSiteUserScript(saved) || !saved.enabled) await removeLiveRules(saved.id, tabId);
         else if (saved.liveRules?.length) {
           await execute({
@@ -111,8 +114,8 @@ export function createSiteSkillRuntime(
         }
         return toJsonValue(saved);
       }
-      case 'remove': return remove(request.input.id, tabId);
-      case 'apply': return apply(request.input.id, tabId);
+      case 'remove': return remove(request.input.id, tabId, signal);
+      case 'apply': return apply(request.input.id, tabId, signal);
     }
   }
 
@@ -128,7 +131,7 @@ export function createSiteSkillRuntime(
     }
   }
 
-  async function evaluate(tabId: number, code: string, world: 'MAIN' | 'USER_SCRIPT'): Promise<JsonValue> {
+  async function evaluate(tabId: number, code: string, world: 'MAIN' | 'USER_SCRIPT', signal?: AbortSignal): Promise<JsonValue> {
     const api = await requireUserScriptsApi();
     if (!api.execute) throw new Error('当前 Chrome 版本不支持即时执行 User Script。');
     const executable = `(async () => {
@@ -138,6 +141,7 @@ export function createSiteSkillRuntime(
       catch { return String(value); }
     })()`;
     const wrapped = world === 'USER_SCRIPT' ? withUserScriptNetwork(executable) : executable;
+    signal?.throwIfAborted();
     const [result] = await api.execute<JsonValue>({ js: [{ code: wrapped }], target: { tabId }, world });
     if (!result) return null;
     if ('error' in result) throw new Error(result.error);

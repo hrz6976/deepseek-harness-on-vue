@@ -1,52 +1,16 @@
 import type { CapabilityPrincipal } from '@/shared/capability-protocol';
-
-export type PluginSourcePolicy = 'kernel' | 'protected' | 'editable';
-export type PluginReloadBoundary = 'turn' | 'idle' | 'restart';
-
-export interface PluginPolicy {
-  source: PluginSourcePolicy;
-  reload: PluginReloadBoundary;
-}
-
-export const PROTECTED_PLUGIN_NAMES = [
-  'llm',
-  'compaction',
-  'file-editor',
-  'workspace-tools',
-  'create-plugin',
-  'remove-plugin',
-  'capability-catalog',
-  'page',
-  'mcp',
-  'web',
-  'settings',
-] as const;
-
-/**
- * Trusted source policy. This intentionally does not live in a capability
- * manifest: editable source must never be able to grant itself editability.
- */
-const POLICIES: Readonly<Record<string, PluginPolicy>> = Object.freeze({
-  shell: { source: 'kernel', reload: 'restart' },
-  broker: { source: 'kernel', reload: 'restart' },
-  fs: { source: 'kernel', reload: 'restart' },
-  workspace: { source: 'kernel', reload: 'restart' },
-  ui: { source: 'kernel', reload: 'restart' },
-  tools: { source: 'kernel', reload: 'restart' },
-  prompt: { source: 'kernel', reload: 'restart' },
-  manager: { source: 'kernel', reload: 'restart' },
-  'task-runtime': { source: 'kernel', reload: 'restart' },
-  state: { source: 'kernel', reload: 'restart' },
-  loop: { source: 'kernel', reload: 'idle' },
-  ...Object.fromEntries(PROTECTED_PLUGIN_NAMES.map(name => [
-    name, { source: 'protected', reload: 'turn' } satisfies PluginPolicy,
-  ])),
-});
-
+import { BUILTIN_CAPABILITIES, SYSTEM_PLUGINS, RETIRED_SYSTEM_NAMES } from './builtin-plugins';
+import type { PluginSourcePolicy, PluginReloadBoundary } from './builtin-plugins';
+export type { PluginSourcePolicy, PluginReloadBoundary } from './builtin-plugins';
+export interface PluginPolicy { source: PluginSourcePolicy; reload: PluginReloadBoundary }
+export const PROTECTED_PLUGIN_NAMES = Object.keys(BUILTIN_CAPABILITIES).filter(id => BUILTIN_CAPABILITIES[id]!.source === 'protected');
 const EDITABLE_POLICY: PluginPolicy = Object.freeze({ source: 'editable', reload: 'turn' });
-
 export function pluginPolicy(name: string): PluginPolicy {
-  return POLICIES[name] ?? EDITABLE_POLICY;
+  const capability = BUILTIN_CAPABILITIES[name];
+  if (capability) return { source: capability.source, reload: capability.reload };
+  const system = SYSTEM_PLUGINS[name];
+  if (system || (RETIRED_SYSTEM_NAMES as readonly string[]).includes(name)) return { source: 'kernel', reload: system?.reload ?? 'restart' };
+  return EDITABLE_POLICY;
 }
 
 export function isPluginSourceLocked(name: string): boolean {

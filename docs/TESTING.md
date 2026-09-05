@@ -2,6 +2,12 @@
 
 Standalone and Chrome-extension verification: per-feature manual steps and expected observations.
 
+## Plugin structure regression coverage
+
+`npm run check` runs typechecking, all Node tests, the verified extension build, standalone build and host fixtures. Plugin tests cover the actual bundled sources for every catalog entry (including transitive dependency tracking), page-tool broker identity and disposal after bundling, native system `Config` defaults/validation, policy registration without a Vue tree, and the startup barrier across delayed services, workspace/task restoration and capability seeding. Existing HMR, dependency replacement, task scope, tool schema, model and DOM tests remain in the suite.
+
+These checks do not replace loading the extension in Chrome. The manual steps below cover real user gestures, Chrome permissions, provider networking and persisted extension state.
+
 ## Chrome extension smoke test
 
 ```bash
@@ -60,7 +66,7 @@ node serve.mjs 7100    # dist/ + /proxy → https://api.deepseek.com (override: 
 20. **Editable versus protected shipped capabilities.** Edit an editable shipped capability such as `.plugins/run-js.js`. Expect HMR ~300ms later, the next request to see the new schema, and the edit to survive refresh. Attempts to write/remove `.plugins/loop.js` or `.plugins/page.js`, and every direct mutation under manager-owned `.harness/...`, must fail at the workspace provider even through a custom writer capability. Protected on-demand `llm` must mount from its embedded source; create/remove/self-HMR attempts fail. Broken editable capability edits roll back exactly like scenario 6. ✅
 21. **Broken core plugin at boot → fail-soft; `?reset` recovers.** Leave syntactically broken source in `.plugins/chat.js` and refresh. Expect: boot logs the compile failure, skips chat, everything else comes up (no white page). `?reset` wipes `.plugins/`, reseeds factory sources, and strips itself from the URL; localStorage (connection config) survives; files outside `.plugins/` survive. ✅
 22. **Turn-safe HMR during a run.** Have a tool edit a mounted capability that contributes tools or waterfall hooks. Expect: the current request and its entire tool batch finish against one frozen generation; after every post-execute hook settles, the pending reload commits at `loop/safe-point`; the next internal request sees the new tools/hooks without replacing the task, broker, or loop session. A final/aborted run still flushes pending edits at `loop/idle`. (Node-tested in `tests/boot.test.ts`; manual spot-check optional.)
-23. **Provider Profile switch.** Add the OpenCode Go preset and a second OpenAI-compatible profile in extension settings. Select OpenCode Go plus `deepseek-v4-flash` for one task and the other profile for a second task. Expect each request to use the selected endpoint/key, switching to adopt the profile's default model, Stop to abort either provider through the same `llm/cancel` path, and a deleted explicitly selected profile to fail clearly rather than silently charge the default provider. Legacy `secrets.llm` settings must continue to appear as one `Default` profile.
+23. **Provider Profile switch.** Add the OpenCode Go preset and a second OpenAI-compatible profile in extension settings. Select OpenCode Go plus `deepseek-v4-flash` for one task and the other profile for a second task. Expect each request to use the selected endpoint/key, switching to adopt the profile's default model, Stop to abort either provider through the same request-ID cancellation path, and a deleted explicitly selected profile to fail clearly rather than silently charge the default provider. Legacy `secrets.llm` settings must continue to appear as one `Default` profile.
 
 ## Ported invariants (do not silently drop)
 
@@ -79,7 +85,16 @@ node serve.mjs 7100    # dist/ + /proxy → https://api.deepseek.com (override: 
 - Plugin imports are pinned to the public registry (`vue`, Cordis, Zod, pi-ai, `@harness/sdk`); kernel/shared and cross-plugin imports fail loud at compile (`compile.js`, `modules.js`).
 - Contribution services are Cordis services. Caller-context tracing makes every `ctx.tools/prompt/ui.register()` effect belong to the calling Fiber, not the registry provider (`tools.js`, `prompt.js`, `ui.js`).
 - Hot reloads never remount contributors inside an LLM request or tool/hook batch. Pending source commits at the next `loop/safe-point`, after all post-execute hooks settle, and the next request takes a fresh tool snapshot; `loop/idle` remains the terminal fallback (`manager.ts`, `loop.ts`).
-- `llm` is protected and seeded but `autoMount: false`; settings mounts its trusted embedded source via `manager.mount('llm', { cfg })`, Cordis passes config to `apply(ctx, config)`, and `manager.unmount` revokes the service without deleting the protected source (`manager.ts`).
+- `llm` is protected and seeded but `autoMount: false`; the standalone modelConnection service mounts its trusted embedded source via `manager.mount('llm', { cfg })`, Cordis passes config to `apply(ctx, config)`, and `manager.unmount` revokes the service without deleting the protected source (`manager.ts`).
 - There is no persisted source-format gate while the project is pre-release. Corrupt editable plugin files fail soft and can be cleaned up via `remove_plugin` even when not running; protected drafts are restored from embedded source (`manager.ts`).
 - Standalone API key: localStorage only, closure-captured in the llm plugin. Extension Provider Profile keys: trusted `chrome.storage.local` keys under `secrets.*`. Neither is exposed through service objects, broker status, sandbox storage, page messages, or OPFS.
 - Session reset keeps `.plugins/` (chat.js) — plugins survive "Clear session & files".
+
+## Core rewrite regression suite
+
+`core-lifecycle.test.ts`, `sidepanel-broker.test.ts`, `runtime-restore.test.ts`, `task-store.test.ts`, `sandbox-broker.test.ts` and `boot.test.ts` cover trusted grants, pending approval cancellation through the real sidepanel entry, request deadlines, ownership release, atomic state rollback, concurrent commands, runtime restoration, initialization-time broker authority and plugin commit failure recovery.
+
+Native acceptance still needed: cancel a real pending permission dialog, stop LLM/MCP/Worker/Web operations, open a second panel on the same host, close the first and retry, restore existing tasks/plugins from an older OPFS layout, and reload the unpacked extension. No native Chrome acceptance is implied by Node tests or builds.
+
+
+UI/business separation is exercised by `tests/ui-business.test.ts` without mounting Vue views: atomic file/context attachment, automatic task names, assistant reports, page reads rejected after task switching, save-before-apply plugin operations, and workspace refresh deferred until idle. `plugin-defaults.test.ts` restores the standalone connection before settings exists; `llm-profiles.test.ts` checks denied/failed configuration saves retain drafts.

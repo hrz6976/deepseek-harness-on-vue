@@ -3,7 +3,7 @@
 // call next() short-circuits the chain and its return value wins.
 import { getCurrentInstance, onUnmounted } from 'vue';
 import type { JsonObject } from '@/shared/runtime';
-import { capabilityForContext, recordCapabilityContribution } from './capabilities';
+import { capabilityForContext } from './capabilities';
 import { currentCordisContext } from './cordis';
 import { log } from './log';
 
@@ -40,10 +40,8 @@ export function useBusOn(event: string, fn: BusListener) {
   const ctx = currentCordisContext();
   const owner = capabilityForContext(ctx)?.manifest.id ?? ctx.fiber.name;
   const off = listen(event, fn, owner);
-  const disposeContribution = recordCapabilityContribution(owner, 'events', event);
-  const dispose = () => { off(); disposeContribution(); };
-  if (getCurrentInstance()) onUnmounted(dispose);
-  return dispose;
+  if (getCurrentInstance()) onUnmounted(off);
+  return off;
 }
 
 // Safer sugar over raw (arg, next) — forgetting next() silently vetoes, which

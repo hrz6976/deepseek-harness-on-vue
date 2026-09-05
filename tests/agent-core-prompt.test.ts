@@ -1,10 +1,10 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runtime } from '@/kernel/cordis';
-import { promptPlugin } from '@/plugins/prompt';
-import { toolsPlugin } from '@/plugins/tools';
+import promptPlugin from '@/plugins/prompt';
+import toolsPlugin from '@/plugins/tools';
 import { AGENT_CORE_PROMPT } from '@/plugins/loop';
-import { loopPlugin } from '@/plugins/loop';
+import loopPlugin from '@/plugins/loop';
 import type { HarnessMessage, LlmRequest } from '@/shared/runtime';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
 
@@ -32,14 +32,14 @@ test('core agent prompt is first in every assembled loop request', async () => {
   let systemPrompt = '';
   await provideTestService('fs', {
     ready: Promise.resolve(), files: new Map(), read: () => null, list: () => [],
-    write: async () => {}, remove: async () => {},
+    write: async () => { }, remove: async () => { },
   });
   await provideTestService('task', {
     ready: Promise.resolve(), messages, activeTask: () => null,
-    async appendEvent() {}, async saveCheckpoint() {},
+    async appendEvent() { }, async saveCheckpoint() { },
   });
   await provideTestService('llm', {
-    stream: async function* (request: LlmRequest) {
+    stream: async function*(request: LlmRequest) {
       systemPrompt = request.systemPrompt;
       yield { type: 'done' as const, text: 'ok', thinking: '', finishReason: 'stop' as const, toolCalls: [] };
     },

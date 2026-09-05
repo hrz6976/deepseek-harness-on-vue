@@ -32,27 +32,31 @@ Chrome 135+ 才支持当前使用的 `chrome.userScripts.execute`。`page/eval` 
 
 - **Trusted extension shell**：service worker、按 tab 独立挂载的 side panel 和 options page。持有 `chrome.*`、LLM key、MCP 连接和扩展 OPFS。
 - **Sandboxed Cordis runtime**：浏览器内运行 `@deepseek-ai/cordis`，管理 Plugin/Fiber、服务注入、事件、中间件、effect 与异步销毁；Vue 只渲染 `ctx.ui.register()` 注册的真实 UI。它没有 `chrome.*`，只能发送经过 Zod 校验的 capability request。
-- **Public plugin SDK**：动态源码只能导入 Vue、Cordis、Zod、模型 SDK 与 `@harness/sdk`；root Context、mount/unmount、compiler、boot 和持久化仓库不进入动态模块表。fs、tools、prompt、manager、task runtime、state、loop 等框架服务作为不可编辑的 system Fibers 装配。
-- **Principal-bound broker**：Cordis `Service` tracing 把每次 provider 调用绑定到发起调用的 capability Fiber；trusted shell 校验 manifest 中声明的 provider、permission、scope 和 active task id 后才分派请求。中间的 workspace/LLM adapter 继续传递调用者身份。
+- **Public plugin SDK**：动态源码只能导入 Vue、Cordis、Zod、模型 SDK 与 `@harness/sdk`；root Context、mount/unmount、compiler、boot 和持久化仓库不进入动态模块表。workspace、tools、prompt、manager、task runtime、loop 等框架服务作为不可编辑的 system Fibers 装配。
+- **Principal-bound broker**：Cordis `Service` tracing 把每次 provider 调用绑定到发起调用的 capability Fiber；trusted shell 从内置目录或已审批的私有授权记录重建权限，再分派请求；输入中自报的 provider/permission 不是授权来源。共享 sandbox 是一个信任域，不隔离相互敌对的插件。中间的 workspace/LLM adapter 继续传递调用者身份。
 - **Cordis model profiles**：`modelProfiles` system Fiber 持有脱敏的响应式 catalog，并通过 `ctx.ui.register()` 提供会话模型控件；Vue shell 只保留贡献插槽。endpoint/key 的解析与请求仍留在 trusted service worker。
 - **Host-page content runtime**：框架无关的 DOM ABI，提供 snapshot/query/observe/picker 与事务补丁；补丁有 preview/apply/verify/revert 生命周期。
 - **MAIN / USER_SCRIPT execution**：仅由 trusted broker 通过 Chrome User Scripts API 执行，不把任意 `eval` 权限交给 content script。
 
-动态 capability 源码仍以 JavaScript 存放在 OPFS 的 `.plugins/` 下，但 builtin capability 的仓库源码统一用 TypeScript 编写，构建时由 Vite/Oxc 去除类型后作为 factory source 嵌入。插件使用 Cordis 的 function/class/`{ apply }` 类型，推荐导出 `name`、`inject`、`apply(ctx)` 并在函数里显式注册 tool、prompt、service、event 与 UI。首次启动 write-if-missing，用户修改不会被新版 bundle 静默覆盖；保留的系统 Fiber 名称不能从 workspace 覆盖。
+动态 capability 仍以 JavaScript 存放在 OPFS 的 `.plugins/` 下。仓库中的内置插件统一导出原生 Cordis `{ name, inject, apply }` 对象；需要宿主配置的系统插件使用返回同一对象的工厂函数。复杂模块可以使用相对 import，构建时由 Vite 打成单个 source artifact，公共依赖仍从 sandbox 的模块表读取。动态作者的单文件导入规则保持不变。
 
-`.plugins/<id>.js` 是可编辑 working draft，`.harness/capabilities/<id>/index.js` 是最后成功激活的 revision。编译或 apply 失败不会替换正在运行的 Fiber；刷新后也会从最后 active revision 恢复，同时保留坏 draft 供继续修复。
+[`src/kernel/builtin-plugins.ts`](src/kernel/builtin-plugins.ts) 集中定义内置入口、适用环境、自动挂载、源码策略、重载边界和权限。构建、启动保护及权限清单共用这份目录；扩展构建只包含扩展适用的 capability。原生 `inject` 描述必需服务，可替换的可选服务通过 `ctx.get()` 在使用时读取。启动就绪还等待工作区、任务恢复与内置能力初始化。
+
+`.plugins/<id>.js` 是 working draft，`.harness/capabilities/<id>/package.json` 将清单和最后成功激活的源码保存在同一 revision。protected 源码由当前可信 bundle 恢复；editable 源码保留用户修改，并更新未改动的旧 factory 版本。编译、Config 校验失败保留当前 Fiber；apply 或包提交失败会重新挂载并验证旧定义，需要保留的状态放在 task/workspace。刷新后保留坏 draft，同时从最后 active revision 恢复。
 
 MCP 使用官方 `@modelcontextprotocol/sdk` 的 Streamable HTTP transport；浏览器扩展不伪装支持本地 stdio，后者需要 Native Messaging 或本地 bridge。
 
-详细设计、信任边界和 React/Vue 支持范围见 [扩展架构](docs/extension-architecture.md)。浏览器 Cordis 内核与插件格式见 [docs/cordis-to-vue.md](docs/cordis-to-vue.md)，验证清单见 [docs/TESTING.md](docs/TESTING.md)。
+全部插件与系统插件的逐项审查见 [检查结果](docs/plugin-system-review.md)。详细设计、信任边界和 React/Vue 支持范围见 [扩展架构](docs/extension-architecture.md)。浏览器 Cordis 内核与插件格式见 [docs/cordis-to-vue.md](docs/cordis-to-vue.md)，验证清单见 [docs/TESTING.md](docs/TESTING.md)。
 
 ## 框架支持边界
 
 DOM 是稳定主路径，因此古老服务端页面、Vue、React 和其他前端框架都能被修改。对 React/Vue 页面直接改 DOM 不会更新其业务 state，后续重渲染也可能覆盖补丁；recipe 会在路由/刷新后重新应用，但涉及业务逻辑或持久状态时应生成站点 adapter，而不是冒充修改了组件源码。
 
-每个 `http(s)` 标签页使用 Chrome tab-specific side panel：对话、批注、页面引用和 MCP 会话不会串到其他 tab；OPFS 插件、Provider Profiles 和 recipe 仍是扩展级共享状态。每个任务单独保存 `profile + model + thinking`，一次运行中的内部工具轮次固定使用同一组合。`chrome://`、扩展页等受限页面会直接禁用该面板。
+每个 `http(s)` 标签页使用 Chrome tab-specific side panel；同一 host 只允许一个任务写入运行时，第二个面板会提示关闭已有面板后重试：对话、批注、页面引用和 MCP 会话不会串到其他 tab；OPFS 插件、Provider Profiles 和 recipe 仍是扩展级共享状态。每个任务单独保存 `profile + model + thinking`，一次运行中的内部工具轮次固定使用同一组合。`chrome://`、扩展页等受限页面会直接禁用该面板。
 
 OpenCode Go Profile 使用其官方 OpenAI-compatible Chat Completions base URL `https://opencode.ai/zen/go/v1`。可用模型与协议会变化；当前这条 Harness adapter 只接入 `/chat/completions` 模型，使用 Responses API 或 Anthropic Messages API 的模型需要对应协议 adapter。
+
+任务命令串行提交 `.harness/hosts/<host>/tasks.json` 完整快照，任务切换、删除和清空通过运行时操作完成。普通 broker 请求和 LLM 流共用取消与截止时间协议；停止会取消尚未批准的操作，迟到的批准不会继续执行。
 
 共享 OPFS 写入使用浏览器锁与文件 revision 做冲突检测，并通过跨 panel change feed 刷新缓存。两个标签页同时编辑同一文件时，后到的旧 revision 写入会明确报冲突，而不是覆盖较新的内容。
 

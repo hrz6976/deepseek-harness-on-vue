@@ -8,11 +8,10 @@ import type {
   TaskContext,
   TaskEvent,
   TaskSession,
-  TaskStatus,
   LlmProfileSummary,
   SessionLlmConfig,
 } from './task-model';
-import type { Annotation } from './page-protocol';
+import type { Annotation, PageSnapshot, SiteSkill } from './page-protocol';
 import type { ModelLimits } from './model-limits';
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -235,6 +234,10 @@ export interface CompactionService {
 }
 
 export interface TaskRuntimeService {
+  readonly signal?: AbortSignal;
+  beginRun(controller: AbortController, goal?: string): Promise<void>;
+  endRun(): Promise<void>;
+  clearConversation(): Promise<void>;
   ready: Promise<void>;
   messages: HarnessMessage[];
   refresh(): Promise<void>;
@@ -248,13 +251,13 @@ export interface TaskRuntimeService {
   activateTask(id: string): Promise<TaskSession>;
   deleteTask(id: string): Promise<void>;
   renameTask(id: string, title: string): Promise<void>;
-  setStatus(id: string, status: TaskStatus): Promise<void>;
   setLlmConfig(config: SessionLlmConfig): Promise<void>;
   setModelSelection(profileId: string, model: string): Promise<void>;
-  addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>): Promise<TaskContext>;
+  addContext(input: Pick<TaskContext, 'kind' | 'title' | 'locator'> & Partial<Pick<TaskContext, 'mimeType' | 'metadata'>>, event?: Pick<TaskEvent, 'type' | 'data'>): Promise<TaskContext>;
+  attachFile(path: string): Promise<TaskContext>;
+  saveMessageArtifact(message: HarnessMessage): Promise<HarnessArtifact | null>;
   removeContext(id: string): Promise<void>;
-  attachCapability(id: string): Promise<void>;
-  detachCapability(id: string): Promise<void>;
+  setCapability(id: string, attached: boolean): Promise<void>;
   createArtifact(input: Pick<HarnessArtifact, 'kind' | 'title' | 'source'> & Partial<Pick<HarnessArtifact, 'status' | 'contentPath' | 'content' | 'verification'>>): Promise<HarnessArtifact>;
   updateArtifact(id: string, patch: Partial<Pick<HarnessArtifact, 'title' | 'status' | 'contentPath' | 'content' | 'verification'>>): Promise<HarnessArtifact>;
   appendEvent(type: string, data?: JsonValue): Promise<TaskEvent>;
@@ -262,14 +265,32 @@ export interface TaskRuntimeService {
 }
 
 export interface BrokerService {
-  request(request: CapabilityRequest): Promise<JsonValue>;
+  request(request: CapabilityRequest, signal?: AbortSignal): Promise<JsonValue>;
   stream(request: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue>;
+}
+
+export interface PageSessionService {
+  snapshot(): Promise<{ page: PageSnapshot; nodeCount: number }>;
+  startPicker(): Promise<void>;
+  plugins(): Promise<{ url: string; plugins: SiteSkill[] }>;
+  setPluginEnabled(plugin: SiteSkill, enabled: boolean): Promise<void>;
+  removePlugin(id: string): Promise<void>;
+}
+
+export interface ModelConnectionConfig { baseURL: string; model: string; apiKey: string; mock: boolean }
+export interface ModelConnectionService {
+  config: ModelConnectionConfig;
+  connect(config: ModelConnectionConfig): Promise<void>;
+  disconnect(): Promise<void>;
+  restore(): Promise<void>;
 }
 
 export interface ServiceTypes {
   fs: FsService;
   llm: LlmService;
   modelProfiles: ModelProfilesService;
+  modelConnection: ModelConnectionService;
+  pageSession: PageSessionService;
   tools: ToolsService;
   prompt: PromptService;
   ui: UiService;
@@ -291,14 +312,10 @@ export interface CapabilityContributionInventory {
   tools: string[];
   panels: string[];
   prompts: string[];
-  services: string[];
-  events: string[];
-  workflows: string[];
 }
 
 export interface PluginEntry {
   manifest: CapabilityManifest;
-  manifestSource: 'generated' | 'declared';
   contributions: CapabilityContributionInventory;
   plugin: Plugin;
   fiber: Fiber | null;

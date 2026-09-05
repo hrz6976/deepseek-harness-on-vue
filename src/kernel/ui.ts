@@ -1,4 +1,4 @@
-import { Service, type Context } from '@deepseek-ai/cordis';
+import { Service, type Context, type Plugin } from '@deepseek-ai/cordis';
 import {
   defineComponent,
   h,
@@ -74,19 +74,21 @@ export class UiService extends Service {
     return this.ctx.effect(() => {
       this.contributions.set(id, entry);
       return () => {
-        if (this.contributions.get(id) === entry) this.contributions.delete(id);
+        if (this.contributions.get(id) !== entry) return;
+        this.contributions.delete(id);
         disposeContribution();
       };
     }, `ui.register(${JSON.stringify(definition.name)})`);
   }
 }
 
-export const uiKernelPlugin = {
-  name: 'harness-ui-runtime',
+const uiKernelPlugin = {
+  name: 'ui',
   apply(ctx: Context) {
     new UiService(ctx);
   },
-};
+} satisfies Plugin.Object;
+export default uiKernelPlugin;
 
 const UiContributionHost = defineComponent({
   name: 'UiContributionHost',
@@ -104,14 +106,14 @@ const UiContributionHost = defineComponent({
     };
     return () => props.contribution.error
       ? h('div', { class: 'plugin-error' }, [
-          h('div', `plugin ${props.contribution.owner} UI crashed: ${props.contribution.error}`),
-          h('button', { onClick: retry }, 'retry UI'),
-        ])
+        h('div', `plugin ${props.contribution.owner} UI crashed: ${props.contribution.error}`),
+        h('button', { onClick: retry }, 'retry UI'),
+      ])
       : h(props.contribution.component, {
-          ...(props.contribution.props ?? {}),
-          key: props.contribution.version,
-          ref: props.contribution.stateRef,
-        });
+        ...(props.contribution.props ?? {}),
+        key: props.contribution.version,
+        ref: props.contribution.stateRef,
+      });
   },
 });
 
@@ -124,8 +126,8 @@ export const UiContributionsHost = defineComponent({
       .filter(contribution => contribution.region === props.region)
       .sort((a, b) => (a.order ?? 50) - (b.order ?? 50) || a.id.localeCompare(b.id))
       .map(contribution => h(UiContributionHost, {
-      key: `${contribution.id}:${contribution.version}`,
-      contribution,
+        key: `${contribution.id}:${contribution.version}`,
+        contribution,
       }));
   },
 });

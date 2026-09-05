@@ -8,16 +8,16 @@
 import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { reactive, nextTick } from 'vue';
-import { PLUGIN_DIR, capabilityIndexPath, capabilityManifestPath } from '@/kernel/capability-package';
+import { PLUGIN_DIR, readCapabilityPackage } from '@/kernel/capability-package';
 import { modules } from '@/kernel/modules';
 import { mountPlugin } from '@/kernel/host';
-import { UiService, uiKernelPlugin } from '@/kernel/ui';
-import { createManagerPlugin, managerPlugin } from '@/plugins/manager';
+import uiKernelPlugin, { UiService } from '@/kernel/ui';
+import managerPlugin, { createManagerPlugin } from '@/plugins/manager';
 import { createTaskRuntimePlugin } from '@/plugins/task-runtime';
-import { toolsPlugin } from '@/plugins/tools';
-import { promptPlugin } from '@/plugins/prompt';
-import { loopPlugin } from '@/plugins/loop';
-import { fsPlugin } from '@/plugins/fs';
+import toolsPlugin from '@/plugins/tools';
+import promptPlugin from '@/plugins/prompt';
+import loopPlugin from '@/plugins/loop';
+import fsPlugin from '@/plugins/fs';
 import { capabilities, legacyCapabilityManifest } from '@/kernel/capabilities';
 import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import type { TaskRuntimeService } from '@/shared/runtime';
@@ -25,6 +25,9 @@ import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runti
 
 globalThis.__harness = { modules }; // what compiled plugin code reads its imports from
 
+// Legacy layout fixtures exercise upgrade without writing old files again.
+const capabilityIndexPath = id => `.harness/capabilities/${id}/index.js`;
+const capabilityManifestPath = id => `.harness/capabilities/${id}/manifest.json`;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const SRC = marker => `export default { name: 'fixture', apply() {} }; // ${marker}`;
 const TOOL_HOOK_SRC = marker => `
@@ -126,7 +129,7 @@ test('boot: updates an untouched generated builtin from the new shipped source',
   await provideTestService('fs', fs);
   await boot({ alpha: { source: next } }, { search: '' });
   assert.equal(fs.read(PLUGIN_DIR + 'alpha.js'), next);
-  assert.equal(fs.read(capabilityIndexPath('alpha')), next);
+  assert.equal(readCapabilityPackage(fs, 'alpha')?.source, next);
 });
 
 test('boot: preserves edited builtins and uncommitted drafts during a shipped update', async () => {
@@ -152,7 +155,7 @@ test('boot: preserves edited builtins and uncommitted drafts during a shipped up
   await provideTestService('fs', draftFs);
   await boot({ alpha: { source: SRC('newer-shipped') } }, { search: '' });
   assert.equal(draftFs.read(PLUGIN_DIR + 'alpha.js'), draft);
-  assert.equal(JSON.parse(draftFs.read(capabilityManifestPath('alpha'))).version, '0.1.1');
+  assert.equal(readCapabilityPackage(draftFs, 'alpha')?.manifest.version, '0.1.1');
 });
 
 test('boot: one broken file is skipped, the rest of the app comes up', async () => {
@@ -328,7 +331,7 @@ test('manager: trusted maintenance can persist a protected on-demand mount throu
 
   assert.match(await mgr.mount('llm', { cfg: { model: 'm1' } }), /mounted/);
   assert.equal(capabilities.get('llm')?.manifest.scope, 'global');
-  assert.equal(read(capabilityIndexPath('llm')), trusted);
+  assert.equal(readCapabilityPackage({ read } as never, 'llm')?.source, trusted);
 });
 
 test('manager: recreated capability does not inherit an orphaned package manifest', async () => {
@@ -401,7 +404,7 @@ test('manager: tool and hook HMR becomes visible next turn without replacing the
   await provideTestService('task', {
     ready: Promise.resolve(), messages,
     activeTask: () => null, scope: () => runtime,
-    async appendEvent() {},
+    async appendEvent() { },
   });
   await provideTestService('llm', {
     stream(request) {
@@ -410,15 +413,19 @@ test('manager: tool and hook HMR becomes visible next turn without replacing the
         tools: request.tools.map(tool => ({ name: tool.name, description: tool.description })),
       });
       const turn = requests.length;
-      return (async function* () {
+      return (async function*() {
         if (turn === 1) {
-          yield { type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
-            { id: 'edit', name: 'rewrite_turn_plugin', args: '{}', argsObj: {} },
-          ] };
+          yield {
+            type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
+              { id: 'edit', name: 'rewrite_turn_plugin', args: '{}', argsObj: {} },
+            ]
+          };
         } else if (turn === 2) {
-          yield { type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
-            { id: 'use', name: 'versioned_tool', args: '{}', argsObj: {} },
-          ] };
+          yield {
+            type: 'done', text: '', thinking: '', finishReason: 'tool_calls', toolCalls: [
+              { id: 'use', name: 'versioned_tool', args: '{}', argsObj: {} },
+            ]
+          };
         } else {
           yield { type: 'done', text: 'finished', thinking: '', finishReason: 'stop', toolCalls: [] };
         }
@@ -486,4 +493,16 @@ test('manager: apply-time failure remounts the previous Cordis plugin', async ()
   assert.equal(restored.status, 'active');
   assert.equal(restored.version, version);
   assert.match(restored.hmrError, /apply boom/);
+});
+
+test('manager serializes creation and removal so a delayed install cannot resurrect a deleted plugin', async () => {
+  const { fs, mgr } = await mountManager({});
+  const write = fs.write;
+  fs.write = async (path, source) => { await sleep(5); await write(path, source); };
+  const creating = mgr.create('serialized', SRC('created'));
+  const removing = mgr.remove('serialized');
+  assert.match(await creating, /compiled and mounted/);
+  assert.match(await removing, /source are gone/);
+  assert.equal(capabilities.has('serialized'), false);
+  assert.equal(fs.list().some(path => path.includes('serialized')), false);
 });

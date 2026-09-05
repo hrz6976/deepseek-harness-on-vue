@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CapabilityPrincipalSchema, type CapabilityEnvelope, type CapabilityPrincipal } from './capability-protocol';
+import { CapabilityManifestSchema, CapabilityPrincipalSchema, type CapabilityEnvelope, type CapabilityPrincipal } from './capability-protocol';
 import { MAX_MESSAGE_ANNOTATIONS, type JsonValue } from './runtime';
 
 export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
@@ -183,6 +183,7 @@ const EmptyInputSchema = z.object({});
 const ContextIdSchema = z.string().min(1).optional();
 
 const CapabilityRequestSchema = z.union([
+  z.object({ provider: z.literal('runtime'), action: z.literal('authorize'), input: z.object({ manifest: CapabilityManifestSchema }) }),
   z.object({ provider: z.literal('page'), action: z.literal('command'), contextId: ContextIdSchema, input: z.object({ command: PageCommandSchema }) }),
 
   z.object({ provider: z.literal('workspace'), action: z.literal('list'), contextId: ContextIdSchema, input: EmptyInputSchema }),
@@ -201,7 +202,6 @@ const CapabilityRequestSchema = z.union([
 
   z.object({ provider: z.literal('llm'), action: z.literal('status'), contextId: ContextIdSchema, input: EmptyInputSchema }),
   z.object({ provider: z.literal('llm'), action: z.literal('models'), contextId: ContextIdSchema, input: z.object({ profileId: z.string().trim().max(64) }) }),
-  z.object({ provider: z.literal('llm'), action: z.literal('cancel'), contextId: ContextIdSchema, input: z.object({ requestId: z.string().min(1) }) }),
   z.object({
     provider: z.literal('llm'),
     action: z.literal('complete'),
@@ -238,6 +238,7 @@ const CapabilityEnvelopeSchema = z.object({
   channel: z.literal('harness-broker-v1'),
   session: z.string().min(32),
   requestId: z.string().min(1),
+  deadline: z.number().finite().optional(),
   principal: CapabilityPrincipalSchema,
   payload: CapabilityRequestSchema,
 });
@@ -261,3 +262,5 @@ export function createCapabilityEnvelope(
   // reach window.postMessage.
   return parseCapabilityEnvelope({ channel: 'harness-broker-v1', session, requestId, principal, payload });
 }
+
+export const BrokerCancellationSchema = z.object({ channel: z.literal('harness-broker-v1'), session: z.string().min(32), requestId: z.string().min(1), cancel: z.literal(true) });

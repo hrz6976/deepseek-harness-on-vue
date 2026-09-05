@@ -1,42 +1,26 @@
-import { computed, ref, type ComputedRef } from 'vue';
+import { computed, ref } from 'vue';
+import { useService } from '@/kernel/services';
 import { capabilities, capabilityHealth } from '@/kernel/capabilities';
 import { pluginPolicy } from '@/kernel/plugin-policy';
-import { matchesPagePattern, type PageEvent, type PageSnapshot, type SiteSkill } from '@/shared/page-protocol';
-import type { CapabilityRequest } from '@/shared/capability-protocol';
-import {
-  errorMessage,
-  toJsonValue,
-  type FsService,
-  type HarnessMessage,
-  type JsonValue,
-  type LoopService,
-  type ManagerService,
-  type TaskRuntimeService,
-} from '@/shared/runtime';
-import type { HarnessArtifact, TaskContext, TaskStatus } from '@/shared/task-model';
+import { matchesPagePattern, type SiteSkill } from '@/shared/page-protocol';
+import { errorMessage, type HarnessMessage } from '@/shared/runtime';
+import type { TaskContext, TaskStatus } from '@/shared/task-model';
 
 type InspectorView = 'tasks' | 'contexts' | 'artifacts' | 'capabilities';
-type BrokerRequest = (request: CapabilityRequest) => Promise<JsonValue>;
 
 const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   idle: '可继续', running: '执行中', waiting: '等待确认', failed: '需要处理', completed: '已完成',
 };
 
-function changeSetMatches(artifact: HarnessArtifact, taskId: string, transactionId: string): boolean {
-  return artifact.taskId === taskId && artifact.kind === 'change-set' && !!artifact.content
-    && typeof artifact.content === 'object' && !Array.isArray(artifact.content)
-    && artifact.content.transactionId === transactionId;
-}
-
 export function useSandboxInspector(
-  taskService: ComputedRef<TaskRuntimeService | null>,
-  loopService: ComputedRef<LoopService | null>,
-  fsService: ComputedRef<FsService | null>,
-  managerService: ComputedRef<ManagerService | null>,
-  request: BrokerRequest,
   reportError: (message: string) => void,
   openSettings: () => void,
 ) {
+  const taskService = useService('task');
+  const loopService = useService('loop');
+  const fsService = useService('fs');
+  const managerService = useService('manager');
+  const pageSession = useService('pageSession');
   const inspector = ref<InspectorView | null>(null);
   const inspectorOpen = computed({
     get: () => inspector.value !== null,
@@ -44,7 +28,7 @@ export function useSandboxInspector(
   });
   const inspectorTitle = computed(() => inspector.value === 'tasks' ? '任务'
     : inspector.value === 'contexts' ? '上下文'
-    : inspector.value === 'artifacts' ? '产物' : '能力');
+      : inspector.value === 'artifacts' ? '产物' : '能力');
   const pagePluginsOpen = ref(false);
   const pagePluginsBusy = ref(false);
   const pagePlugins = ref<SiteSkill[]>([]);
@@ -57,7 +41,8 @@ export function useSandboxInspector(
     ? (taskService.value?.artifacts ?? []).filter(artifact => artifact.taskId === activeTask.value!.id) : []);
   const taskRows = computed(() => {
     const service = taskService.value;
-    return (service?.tasks ?? []).map(task => ({ task,
+    return (service?.tasks ?? []).map(task => ({
+      task,
       contextCount: service!.contexts.filter(context => context.taskId === task.id).length,
       artifactCount: service!.artifacts.filter(artifact => artifact.taskId === task.id).length,
     }));
@@ -100,22 +85,13 @@ export function useSandboxInspector(
     if (key === 'tasks') openInspector('tasks');
     if (key === 'settings') openSettings();
   }
-  async function attachWorkspaceFile(path: string): Promise<void> {
-    const task = taskService.value;
-    const content = fsService.value?.read(path);
-    if (!task || content == null) return;
-    await task.addContext({ kind: 'file', title: path.split('/').at(-1) || path, locator: path, metadata: { size: content.length } });
-    await task.appendEvent('context/attached', { kind: 'file', path });
-  }
-  async function removeContext(context: TaskContext): Promise<void> {
-    await taskService.value?.removeContext(context.id);
-  }
   async function saveMessageArtifact(message: HarnessMessage): Promise<void> {
-    if (message.role !== 'assistant' || !message.text || !taskService.value) return;
-    await taskService.value.createArtifact({
-      kind: 'report', title: 'Agent report', status: 'ready', source: { type: 'agent' }, content: { text: message.text },
-    });
-    inspector.value = 'artifacts';
+    try {
+      if (!taskService.value) throw new Error('任务尚未就绪，请稍后重试。');
+      if (await taskService.value.saveMessageArtifact(message)) inspector.value = 'artifacts';
+    } catch (error) {
+      reportError(`保存报告失败：${errorMessage(error)}`);
+    }
   }
   async function disableCapability(name: string): Promise<void> {
     const result = await managerService.value?.unmount(name);
@@ -126,34 +102,10 @@ export function useSandboxInspector(
     const result = await managerService.value.remove(name);
     if (result.startsWith('Error:')) reportError(result);
   }
-  async function recordPageArtifact(event: PageEvent): Promise<void> {
-    const task = taskService.value;
-    const active = task?.activeTask();
-    if (!task || !active) return;
-    if (event.type === 'patch/applied') {
-      if (!task.artifacts.some(artifact => changeSetMatches(artifact, active.id, event.transaction.id))) {
-        await task.createArtifact({
-          kind: 'change-set', title: event.transaction.label, status: 'verified', source: { type: 'provider', id: 'page' },
-          content: { transactionId: event.transaction.id, url: event.transaction.scope.url, operations: toJsonValue(event.transaction.operations) },
-          verification: { status: 'passed', checkedAt: Date.now(), summary: `${event.transaction.verification.filter(result => result.ok).length}/${event.transaction.verification.length} operations verified` },
-        });
-      }
-    } else if (event.type === 'patch/reverted' || event.type === 'patch/verification-failed') {
-      const artifact = task.artifacts.find(candidate => changeSetMatches(candidate, active.id, event.transaction.id));
-      if (artifact) await task.updateArtifact(artifact.id, event.type === 'patch/reverted'
-        ? { status: 'archived', verification: { status: 'unverified', checkedAt: Date.now(), summary: 'Reverted from the page.' } }
-        : { status: 'failed', verification: { status: 'failed', checkedAt: Date.now(), summary: 'Page verification failed.' } });
-    } else if (event.type === 'recipe/installed' && !task.artifacts.some(artifact =>
-      artifact.taskId === active.id && artifact.kind === 'site-skill' && artifact.source.id === event.recipe.id)) {
-      await task.createArtifact({
-        kind: 'site-skill', title: event.recipe.name, status: event.recipe.enabled ? 'ready' : 'draft',
-        source: { type: 'provider', id: event.recipe.id }, content: toJsonValue(event.recipe),
-      });
-    }
-  }
   async function refreshPagePlugins(): Promise<void> {
-    const result = await request({ provider: 'site-skill', action: 'list', input: {} });
-    pagePlugins.value = Array.isArray(result) ? result as unknown as SiteSkill[] : [];
+    const result = await pageSession.value!.plugins();
+    pagePlugins.value = result.plugins;
+    currentPageUrl.value = result.url;
   }
 
   async function withPagePluginsBusy(action: () => Promise<void>): Promise<void> {
@@ -167,27 +119,19 @@ export function useSandboxInspector(
   async function openPagePlugins(): Promise<void> {
     inspector.value = null;
     pagePluginsOpen.value = true;
-    await withPagePluginsBusy(async () => {
-      if (!currentPageUrl.value) {
-        const result = await request({ provider: 'page', action: 'command', input: { command: { type: 'page/snapshot', options: { maxNodes: 1, maxDepth: 0 } } } });
-        const pageResult = result as { ok?: boolean; value?: PageSnapshot };
-        if (pageResult.ok && pageResult.value) currentPageUrl.value = pageResult.value.scope.url;
-      }
-      await refreshPagePlugins();
-    });
+    await withPagePluginsBusy(refreshPagePlugins);
   }
 
   async function setPagePluginEnabled(plugin: SiteSkill, enabled: boolean): Promise<void> {
     await withPagePluginsBusy(async () => {
-      await request({ provider: 'site-skill', action: 'save', input: { skill: { ...plugin, enabled } } });
-      if (enabled) await request({ provider: 'site-skill', action: 'apply', input: { id: plugin.id } });
+      await pageSession.value!.setPluginEnabled(plugin, enabled);
       await refreshPagePlugins();
     });
   }
 
   async function removePagePlugin(plugin: SiteSkill): Promise<void> {
     await withPagePluginsBusy(async () => {
-      await request({ provider: 'site-skill', action: 'remove', input: { id: plugin.id } });
+      await pageSession.value!.removePlugin(plugin.id);
       await refreshPagePlugins();
     });
   }
@@ -197,7 +141,9 @@ export function useSandboxInspector(
     currentPageUrl, currentPagePlugins, currentPageHost, activeTask, taskStatusLabel,
     activeContexts, activeArtifacts, taskRows, capabilityCards, workspaceFiles,
     openInspector, createTask, activateTask, deleteTask, handleAppMenuSelect,
-    attachWorkspaceFile, removeContext, saveMessageArtifact, disableCapability,
-    removeCapability, recordPageArtifact, openPagePlugins, setPagePluginEnabled, removePagePlugin,
+    attachWorkspaceFile: (path: string) => taskService.value?.attachFile(path),
+    removeContext: (context: TaskContext) => taskService.value?.removeContext(context.id),
+    saveMessageArtifact, disableCapability,
+    removeCapability, openPagePlugins, setPagePluginEnabled, removePagePlugin,
   };
 }

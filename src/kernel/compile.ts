@@ -20,25 +20,27 @@
 import type { Plugin } from '@deepseek-ai/cordis';
 import { modules, preparePluginModules } from './modules';
 import { normalizePlugin } from './plugin-runtime';
-
-function normalizeSpecifier(raw: string): string {
-  if (raw === '@/sdk' || raw === '@/sdk/index' || raw === '@/sdk/index.js') return '@harness/sdk';
-  return raw;
-}
+import { normalizePluginSpecifier } from '@/shared/plugin-modules';
 
 interface ImportForm { re: RegExp; emit(match: RegExpMatchArray, ref: string): string }
 const FORMS: ImportForm[] = [
-  { re: /^import\s*\{([^}]*)\}\s*from\s*(['"])(.+?)\2\s*;?\s*$/, // named (with optional aliases)
-    emit: (m, ref) => `const {${m[1]!.replace(/\s+as\s+/g, ': ')}} = ${ref};` },
-  { re: /^import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])(.+?)\2\s*;?\s*$/, // namespace
-    emit: (m, ref) => `const ${m[1]} = ${ref};` },
-  { re: /^import\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])(.+?)\2\s*;?\s*$/, // default
-    emit: (m, ref) => `const ${m[1]} = ${ref}.default ?? ${ref};` },
+  {
+    re: /^import\s*\{([^}]*)\}\s*from\s*(['"])(.+?)\2\s*;?\s*$/, // named (with optional aliases)
+    emit: (m, ref) => `const {${m[1]!.replace(/\s+as\s+/g, ': ')}} = ${ref};`
+  },
+  {
+    re: /^import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])(.+?)\2\s*;?\s*$/, // namespace
+    emit: (m, ref) => `const ${m[1]} = ${ref};`
+  },
+  {
+    re: /^import\s+([A-Za-z_$][\w$]*)\s+from\s*(['"])(.+?)\2\s*;?\s*$/, // default
+    emit: (m, ref) => `const ${m[1]} = ${ref}.default ?? ${ref};`
+  },
 ];
 
 export function rewriteImports(source: string): string {
   const lines = source.split('\n');
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0;i < lines.length;i++) {
     const line = lines[i]!.trim();
     if (line === '' || line.startsWith('//')) continue;
     if (!line.startsWith('import')) break; // end of the leading import block
@@ -48,7 +50,7 @@ export function rewriteImports(source: string): string {
     if (!form)
       throw new Error(`unsupported import on line ${i + 1}: "${line}" — the plugin dialect allows only single-line named/namespace/default imports`);
     const specifier = form.match[3]!;
-    const key = normalizeSpecifier(specifier);
+    const key = normalizePluginSpecifier(specifier);
     if (!(key in modules))
       throw new Error(`unknown import "${specifier}" on line ${i + 1} — plugins may import only: ${Object.keys(modules).join(', ')}. Cross-plugin imports are not supported; share through services instead`);
     lines[i] = form.f.emit(form.match, `globalThis.__harness.modules[${JSON.stringify(key)}]`);
@@ -57,6 +59,12 @@ export function rewriteImports(source: string): string {
 }
 
 export function translateESM(source: string): string {
+  // Build output has one known export. Do not scan its embedded prompts and
+  // code examples as ESM declarations when using the script fallback.
+  if (source.startsWith('// harness-bundled-plugin\n')) {
+    return source.replace(/\nexport default __harnessPlugin\.default \?\? __harnessPlugin;/u,
+      '\nmodule.exports.default = __harnessPlugin.default ?? __harnessPlugin;');
+  }
   const names = [...source.matchAll(/export\s+(?:const|let|var|function|async\s+function|class)\s+([A-Za-z_$][\w$]*)/g)]
     .map(match => match[1]!);
   const translated = source

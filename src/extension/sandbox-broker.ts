@@ -1,93 +1,59 @@
-import { createBrokerPlugin, systemPrincipal, type BrokerTransport } from '@/kernel/broker';
+import { createBrokerPlugin, systemPrincipal } from '@/kernel/broker';
 import { createCapabilityEnvelope } from '@/shared/broker-schema';
 import type { CapabilityPrincipal, CapabilityRequest, CapabilityResponse, CapabilityStreamChunk } from '@/shared/capability-protocol';
 import type { JsonValue } from '@/shared/runtime';
 
-interface PendingRequest {
-  resolve(value: JsonValue): void;
-  reject(error: Error): void;
-  timer: number;
-}
-
-interface PendingStream {
-  queue: CapabilityStreamChunk[];
-  wake: (() => void) | null;
-  acknowledgementTimer: number;
-}
-
 export function createSandboxBroker(target: Window) {
-  let sequence = 0;
   let token = '';
+  let sequence = 0;
   let resolveSession!: (host: string) => void;
   const session = new Promise<string>(resolve => { resolveSession = resolve; });
-  const pending = new Map<string, PendingRequest>();
-  const streams = new Map<string, PendingStream>();
+  const pending = new Map<string, (chunk: CapabilityStreamChunk) => void>();
 
-  function request(principal: CapabilityPrincipal, payload: CapabilityRequest): Promise<JsonValue> {
-    const requestId = `sandbox_${Date.now()}_${++sequence}`;
-    let envelope;
-    try { envelope = createCapabilityEnvelope(token, requestId, principal, payload); }
-    catch (error) { return Promise.reject(new Error(`Invalid broker request: ${error instanceof Error ? error.message : String(error)}`)); }
-    return new Promise((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        pending.delete(requestId);
-        reject(new Error('Broker request timed out.'));
-      }, 30_000);
-      pending.set(requestId, { resolve, reject, timer });
-      target.postMessage(envelope, '*');
-    });
-  }
-
-  async function* stream(principal: CapabilityPrincipal, payload: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue> {
+  async function* exchange(principal: CapabilityPrincipal, payload: CapabilityRequest, signal?: AbortSignal): AsyncIterable<JsonValue> {
     if (signal?.aborted) return;
-    const requestId = `sandbox_stream_${Date.now()}_${++sequence}`;
-    const state: PendingStream = { queue: [], wake: null, acknowledgementTimer: 0 };
+    const requestId = `sandbox_${++sequence}`;
+    const streaming = payload.provider === 'llm' && payload.action === 'complete';
+    const envelope = createCapabilityEnvelope(token, requestId, principal, payload);
+    envelope.deadline = Date.now() + (streaming ? 300_000 : 30_000);
+    const chunks: CapabilityStreamChunk[] = [];
+    let wake: (() => void) | undefined;
     let finished = false;
+    const receive = (chunk: CapabilityStreamChunk) => { chunks.push(chunk); wake?.(); };
     const cancel = () => {
-      if (finished) return;
-      finished = true;
-      try {
-        target.postMessage(createCapabilityEnvelope(token, `${requestId}_cancel`, principal, {
-          provider: 'llm', action: 'cancel', input: { requestId },
-        }), '*');
-      }
-      catch { /* the trusted shell may already be gone */ }
-      state.wake?.();
+      target.postMessage({ channel: 'harness-broker-v1', session: token, requestId, cancel: true }, '*');
+      wake?.();
     };
-    streams.set(requestId, state);
-    state.acknowledgementTimer = window.setTimeout(() => {
-      state.queue.push({
-        channel: 'harness-broker-v1', requestId, stream: true, done: true,
-        error: 'The extension service worker did not acknowledge the LLM request.',
-      });
-      state.wake?.();
-    }, 10_000);
+    const timer = window.setTimeout(() => {
+      receive({ channel: 'harness-broker-v1', requestId, stream: true, done: true, error: 'Broker request timed out.' });
+      cancel();
+    }, envelope.deadline - Date.now());
+    pending.set(requestId, receive);
     signal?.addEventListener('abort', cancel, { once: true });
     try {
-      target.postMessage(createCapabilityEnvelope(token, requestId, principal, payload), '*');
-      while (true) {
-        if (signal?.aborted) return;
-        while (state.queue.length) {
-          const chunk = state.queue.shift()!;
+      target.postMessage(envelope, '*');
+      while (!signal?.aborted) {
+        while (chunks.length) {
+          const chunk = chunks.shift()!;
           if (chunk.error) throw new Error(chunk.error);
+          if (chunk.done) finished = true;
           if (chunk.value !== undefined) yield chunk.value;
-          if (chunk.done) {
-            finished = true;
-            return;
-          }
+          if (finished) return;
         }
-        if (signal?.aborted) return;
-        await new Promise<void>(resolve => { state.wake = resolve; });
-        state.wake = null;
+        await new Promise<void>(resolve => { wake = resolve; });
       }
     } finally {
-      cancel();
+      if (!finished && !signal?.aborted) cancel();
       signal?.removeEventListener('abort', cancel);
-      window.clearTimeout(state.acknowledgementTimer);
-      streams.delete(requestId);
+      window.clearTimeout(timer);
+      pending.delete(requestId);
     }
   }
-
+  async function request(principal: CapabilityPrincipal, payload: CapabilityRequest, signal?: AbortSignal): Promise<JsonValue> {
+    for await (const value of exchange(principal, payload, signal)) return value;
+    signal?.throwIfAborted();
+    return null;
+  }
   function handleMessage(data: unknown): boolean {
     if (!data || typeof data !== 'object') return false;
     const message = data as { channel?: unknown; type?: unknown; token?: unknown; host?: unknown };
@@ -101,35 +67,20 @@ export function createSandboxBroker(target: Window) {
     }
     const response = data as Partial<CapabilityResponse & CapabilityStreamChunk>;
     if (response.channel !== 'harness-broker-v1' || typeof response.requestId !== 'string') return false;
-    if (response.stream === true) {
-      const state = streams.get(response.requestId);
-      if (state) {
-        window.clearTimeout(state.acknowledgementTimer);
-        state.acknowledgementTimer = 0;
-        state.queue.push(response as CapabilityStreamChunk);
-        state.wake?.();
-      }
-      return true;
-    }
-    const waiter = pending.get(response.requestId);
-    if (!waiter) return true;
-    pending.delete(response.requestId);
-    window.clearTimeout(waiter.timer);
-    if (response.ok) waiter.resolve(response.value ?? null);
-    else waiter.reject(new Error(response.error ?? 'Broker request failed.'));
+    pending.get(response.requestId)?.(response.stream ? response as CapabilityStreamChunk : {
+      channel: 'harness-broker-v1', requestId: response.requestId, stream: true, done: true,
+      ...(response.ok ? { value: response.value ?? null } : { error: response.error ?? 'Broker request failed.' }),
+    });
     return true;
   }
-
-  const transport: BrokerTransport = { request, stream };
   const shell = systemPrincipal();
   const hello = () => target.postMessage({ channel: 'harness-shell-v1', type: 'broker-session-hello' }, '*');
   const helloTimer = window.setInterval(hello, 250);
   hello();
   return {
-    session,
-    request: (payload: CapabilityRequest) => request(shell, payload),
-    stream: (payload: CapabilityRequest, signal?: AbortSignal) => stream(shell, payload, signal),
-    handleMessage,
-    plugin: createBrokerPlugin(transport),
+    session, handleMessage,
+    request: (payload: CapabilityRequest, signal?: AbortSignal) => request(shell, payload, signal),
+    stream: (payload: CapabilityRequest, signal?: AbortSignal) => exchange(shell, payload, signal),
+    plugin: createBrokerPlugin({ request, stream: exchange }),
   };
 }

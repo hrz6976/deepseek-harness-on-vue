@@ -7,12 +7,12 @@ import { createSystemPlugin, runtime } from '@/kernel/cordis';
 import { createBrokerPlugin, principalForContext } from '@/kernel/broker';
 import { mountPlugin, unmountPlugin } from '@/kernel/host';
 import { capabilities } from '@/kernel/capabilities';
-import { UiService, uiKernelPlugin } from '@/kernel/ui';
-import { promptPlugin } from '@/plugins/prompt';
-import { brokerFsPlugin } from '@/extension/broker-fs';
-import { toolsPlugin, type ToolsRuntime } from '@/plugins/tools';
-import * as pagePlugin from '@/plugins/tools/page';
-import * as capabilityCatalogPlugin from '@/plugins/tools/capability-catalog';
+import uiKernelPlugin, { UiService } from '@/kernel/ui';
+import promptPlugin from '@/plugins/prompt';
+import brokerFsPlugin from '@/extension/broker-fs';
+import toolsPlugin, { type ToolsRuntime } from '@/plugins/tools';
+import pagePlugin from '@/plugins/tools/page';
+import capabilityCatalogPlugin from '@/plugins/tools/capability-catalog';
 import filesPlugin from '@/plugins/ui/files';
 import type { PromptRuntime } from '@/plugins/prompt';
 import { applyTestPlugin, cleanupTestRuntime, provideTestService } from './runtime';
@@ -24,7 +24,7 @@ test('system Context is available after its Cordis mount handle settles', async 
   let context: Context | null = null;
   const handle = isolated.plugin(createSystemPlugin('shell-test', {
     name: 'shell-test',
-    apply() {},
+    apply() { },
   }, value => { context = value; }));
 
   await handle;
@@ -32,10 +32,27 @@ test('system Context is available after its Cordis mount handle settles', async 
   await handle.dispose();
 });
 
+test('system plugin wrapping preserves native Config validation and defaults', async () => {
+  const isolated = new Context();
+  let config: unknown;
+  const plugin = createSystemPlugin('configured', {
+    name: 'configured',
+    Config: z.object({ count: z.number().int().positive().default(3) }),
+    apply(_ctx, value) { config = value; },
+  });
+  const valid = isolated.plugin(plugin, {});
+  await valid;
+  assert.deepEqual(config, { count: 3 });
+  await valid.dispose();
+  const invalid = isolated.plugin(plugin, { count: -1 });
+  await assert.rejects(async () => { await invalid; }, /greater than|Too small/i);
+  await invalid.dispose();
+});
+
 test('the system loop principal may call the trusted LLM provider', async () => {
   let context: Context | null = null;
   const handle = runtime.plugin(createSystemPlugin('loop', {
-    name: 'loop-principal-test', apply() {},
+    name: 'loop-principal-test', apply() { },
   }, value => { context = value; }));
   try {
     await handle;
@@ -56,7 +73,7 @@ test('the system loop principal may call the trusted LLM provider', async () => 
 test('the Cordis model profile system plugin has only LLM metadata authority', async () => {
   let context: Context | null = null;
   const handle = runtime.plugin(createSystemPlugin('model-profiles', {
-    name: 'model-profiles-principal-test', apply() {},
+    name: 'model-profiles-principal-test', apply() { },
   }, value => { context = value; }));
   try {
     await handle;
@@ -81,7 +98,7 @@ test('broker workspace restore keeps the workspace system principal', async () =
       caller = principal.id;
       return Promise.resolve({});
     },
-    async *stream() {},
+    async *stream() { },
   })));
   await applyTestPlugin(createSystemPlugin('workspace', brokerFsPlugin));
 
@@ -95,7 +112,7 @@ test('Page explicitly contributes tools and prompt through its Cordis Fiber', as
   const requests: unknown[] = [];
   await provideTestService('broker', {
     async request(request: unknown) { requests.push(request); return { ok: true }; },
-    async *stream() {},
+    async *stream() { },
   });
 
   const entry = await mountPlugin('page', pagePlugin, { builtin: true });
@@ -158,7 +175,7 @@ test('page_recipe_get reads persisted userscript source in bounded chunks', asyn
       }
       return null;
     },
-    async *stream() {},
+    async *stream() { },
   });
 
   const entry = await mountPlugin('page', pagePlugin, { builtin: true });
@@ -188,7 +205,7 @@ test('page_recipe_debug reads Chrome registration evidence without mutating the 
       requests.push(request);
       return { recipeId: 'nga-hover', registrationCount: 1, registrations: [{ matchesStoredSource: true }] };
     },
-    async *stream() {},
+    async *stream() { },
   });
 
   const entry = await mountPlugin('page', pagePlugin, { builtin: true });
@@ -208,8 +225,8 @@ test('capability discovery prioritizes loadable groups and capability loading ac
     activeTaskId,
     contexts: [],
     activeTask: () => ({ id: 'task-1', capabilityIds: [] }),
-    async attachCapability() {},
-    async detachCapability() {},
+    async attachCapability() { },
+    async detachCapability() { },
   });
   await provideTestService('manager', {
     list: () => ['advanced-capability'],

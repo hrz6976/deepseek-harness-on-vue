@@ -13,6 +13,11 @@ export async function applyTestPlugin(plugin: Plugin, config?: unknown): Promise
 }
 
 export async function provideTestService(name: string, value: unknown): Promise<Fiber> {
+  if (name === 'task' && value && typeof value === 'object') {
+    const task = value as { beginRun?: unknown; endRun?: unknown; saveCheckpoint?: () => Promise<void> };
+    task.beginRun ??= async () => undefined;
+    task.endRun ??= async () => task.saveCheckpoint?.();
+  }
   return applyTestPlugin({
     name: `test-${name}-${crypto.randomUUID()}`,
     apply(ctx) { ctx.provide(name, value); },

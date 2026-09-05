@@ -1,7 +1,7 @@
 // Standalone workspace provider. Extension builds use broker-fs, but both
 // implementations preserve the calling Cordis Context and enforce the same
 // manifest-backed workspace policy.
-import type { Context } from '@deepseek-ai/cordis';
+import type { Context, Plugin } from '@deepseek-ai/cordis';
 import { OpfsStore } from '@/kernel/opfs-store';
 import { assertWorkspaceMutationAllowed } from '@/kernel/plugin-policy';
 import { WorkspaceRuntime } from '@/kernel/workspace-runtime';
@@ -49,10 +49,10 @@ class OpfsRuntime extends WorkspaceRuntime {
 
 }
 
-export const fsPlugin = {
-  name: 'fs',
+export default {
+  name: 'workspace',
   apply(ctx: Context) {
     new OpfsRuntime(ctx);
     ctx.effect(() => () => log('fs plugin unmounted', 'warn'), 'fs.log-dispose');
   },
-};
+} satisfies Plugin.Object;

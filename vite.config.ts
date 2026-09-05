@@ -1,15 +1,14 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { crx } from '@crxjs/vite-plugin';
 import { compile } from '@vue/compiler-dom';
-import { defineConfig, transformWithOxc, type Plugin } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import manifest from './src/extension/manifest.ts';
-import { systemPluginNames } from './src/kernel/system-plugin-names.ts';
+import { BUILTIN_CAPABILITIES, type RuntimeEnvironment } from './src/kernel/builtin-plugins';
+import { bundlePlugin } from './scripts/plugin-bundle';
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
-const pluginRoots = ['src/plugins', 'src/plugins/tools', 'src/plugins/ui'];
-const onDemand = new Set(['llm']);
 const virtualId = 'virtual:plugin-defaults';
 const resolvedVirtualId = `\0${virtualId}`;
 
@@ -27,11 +26,10 @@ function vueTemplates(): Plugin {
 }
 
 /**
- * Builtins are authored as TypeScript but remain user-editable JavaScript in
- * the virtual filesystem. Vite strips their types and embeds the resulting
- * ESM source strings as the write-if-missing factory state.
+ * Build each environment's capability entry with its local modules. The
+ * workspace stores one JavaScript artifact; trusted metadata controls edits.
  */
-function pluginDefaults(): Plugin {
+function pluginDefaults(environment: RuntimeEnvironment): Plugin {
   let watchedFiles: string[] = [];
   return {
     name: 'harness-plugin-defaults',
@@ -40,34 +38,16 @@ function pluginDefaults(): Plugin {
     },
     async load(id) {
       if (id !== resolvedVirtualId) return null;
-      const files = (
-        await Promise.all(pluginRoots.map(async root => {
-          const absoluteRoot = resolve(projectRoot, root);
-          const entries = await readdir(absoluteRoot, { withFileTypes: true });
-          return entries
-            .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && !systemPluginNames.has(basename(entry.name, '.ts')))
-            .map(entry => join(absoluteRoot, entry.name));
-        }))
-      ).flat();
-
-      watchedFiles = files;
-      for (const file of watchedFiles) this.addWatchFile(file);
-
-      const defaults: Record<string, { source: string; autoMount?: boolean }> = {};
-      for (const file of files) {
-        const name = basename(file, '.ts');
-        if (defaults[name]) throw new Error(`duplicate plugin name "${name}" (${file})`);
-        const result = await transformWithOxc(await readFile(file, 'utf8'), file, {
-          lang: 'ts',
-          sourceType: 'module',
-          target: 'es2022',
-          sourcemap: false,
-        });
-        defaults[name] = {
-          source: result.code,
-          ...(onDemand.has(name) ? { autoMount: false } : {}),
-        };
+      const defaults: Record<string, { source: string; autoMount: boolean }> = {};
+      const dependencies = new Set<string>();
+      for (const [name, descriptor] of Object.entries(BUILTIN_CAPABILITIES)) {
+        if (!descriptor.environments.includes(environment)) continue;
+        const bundled = await bundlePlugin(resolve(projectRoot, descriptor.entry));
+        defaults[name] = { source: bundled.source, autoMount: descriptor.autoMount };
+        for (const file of bundled.files) dependencies.add(file);
       }
+      watchedFiles = [...dependencies];
+      for (const file of watchedFiles) this.addWatchFile(file);
       return `export default ${JSON.stringify(defaults)};`;
     },
     handleHotUpdate(context) {
@@ -89,7 +69,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       vueTemplates(),
-      pluginDefaults(),
+      pluginDefaults(extensionBuild ? 'extension' : 'standalone'),
       ...(extensionBuild ? [crx({ manifest })] : []),
     ],
     resolve: {

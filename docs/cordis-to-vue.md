@@ -16,41 +16,42 @@ The central rule is: a capability manifest describes and audits authority, but o
 
 ## Plugin authoring
 
-The preferred dialect is a normal Cordis module with explicit metadata and contributions:
+Repository plugins export a native Cordis object with explicit dependencies and contributions. Configured system plugins return that same object shape from a factory:
 
 ```ts
 import { defineComponent, ref } from 'vue'
 import { z } from 'zod'
 
-export const name = 'dice'
-export const inject = ['tools', 'prompt', 'ui']
+export default {
+  name: 'dice',
+  inject: ['tools', 'prompt', 'ui'],
+  apply(ctx) {
+    const last = ref(0)
 
-export function apply(ctx) {
-  const last = ref(0)
+    ctx.tools.register({
+      name: 'roll_dice',
+      description: 'Roll an N-sided die.',
+      parameters: z.object({ sides: z.number().int().positive().default(6) }),
+      run: ({ sides }) => String(last.value = 1 + Math.floor(Math.random() * sides)),
+    })
 
-  ctx.tools.register({
-    name: 'roll_dice',
-    description: 'Roll an N-sided die.',
-    parameters: z.object({ sides: z.number().int().positive().default(6) }),
-    run: ({ sides }) => String(last.value = 1 + Math.floor(Math.random() * sides)),
-  })
+    ctx.prompt.register({
+      name: 'dice-guidance',
+      order: 60,
+      text: 'Use roll_dice when a random result is useful.',
+    })
 
-  ctx.prompt.register({
-    name: 'dice-guidance',
-    order: 60,
-    text: 'Use roll_dice when a random result is useful.',
-  })
-
-  ctx.ui.register({
-    name: 'dice-panel',
-    component: defineComponent({
-      template: '<div>Last roll: {{ last }}</div>',
-      setup(_, { expose }) {
-        expose({ last })
-        return { last }
-      },
-    }),
-  })
+    ctx.ui.register({
+      name: 'dice-panel',
+      component: defineComponent({
+        template: '<div>Last roll: {{ last }}</div>',
+        setup(_, { expose }) {
+          expose({ last })
+          return { last }
+        },
+      }),
+    })
+  }
 }
 ```
 
@@ -75,12 +76,22 @@ The compiler accepts a default Cordis function, class, or `{ apply }` object. UI
 
 ## Contribution services
 
-- `ToolsRuntime` owns explicit tool registrations and per-request snapshots. Names collide loudly across Fibers; disposal is token-guarded.
+- `ToolsRuntime` owns explicit tool registrations and per-request snapshots. Names collide loudly across Fibers; disposal checks registration identity.
 - `PromptRuntime` owns ordered prompt sections and assembles them at request time.
 - `UiService` owns named Vue panels. Contributions declare `region` and `order`; the shell renders `UiContributionsHost` per region, so panel code does not need Teleport or shell DOM knowledge. Its `Service` call tracing binds `register()` to the calling Fiber, so removing a plugin removes its panels automatically.
 - Custom services use `ctx.provide()`. Custom resources, watchers, workers, and timers use `ctx.effect()`.
 
 Cordis `Service` tracing is important here: inside `ctx.tools.register()`, the service sees the caller's context rather than the service provider's context. The tool therefore belongs to the capability that registered it.
+
+## Repository structure and startup
+
+`src/kernel/builtin-plugins.ts` is the trusted install catalog. Capability entries declare source entry, environment, auto-mount, permissions/providers, source policy and reload boundary. System entries declare grants and reload policy. Build selection, manifests, reserved names and source protection derive from these records. Runtime `inject` remains on each native Cordis definition; it is not duplicated in another registry.
+
+The two entries pass native infrastructure plugins to `runtime-supervisor.ts`. Stable names come from the definitions themselves. Required services use `inject`; an optional replaceable service such as the current LLM uses `ctx.get()` when needed. The ready barrier waits for required injections, `fs.ready`, `task.ready` and current system setup, including capability bootstrap. A Cordis `PENDING` Fiber is a stable state, so merely awaiting its mount handle is insufficient to declare the app ready. System wrapping preserves native metadata, including `Config` validation. System failures after an initially pending injection also reject the startup barrier.
+
+Large implementations are grouped by responsibility: manager activation/bootstrap/reload scheduling; loop prompt/stream helpers; compaction algorithm/prompts; page inspection/interaction/patches/dynamic rules/recipes. Only the large chat panel and model-profile control are separate from their registration. Tools, task-runtime, manager operations and small panels stay with their definitions. Extension page policy and artifact recording are owned by `page-policy`, independently of Vue mounting. The standalone shell owns modelConnection and restores the saved connection after runtime readiness, independently of the settings plugin. PageSession owns page reads and plugin operations; task commands own attachment, report creation, automatic naming and workspace refresh. Components keep editable drafts, display state and service calls. Known lifecycle events live in `shared/plugin-events.ts`; custom event names remain open.
+
+`scripts/plugin-bundle.ts` bundles local repository imports into one JavaScript artifact per capability. Vite watches all transitive source files, and the environment catalog selects which entries ship. Public Vue/Cordis/Zod/model/SDK imports stay external and use the same module instances as the runtime. The generated import prelude prepares lazy model modules. Blob ESM and the script fallback load the same artifact; the fallback handles its single export without interpreting code samples inside prompts. This is a build facility, not runtime access to arbitrary imports.
 
 ## Dynamic loading and HMR
 
@@ -91,14 +102,28 @@ Source policy is trusted runtime metadata, never capability-manifest data. `kern
 Editable-capability HMR follows this sequence:
 
 1. Receive the workspace provider's Cordis `workspace/changed` event.
-2. Compile/import the new source before touching the running Fiber.
-3. If compilation or activation fails, keep the old Fiber active and record `hmrError`; the edited file remains a working draft.
-4. If compilation succeeds, await old-Fiber disposal and mount a new Fiber with the prior config and capability manifest.
+2. Compile/import the new source and validate its manifest, native Config and replacement dependencies before touching the running Fiber.
+3. If compilation fails, keep the old Fiber active and record `hmrError`; the edited file remains a working draft.
+4. If compilation succeeds, await old-Fiber disposal and mount a new Fiber with the prior config and capability manifest. If activation fails, remount the prior definition; its in-memory instance state is not restored.
 5. While an agent run is active, keep one generation fixed through the current LLM request, tool dispatch snapshot, and every pre/post-execute hook. Commit pending source at the following `loop/safe-point`; the next internal request sees the new generation without replacing the task, broker, or loop session. `loop/idle` is the fallback for terminal and aborted runs.
 6. At a safe point, consume even a not-yet-mature 300-ms editor debounce so a tool that just edited a capability can use the new version on the next internal turn.
-7. Publish `.harness/capabilities/<id>/index.js` only after activation succeeds. On refresh, a rejected working draft falls back to this last active revision without overwriting the draft.
+7. Atomically publish manifest and source together in `.harness/capabilities/<id>/package.json` only after activation succeeds; restore the previous definition if this commit fails. On refresh, a rejected working draft falls back to this last active revision without overwriting the draft.
 
 The project is still pre-release, so there is no persisted plugin-format version gate. Source-dialect changes happen in place; `?reset` remains the explicit way to reseed shipped plugins during development.
+
+For the full feature, capability and system-plugin review with individual decisions, see [plugin-system-review.md](plugin-system-review.md).
+
+## State, authority and cancellation
+
+Manifest metadata describes installation, not a second contribution graph. Removed legacy contribution/dependency declarations are ignored on import. Tools, prompts and panels come from actual registrations; Cordis owns native services and listeners without claiming a complete secondary inventory. Install, mount, removal and HMR execute through one Manager command queue. Task attachment is state owned by the task runtime; Manager owns the corresponding plugin activation.
+
+The trusted shell resolves permissions from its builtin catalog or explicitly approved custom grants stored outside public sandbox storage. Caller-supplied permission/provider lists are not authority. All requests share request IDs, deadlines and cancellation messages; pending approval is cancelled and rechecked before dispatch. Streams and ordinary requests share one sandbox exchange implementation. Cancellation propagates to LLM/MCP, Worker execution and temporary web tabs. Already completed external effects cannot be undone by cancellation.
+
+Each host has one runtime writer, enforced by a trusted Web Lock. The second same-host panel reports that another runtime owns the tasks. Task commands serialize atomic database snapshots containing sessions, resources, events and checkpoints. Legacy files are imported, but new writes use tasks.json. Failed writes roll back projected state; switching/clearing is rejected during runs. UI does not set runtime status or mutate durable conversations directly.
+
+Compilation/metadata rejection preserves the old plugin instance. Apply or package-write failure recreates and validates the previous definition; durable state lives outside disposable plugins. Core system plugins require runtime restart. There is no guarantee of restoring arbitrary plugin-local closures.
+
+The shared sandbox is still one trust domain, not isolation between hostile plugins. Host-owned grants prevent self-declared permission expansion but do not make shared-realm identities unforgeable. Standalone configuration shares its origin with plugin code. Browser permissions and real extension reloads still require native Chrome acceptance.
 
 ## Why Cordis is in the browser
 

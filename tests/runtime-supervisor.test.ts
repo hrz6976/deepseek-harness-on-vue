@@ -2,32 +2,54 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runtime } from '@/kernel/cordis';
 import { startHarnessRuntime } from '@/kernel/runtime-supervisor';
-import { fsPlugin } from '@/plugins/fs';
+import { capabilities } from '@/kernel/capabilities';
 
-test('runtime readiness waits for every required Cordis service', async () => {
-  const requiredServices = ['fs', 'modelProfiles', 'tools', 'prompt', 'loop', 'task'];
+test('runtime readiness waits for required services, workspace/task restoration, and capability bootstrap', async () => {
+  let loadWorkspace!: () => void;
+  let saveTask!: () => void;
+  let provideProfiles!: () => void;
+  const workspaceReady = new Promise<void>(resolve => { loadWorkspace = resolve; });
+  const taskSaved = new Promise<void>(resolve => { saveTask = resolve; });
+  const files = new Map<string, string>();
   const harness = startHarnessRuntime({
-    defaults: {},
+    defaults: { alpha: { source: 'export function apply() {}', autoMount: true } },
     infrastructure: [
-      { name: 'workspace', plugin: fsPlugin },
       {
-        name: 'delayed-profile-service',
-        plugin: {
-          name: 'delayed-profile-service',
-          apply(ctx) {
-            setTimeout(() => ctx.provide('modelProfiles', {}), 20);
-          },
+        name: 'workspace',
+        apply(ctx) {
+          ctx.provide('fs', {
+            ready: workspaceReady, files,
+            read: (path: string) => files.get(path) ?? null,
+            list: () => [...files.keys()],
+            async write(path: string, content: string) {
+              await taskSaved;
+              files.set(path, content);
+            },
+            async remove(path: string) { files.delete(path); },
+          });
         },
       },
+      {
+        name: 'model-profiles',
+        apply(ctx) { provideProfiles = () => { ctx.provide('modelProfiles', {}); }; },
+      },
     ],
-    requiredServices,
+    requiredServices: ['modelProfiles'],
   });
-
   let ready = false;
   void harness.ready.then(() => { ready = true; });
-  await new Promise(resolve => setTimeout(resolve, 0));
+  const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+  await tick();
+  assert.ok(runtime.get('task'), 'service registration alone is not readiness');
   assert.equal(ready, false);
-
+  provideProfiles();
+  await tick();
+  assert.equal(ready, false, 'workspace still loading');
+  loadWorkspace();
+  await tick();
+  assert.equal(ready, false, 'initial task still saving');
+  saveTask();
   await harness.ready;
-  assert.deepEqual(requiredServices.filter(name => !runtime.reflect.get(name)), []);
+  assert.ok(runtime.task.activeTask());
+  assert.equal(capabilities.get('alpha')?.status, 'active');
 });
